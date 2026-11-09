@@ -193,3 +193,7 @@ let _guard = instance::lock("myrust-app")?;
 ## License
 
 MIT
+
+---
+
+*Inspired by [mygo](https://github.com/egoist/mygo) — desktop apps in Go.*
