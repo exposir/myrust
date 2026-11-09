@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.svg" alt="myrust" width="320">
+</p>
+
 # myrust
 
 **Desktop apps in Rust, with a web frontend or a native WebView.**
