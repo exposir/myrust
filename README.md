@@ -2,11 +2,11 @@
   <img src="docs/logo.svg" alt="MyRust" width="320">
 </p>
 
-# myrust
+# MyRust
 
 **Desktop apps in Rust, with a web frontend or a native WebView.**
 
-Each myrust window loads a **web page** in the system's native WebView — WKWebView on macOS, WebKitGTK on Linux, WebView2 on Windows. Build the frontend with any web framework; it calls your Rust code through typed IPC with auto-generated TypeScript bindings.
+Each MyRust window loads a **web page** in the system's native WebView — WKWebView on macOS, WebKitGTK on Linux, WebView2 on Windows. Build the frontend with any web framework; it calls your Rust code through typed IPC with auto-generated TypeScript bindings.
 
 - **Pure Rust, no `unsafe`** — the core crate uses `#![forbid(unsafe_code)]`.
 - **Typed IPC for pages** — register Rust handlers, generate TypeScript clients automatically; stream values through channels and send typed events.
