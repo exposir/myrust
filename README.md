@@ -1,43 +1,73 @@
 # myrust
 
-**Desktop apps in Rust, with a web frontend or native WebView.**
+**Desktop apps in Rust, with a web frontend or a native WebView.**
 
-<p align="center">
-  <img src="docs/screenshot.png" alt="myrust Dashboard" width="720">
-</p>
+Each myrust window loads a **web page** in the system's native WebView — WKWebView on macOS, WebKitGTK on Linux, WebView2 on Windows. Build the frontend with any web framework; it calls your Rust code through typed IPC with auto-generated TypeScript bindings.
 
-<p align="center">
-  <em>The Dashboard example — runs as a native WebView window or in a browser.</em>
-</p>
+- **Pure Rust, no `unsafe`** — the core crate uses `#![forbid(unsafe_code)]`.
+- **Typed IPC for pages** — register Rust handlers, generate TypeScript clients automatically; stream values through channels and send typed events.
+- **System WebView** — uses the OS-native renderer; small binaries, low memory, instant startup.
+- **Dual mode** — the same source runs as a native desktop window or a standalone HTTP server.
+- **Desktop APIs** — windows, system tray, notifications, file dialogs, global shortcuts, and a single-instance lock.
+- **Hot reload** — watches frontend assets and reloads all WebViews on change.
+- **Ready to extend** — workspace structure with a core library, CLI tool, and examples.
 
-myrust is a Rust framework for building cross-platform desktop applications. Each window runs a **web page** in the system's native WebView — WKWebView on macOS, WebKitGTK on Linux, WebView2 on Windows. Build the frontend with any web framework; it calls your Rust code through typed IPC with auto-generated TypeScript bindings.
+## A window with a web page, whose frontend calls Rust
 
-> Phase 1 delivers the web-viewer foundation: multi-window management, typed IPC, desktop APIs, and a CLI tool. A native GPU-rendered UI toolkit (wgpu) is planned for Phase 3.
+```rust
+use myrust_core::app::{App, WindowConfig};
+use myrust_core::ipc::{IpcRouter, IpcType, NoRequest};
+use myrust_core::webview::{PageSource, WebViewConfig};
+use serde::{Serialize, Deserialize};
 
-## Features
+#[derive(Serialize, Deserialize)]
+struct GreetResponse { message: String }
 
-- **Pure Rust, no unsafe code** — the core crate is `#![forbid(unsafe_code)]`.
-- **System WebView** — uses the OS-native renderer; small binaries, low memory.
-- **Typed IPC** — register Rust handlers, generate TypeScript clients automatically.
-- **Desktop APIs** — system tray, notifications, file dialogs, global shortcuts, single-instance lock.
-- **Dual mode** — same app runs as a native desktop window or a web server.
-- **Hot reload** — watches frontend assets and reloads WebViews on change.
-- **Workspace structure** — `myrust-core` library, `myrust-cli` tool, and standalone examples.
+fn main() -> Result<()> {
+    let mut app = App::new("my-app")?;
+    app.ipc_router().register::<NoRequest, GreetResponse, _>(
+        "greet",
+        "Returns a greeting.",
+        |_| Ok(GreetResponse { message: "Hello from Rust!".into() }),
+    )?;
+
+    app.on_ready(|ctx| {
+        ctx.create_window(WindowConfig {
+            title: "Hello".into(),
+            webview: Some(WebViewConfig {
+                source: PageSource::Html(HTML.into()),
+                devtools: false,
+            }),
+            ..Default::default()
+        })?;
+        Ok(())
+    });
+
+    app.run()
+}
+```
+
+```typescript
+// Generated — myrust.d.ts
+export const greet: () => Promise<GreetResponse>;
+
+// In your page
+const res = await greet();
+document.body.textContent = res.message;
+```
 
 ## Getting started
 
+With Rust 1.92+, build the example dashboard:
+
 ```bash
-# Build the dashboard example
-cargo build -p dashboard
-
-# Run in browser mode
+# Run in browser mode, then open http://0.0.0.0:8090
 cargo run -p dashboard -- --web
-# Open http://0.0.0.0:8090
 
-# Run in desktop mode (native WebView window)
+# Run as a native desktop window (system WebView)
 cargo run -p dashboard
 
-# Generate TypeScript declarations
+# Generate TypeScript IPC declarations
 cargo run -p dashboard -- --generate-ts
 ```
 
@@ -88,45 +118,37 @@ myrust/
 └── frontend/               # Web frontend assets
 ```
 
-## IPC example
+## IPC
 
-**Rust** — register a typed handler:
+Register a typed handler on the router:
 
 ```rust
-use myrust_core::ipc::{IpcRouter, IpcType};
-
-// Types are automatically derived for serde + TS generation
-#[derive(Serialize, Deserialize)]
-struct Stats { cpu: f64, memory: f64 }
-
-impl IpcType for Stats {
-    const TS_NAME: &'static str = "Stats";
-    const TS_DECLARATION: &'static str = r#"
-export interface Stats { cpu: number; memory: number }
-"#;
-}
-
-// Register on the router
-router.register::<NoRequest, Stats, _>(
-    "get_stats",
-    "Returns system stats.",
-    |_| Ok(Stats { cpu: 42.0, memory: 66.0 }),
+router.register::<RequestType, ResponseType, ErrorType>(
+    "channel_name",
+    "Description of what this handler does.",
+    |request| { /* ... */ },
 )?;
 ```
 
-**JavaScript** — call from the WebView:
+The WebView receives the JavaScript bridge script automatically:
 
 ```js
-const stats = await window.__myrust_ipc__.invoke("get_stats");
-console.log(stats.cpu); // 42.0
+// Request-response
+const result = await window.__myrust_ipc__.invoke("channel", payload);
 
 // Listen for Rust-pushed events
-window.__myrust_ipc__.on("stats_updated", (data) => { /* ... */ });
+window.__myrust_ipc__.on("event_channel", (data) => { /* ... */ });
 ```
 
-The generated **TypeScript declaration** (`frontend/myrust.d.ts`):
+Run with `--generate-ts` to produce `frontend/myrust.d.ts`:
 
 ```typescript
+export interface Stats {
+  cpu: CpuStats;
+  memory: MemoryStats;
+  disks: DiskStats[];
+  // ...
+}
 export const getStats: () => Promise<Stats>;
 ```
 
@@ -134,23 +156,21 @@ export const getStats: () => Promise<Stats>;
 
 ```rust
 // System tray
-let tray = TrayBuilder::new("app-icon.png")
+let tray = tray::TrayBuilder::new("icon.png")
     .on_click(|event| println!("{event:?}"))
     .build()?;
 
 // Notification
-notify::send("Hello", "myrust is running", None)?;
+notify::send("myrust", "Hello from the system tray", None)?;
 
 // File dialog
-let path = dialog::open_file(Some("Select a file"))?;
+let path = dialog::open_file(Some("Choose a file"))?;
 
 // Global shortcut
-let shortcut = GlobalShortcut::register("Ctrl+Shift+D", || {
-    println!("triggered");
-})?;
+shortcut::register("Ctrl+Shift+D", || println!("Triggered!"))?;
 
 // Single instance
-let guard = SingleInstanceGuard::lock("myrust-app")?;
+let _guard = instance::lock("myrust-app")?;
 ```
 
 ## Project status
@@ -162,9 +182,9 @@ let guard = SingleInstanceGuard::lock("myrust-app")?;
 | Phase | Focus |
 |-------|-------|
 | **✓ Phase 1** | Multi-window WebView, typed IPC, desktop APIs, CLI |
-| **Phase 2** | Menu system, drag & drop, deep links, auto-updater |
-| **Phase 3** | wgpu native UI renderer (flexbox/grid layout, widgets, SVG) |
-| **Phase 4** | Packaging (.app, .dmg, .msi, .deb, PKGBUILD) |
+| **Phase 2** | Menu system, drag & drop, deep links, auto-updater skeleton |
+| **Phase 3** | wgpu native UI renderer (flexbox/grid layout, widgets, SVG, Liquid Glass) |
+| **Phase 4** | Packaging (.app, .dmg, .msi, .deb, PKGBUILD, code signing, delta updates) |
 
 ## License
 
