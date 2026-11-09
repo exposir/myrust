@@ -8,9 +8,9 @@
 
 Each MyRust window loads a **web page** in the system's native WebView — WKWebView on macOS, WebKitGTK on Linux, WebView2 on Windows. Build the frontend with any web framework; it calls your Rust code through typed IPC with auto-generated TypeScript bindings.
 
-- **Pure Rust, no `unsafe`** — the core crate uses `#![forbid(unsafe_code)]`.
-- **Typed IPC for pages** — register Rust handlers, generate TypeScript clients automatically; stream values through channels and send typed events.
-- **System WebView** — uses the OS-native renderer; small binaries, low memory, instant startup.
+- **No `unsafe` in the core** — `myrust-core` uses `#![forbid(unsafe_code)]` (platform WebView backends are provided by upstream crates).
+- **Typed IPC for pages** — register Rust handlers and generate TypeScript clients from them; pages can also subscribe to Rust-pushed events.
+- **System WebView** — uses the OS-native renderer instead of bundling a browser engine.
 - **Dual mode** — the same source runs as a native desktop window or a standalone HTTP server.
 - **Desktop APIs** — windows, system tray, notifications, file dialogs, global shortcuts, and a single-instance lock.
 - **Hot reload** — watches frontend assets and reloads all WebViews on change.
@@ -179,7 +179,7 @@ let _guard = instance::lock("myrust-app")?;
 
 ## Project status
 
-**Phase 1** — foundation complete. The core crate, WebView wrapper, typed IPC, desktop APIs, CLI, and dashboard example compile and run on all three platforms.
+**Phase 1** — foundation complete. The core crate, WebView wrapper, typed IPC, desktop APIs, CLI, and dashboard example build and run on Linux. macOS and Windows backends are implemented via wry/tao but not yet verified on those platforms.
 
 ### Roadmap
 
@@ -187,7 +187,7 @@ let _guard = instance::lock("myrust-app")?;
 |-------|-------|
 | **✓ Phase 1** | Multi-window WebView, typed IPC, desktop APIs, CLI |
 | **Phase 2** | Menu system, drag & drop, deep links, auto-updater skeleton |
-| **Phase 3** | wgpu native UI renderer (flexbox/grid layout, widgets, SVG, Liquid Glass) |
+| **Phase 3** | wgpu-based native UI renderer (flexbox/grid layout, widgets, SVG) — not started |
 | **Phase 4** | Packaging (.app, .dmg, .msi, .deb, PKGBUILD, code signing, delta updates) |
 
 ## License
