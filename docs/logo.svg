@@ -59,8 +59,8 @@
   <!-- ========== 中心圆孔 ========== -->
   <circle class="cut" cx="200" cy="200" r="9"/>
 
-  <!-- ========== 文字 "myrust" ========== -->
-  <text class="text" x="200" y="365" text-anchor="middle" font-size="48" font-weight="700" letter-spacing="3">myrust</text>
+  <!-- ========== 文字 "MyRust" ========== -->
+  <text class="text" x="200" y="365" text-anchor="middle" font-size="48" font-weight="700" letter-spacing="3">MyRust</text>
 
   <!-- 下划线 = 齿轮宽度 -->
   <line class="fill" x1="120" y1="392" x2="280" y2="392" stroke="#2D2E2A" stroke-width="3" stroke-linecap="round"/>

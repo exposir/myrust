@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.svg" alt="myrust" width="320">
+  <img src="docs/logo.svg" alt="MyRust" width="320">
 </p>
 
 # myrust
