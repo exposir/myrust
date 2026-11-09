@@ -1,0 +1,14 @@
+[package]
+name = "myrust-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Command-line tooling for myrust"
+
+[[bin]]
+name = "myrust"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true

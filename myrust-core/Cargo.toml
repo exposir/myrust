@@ -1,0 +1,23 @@
+[package]
+name = "myrust-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Desktop application framework for myrust"
+
+[dependencies]
+anyhow.workspace = true
+global-hotkey.workspace = true
+notify-rust.workspace = true
+rfd.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_repr.workspace = true
+single-instance.workspace = true
+tao.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tray-icon.workspace = true
+wry.workspace = true

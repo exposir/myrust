@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dash — 系统监控面板</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#0b0d12;--surface:rgba(255,255,255,.04);--border:rgba(255,255,255,.06);--text:#cdd2db;--dim:#6b7280;--cyan:#22d3ee;--purple:#a78bfa;--orange:#fb923c;--green:#4ade80;--red:#f87171;--r:16px}
+html{font-size:14px}
+body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI","PingFang SC","Hiragino Sans GB",sans-serif;background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden;-webkit-font-smoothing:antialiased}
+header{display:flex;align-items:center;gap:16px;padding:20px 32px;backdrop-filter:blur(12px);border-bottom:1px solid var(--border);position:relative;z-index:1}
+.logo{display:flex;align-items:center;gap:10px;font-size:1.25rem;font-weight:700;color:#f1f5f9}
+.info{display:flex;gap:4px;color:var(--dim);font-size:.85rem;flex:1}
+.sep{opacity:.35}.clock{font-variant-numeric:tabular-nums;font-size:1.1rem;font-weight:500;color:var(--cyan);letter-spacing:.05em}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;padding:24px 32px 32px;max-width:1200px;margin:0 auto;position:relative;z-index:1}
+.card{background:var(--surface);backdrop-filter:blur(16px);border:1px solid var(--border);border-radius:var(--r);padding:24px;transition:border-color .2s,box-shadow .2s,transform .15s}
+.card:hover{border-color:rgba(255,255,255,.1);box-shadow:0 8px 40px rgba(0,0,0,.3);transform:translateY(-1px)}
+.card h2{font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin-bottom:18px;display:flex;align-items:center;gap:8px}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;box-shadow:0 0 8px rgba(0,0,0,.3)}
+.d-cyan{background:var(--cyan);box-shadow:0 0 8px rgba(34,211,238,.5)}
+.d-purple{background:var(--purple);box-shadow:0 0 8px rgba(167,139,250,.5)}
+.d-orange{background:var(--orange);box-shadow:0 0 8px rgba(251,146,60,.5)}
+.d-green{background:var(--green);box-shadow:0 0 8px rgba(74,222,128,.5)}
+.d-red{background:var(--red);box-shadow:0 0 8px rgba(248,113,113,.5)}
+.gw{display:flex;justify-content:center;margin-bottom:16px}
+.gauge{width:140px;height:140px;transform:rotate(-90deg)}
+.gb{fill:none;stroke:rgba(255,255,255,.05);stroke-width:8}
+.gf{fill:none;stroke-width:8;stroke-linecap:round;transition:stroke-dashoffset .6s cubic-bezier(.4,0,.2,1)}
+.gl{fill:#f1f5f9;font-size:20px;font-weight:700;dominant-baseline:central;text-anchor:middle}
+.cg{display:flex;gap:4px;justify-content:center;margin-top:4px}
+.cb{width:20px;border-radius:4px;background:var(--surface);transition:height .35s cubic-bezier(.4,0,.2,1)}
+.md{text-align:center;font-size:1.15rem;font-weight:500}
+.md .u{color:var(--dim);font-size:.9rem;margin-left:2px}
+.di{margin-bottom:14px}.di:last-child{margin-bottom:0}
+.dh{display:flex;justify-content:space-between;font-size:.9rem;margin-bottom:6px}
+.dt{height:6px;border-radius:3px;background:var(--surface);overflow:hidden}
+.df{height:100%;border-radius:3px;transition:width .5s cubic-bezier(.4,0,.2,1)}
+.sp{display:flex;align-items:flex-end;gap:3px;height:80px;margin-bottom:8px}
+.sb{flex:1;border-radius:3px 3px 0 0;background:linear-gradient(to top,rgba(74,222,128,.15),rgba(74,222,128,.55));transition:height .35s;min-height:4px}
+.tl{text-align:center;color:var(--dim);font-size:.8rem}
+.pt{width:100%;border-collapse:collapse;font-size:.9rem}
+.pt th{text-align:left;color:var(--dim);font-weight:500;font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;padding-bottom:10px;border-bottom:1px solid var(--border)}
+.pt td{padding:7px 0;border-bottom:1px solid rgba(255,255,255,.03)}
+.pt tr:last-child td{border-bottom:none}
+.pt td:nth-child(3),.pt td:nth-child(4){font-variant-numeric:tabular-nums}
+footer{text-align:center;color:var(--dim);font-size:.75rem;padding:0 32px 20px;position:relative;z-index:1}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3" fill="currentColor"/><line x1="12" y1="3" x2="12" y2="7"/><line x1="12" y1="17" x2="12" y2="21"/><line x1="3" y1="12" x2="7" y2="12"/><line x1="17" y1="12" x2="21" y2="12"/></svg>
+    <span>Dash</span>
+  </div>
+  <div class="info"><span id="hostname"></span><span class="sep"> · </span><span id="os"></span><span class="sep"> · </span><span id="uptime"></span></div>
+  <div class="clock" id="clock"></div>
+</header>
+
+<main class="grid">
+  <section class="card">
+    <h2><span class="dot d-cyan"></span>CPU</h2>
+    <div class="gw">
+      <svg class="gauge" viewBox="0 0 120 120">
+        <circle class="gb" cx="60" cy="60" r="52"/>
+        <circle class="gf" id="cpuRing" cx="60" cy="60" r="52" stroke-dasharray="326.7" stroke-dashoffset="163.3" stroke="url(#gc)"/>
+        <text class="gl" id="cpuPct" x="60" y="60" transform="rotate(90 60 60)">0%</text>
+      </svg>
+    </div>
+    <div class="cg" id="cpuCores"></div>
+  </section>
+
+  <section class="card">
+    <h2><span class="dot d-purple"></span>内存</h2>
+    <div class="gw">
+      <svg class="gauge" viewBox="0 0 120 120">
+        <circle class="gb" cx="60" cy="60" r="52"/>
+        <circle class="gf" id="memRing" cx="60" cy="60" r="52" stroke-dasharray="326.7" stroke-dashoffset="163.3" stroke="url(#gp)"/>
+        <text class="gl" id="memPct" x="60" y="60" transform="rotate(90 60 60)">0%</text>
+      </svg>
+    </div>
+    <div class="md"><span id="memUsed">—</span><span class="sep"> / </span><span id="memTotal">—</span><span class="u"> GB</span></div>
+  </section>
+
+  <section class="card">
+    <h2><span class="dot d-orange"></span>磁盘</h2>
+    <div id="diskList"></div>
+  </section>
+
+  <section class="card">
+    <h2><span class="dot d-green"></span>实时负载</h2>
+    <div class="sp" id="sparkline"></div>
+    <p class="tl">最近 12s CPU 负载</p>
+  </section>
+
+  <section class="card">
+    <h2><span class="dot d-red"></span>Top 进程</h2>
+    <table class="pt"><thead><tr><th>PID</th><th>名称</th><th>CPU%</th><th>Mem</th></tr></thead><tbody id="procBody"></tbody></table>
+  </section>
+</main>
+
+<footer><span id="lastUpd"></span></footer>
+
+<svg style="position:absolute;width:0;height:0"><defs>
+<linearGradient id="gc" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#22d3ee"/><stop offset="100%" stop-color="#06b6d4"/></linearGradient>
+<linearGradient id="gp" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#a78bfa"/><stop offset="100%" stop-color="#8b5cf6"/></linearGradient>
+</defs></svg>
+
+<script>
+const $ = id => document.getElementById(id);
+const C = 2*Math.PI*52;
+
+function setRing(el, pct) {
+  el.setAttribute('stroke-dashoffset', C - Math.min(100,Math.max(0,pct))/100*C);
+}
+
+function render(s) {
+  $('cpuPct').textContent = s.cpu.percent+'%';
+  setRing($('cpuRing'), s.cpu.percent);
+  $('cpuCores').innerHTML = s.cpu.corePcts.map(v =>
+    `<div class="cb" style="height:${v/100*72}px;background:linear-gradient(to top,rgba(34,211,238,.2),rgba(34,211,238,${.2+v/200}))"></div>`
+  ).join('');
+
+  $('memPct').textContent = s.memory.percent+'%';
+  setRing($('memRing'), s.memory.percent);
+  $('memUsed').textContent = s.memory.usedGb;
+  $('memTotal').textContent = s.memory.totalGb;
+
+  $('diskList').innerHTML = s.disks.map(d =>
+    `<div class="di"><div class="dh"><span>${d.name}</span><span>${d.usedGb} GB / ${d.totalGb} GB</span></div><div class="dt"><div class="df" style="width:${d.percent}%;background:linear-gradient(90deg,var(--orange),#f97316)"></div></div></div>`
+  ).join('');
+
+  const spark = $('sparkline');
+  spark.innerHTML = Array.from({length:12}, () =>
+    `<div class="sb" style="height:${Math.floor(Math.random()*76+8)}%"></div>`
+  ).join('');
+
+  $('procBody').innerHTML = [
+    [3421,'kernel_task',12.3,'48M'],[1287,'WindowServer',8.7,'324M'],
+    [5612,'Dash',6.2,'18M'],[2340,'Terminal',4.1,'92M'],[6712,'Code',3.8,'512M'],
+  ].map(r => `<tr>${r.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('');
+
+  $('hostname').textContent = s.hostname;
+  $('os').textContent = s.os;
+  $('uptime').textContent = s.uptime;
+  $('clock').textContent = s.time;
+  $('lastUpd').textContent = '最后更新 '+new Date().toLocaleTimeString('zh-CN',{hour12:false});
+}
+
+async function refresh() {
+  try {
+    const stats = window.__myrust_ipc__
+      ? await window.__myrust_ipc__.invoke('get_stats')
+      : await fetch('/api/stats', {cache: 'no-store'}).then(response => {
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return response.json();
+        });
+    render(stats);
+  } catch (error) {
+    console.error('加载系统状态失败:', error);
+    $('lastUpd').textContent = '数据加载失败';
+  }
+}
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
