@@ -12,8 +12,29 @@ pub mod app;
 pub mod desktop;
 /// Typed inter-process communication between Rust and WebView JavaScript.
 pub mod ipc;
+/// Release, distribution, signing, and update support.
+pub mod release;
 /// Wry-based WebView wrapper.
 pub mod webview;
 
-pub use app::{App, AppContext, WindowConfig, WindowId, WindowInfo};
-pub use webview::{PageSource, WebViewConfig, WebViewHandle};
+pub use app::file_watcher::{
+    FileEvent, FileEventDetail, FileEventKind, FileWatcher, WatchHandle, WatchOptions,
+};
+pub use app::recent_documents::{JumpList, RecentDocument, RecentDocuments, UnsupportedJumpList};
+pub use app::window_state::{JsonFileStore, WindowState, WindowStateStore};
+pub use app::{App, AppContext, Rect, TitleButtons, Vibrancy, WindowConfig, WindowId, WindowInfo};
+pub use desktop::{
+    Activation, CustomProtocol, DownloadEvent, DownloadHandler, DownloadPolicy,
+    DownloadPolicyHandler, ProtocolHandler, ProtocolResponse, SingleInstance,
+};
+pub use release::{
+    HttpUpdateSource, LocalUpdateSource, PackageConfig, PackageOutput, Packager, SignatureVerifier,
+    SigningConfig, SigningPlatform, UnimplementedSignatureVerifier, UpdateInfo, UpdateSource,
+    Updater,
+};
+pub use webview::{
+    ContentLoadType, ContentResourceType, ContentRule, ContentRuleAction, ContentRuleTrigger,
+    FileDropEvent, FileDropHandler, FileDropKind, FindOptions, MemorySessionStateStore, PageHandle,
+    PageOptions, PageSource, ScrollPosition, Session, SessionHistoryEntry, SessionKind,
+    SessionState, SessionStateStore, WebViewConfig, WebViewHandle,
+};

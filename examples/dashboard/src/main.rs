@@ -7,7 +7,10 @@ use std::{
     env,
     net::SocketAddr,
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -20,9 +23,16 @@ use axum::{
     Json, Router,
 };
 use myrust_core::{
-    app::{App, WindowConfig},
+    app::{
+        file_watcher::{FileWatcher, WatchOptions},
+        recent_documents::RecentDocuments,
+        window_state::JsonFileStore,
+        App, WindowConfig,
+    },
+    desktop::menu::{Menu, MenuBuilder},
     ipc::{IpcError, IpcRouter, IpcType, NoRequest},
-    webview::{PageSource, WebViewConfig},
+    release::packager::{PackageConfig, Packager},
+    webview::{FileDropKind, PageOptions, PageSource, Session, SessionKind, WebViewConfig},
 };
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
@@ -150,20 +160,121 @@ fn run_desktop(args: &[String]) -> Result<()> {
         return Ok(());
     }
 
+    if args.iter().any(|argument| argument == "--package-describe") {
+        let output = Packager::generate(
+            &PackageConfig {
+                app_id: "myrust-dashboard".to_string(),
+                name: "myrust Dashboard".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                author: "myrust".to_string(),
+                identifier: "dev.myrust.dashboard".to_string(),
+                resources: Vec::new(),
+                icons: Vec::new(),
+            },
+            frontend_dir().join("../target/package"),
+        )?;
+        println!("package description files: {}", output.files.len());
+        for file in output.files {
+            println!("{}", file.display());
+        }
+        return Ok(());
+    }
+
     if env::var_os("MYRUST_DEV").is_some() {
         app.watch_path(frontend_dir());
     }
 
-    app.on_ready(|context| {
+    let state_store = Arc::new(JsonFileStore::new("myrust-dashboard")?);
+    app.restore_window_state(state_store);
+    let recent_documents = Arc::new(RecentDocuments::new("myrust-dashboard")?);
+    let watcher = FileWatcher::watch_with(
+        frontend_dir(),
+        WatchOptions {
+            recursive: true,
+            hints_only: true,
+        },
+    )?;
+    std::thread::spawn(move || {
+        while let Ok(Some(event)) = watcher.recv() {
+            tracing::debug!(?event, "dashboard asset changed");
+        }
+    });
+    app.register_deep_link("myrust-dashboard")?;
+    app.on_open_url(move |context, url| {
+        tracing::info!(%url, "deep link opened");
+        if let Some(window) = context.windows().first() {
+            context.set_window_title(window.id, format!("myrust Dashboard - {url}"))?;
+        }
+        Ok(())
+    });
+
+    let menu = build_app_menu()?;
+    app.set_app_menu(menu);
+    app.on_menu_event(|context, event| {
+        match event.id.as_str() {
+            "refresh" => {
+                for window in context.windows() {
+                    context.page(window.id)?.reload()?;
+                }
+            }
+            "about" => {
+                tracing::info!("myrust Dashboard Phase 2");
+            }
+            "fit" => {
+                if let Some(window) = context.windows().first() {
+                    context.fit_content(window.id)?;
+                }
+            }
+            "quit" => context.quit(),
+            _ => {}
+        }
+        Ok(())
+    });
+    let recent_documents_for_drop = recent_documents.clone();
+    app.on_file_drop(move |context, window_id, event| {
+        if event.kind == FileDropKind::Dropped {
+            if let Some(path) = event.paths.first() {
+                let _ = recent_documents_for_drop.add(path);
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("dropped file");
+                context.set_window_title(window_id, format!("myrust Dashboard - {name}"))?;
+            }
+        }
+        Ok(())
+    });
+
+    let session = Session::new(
+        "myrust-dashboard",
+        SessionKind::Persistent("dashboard-main".to_string()),
+    )?;
+    app.on_ready(move |context| {
         let html = embedded_index()?;
         let config = WindowConfig {
             title: "myrust Dashboard".to_string(),
             width: 1200.0,
             height: 860.0,
             min_size: Some((760.0, 600.0)),
+            window_key: Some("dashboard-main".to_string()),
             webview: Some(WebViewConfig {
                 source: PageSource::Html(html),
                 devtools: cfg!(debug_assertions),
+                on_file_drop: Some(Arc::new(|event| {
+                    if event.kind == FileDropKind::Dropped {
+                        tracing::info!(
+                            paths = ?event.paths,
+                            position = ?event.position,
+                            "WebView file drop"
+                        );
+                    }
+                })),
+                page_options: PageOptions {
+                    devtools: cfg!(debug_assertions),
+                    ..PageOptions::default()
+                },
+                session: Some(session.clone()),
+                ..WebViewConfig::default()
             }),
             ..WindowConfig::default()
         };
@@ -172,6 +283,18 @@ fn run_desktop(args: &[String]) -> Result<()> {
     });
 
     app.run()
+}
+
+fn build_app_menu() -> Result<Menu> {
+    MenuBuilder::new()
+        .add_submenu("Dashboard", |menu| {
+            menu.add_item("refresh", "Refresh Stats")
+                .add_separator()
+                .add_item("fit", "Fit Content")
+                .add_item("about", "About")
+                .add_item("quit", "Quit")
+        })
+        .build()
 }
 
 fn register_ipc(router: &IpcRouter, state: StatsState) -> Result<(), IpcError> {

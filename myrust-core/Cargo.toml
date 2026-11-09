@@ -8,16 +8,34 @@ description = "Desktop application framework for myrust"
 
 [dependencies]
 anyhow.workspace = true
+arboard.workspace = true
+auto-launch.workspace = true
+dark-light.workspace = true
+dirs.workspace = true
+flate2.workspace = true
 global-hotkey.workspace = true
+muda.workspace = true
+notify.workspace = true
 notify-rust.workspace = true
+reqwest.workspace = true
 rfd.workspace = true
+semver.workspace = true
+sha2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_repr.workspace = true
 single-instance.workspace = true
+souvlaki.workspace = true
+sys-locale.workspace = true
+tar.workspace = true
+tempfile.workspace = true
 tao.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tray-icon.workspace = true
 wry.workspace = true
+zip.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk.workspace = true

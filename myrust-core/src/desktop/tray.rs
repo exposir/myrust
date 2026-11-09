@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use tray_icon::{
-    menu::{Menu, MenuEvent, MenuItem},
+    menu::{Menu, MenuItem},
     Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent, TrayIconId,
 };
 
@@ -187,6 +187,7 @@ impl SystemTray {
     /// Call this from the application's main thread after the native toolkit
     /// has been initialized.
     pub fn new(config: SystemTrayConfig) -> Result<Self> {
+        super::menu::ensure_menu_event_dispatcher();
         install_global_handlers();
 
         let tray_id = TrayIconId::new(&config.id);
@@ -274,20 +275,20 @@ fn install_global_handlers() {
             };
             dispatch_tray_event(&tray_id, event);
         }));
-
-        MenuEvent::set_event_handler(Some(|event: MenuEvent| {
-            let key = event.id().0.clone();
-            let Some((tray_id, item_id)) = key.split_once('/') else {
-                return;
-            };
-            dispatch_tray_event(
-                tray_id,
-                TrayEvent::MenuItem {
-                    id: item_id.to_string(),
-                },
-            );
-        }));
     });
+}
+
+/// Routes a prefixed tray menu id to the matching tray callback.
+pub(crate) fn route_tray_menu_event(menu_id: &str) {
+    let Some((tray_id, item_id)) = menu_id.split_once('/') else {
+        return;
+    };
+    dispatch_tray_event(
+        tray_id,
+        TrayEvent::MenuItem {
+            id: item_id.to_string(),
+        },
+    );
 }
 
 fn convert_tray_event(event: TrayIconEvent) -> Option<TrayEvent> {
