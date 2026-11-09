@@ -2,6 +2,14 @@
 
 **Desktop apps in Rust, with a web frontend or native WebView.**
 
+<p align="center">
+  <img src="docs/screenshot.png" alt="myrust Dashboard" width="720">
+</p>
+
+<p align="center">
+  <em>The Dashboard example — runs as a native WebView window or in a browser.</em>
+</p>
+
 myrust is a Rust framework for building cross-platform desktop applications. Each window runs a **web page** in the system's native WebView — WKWebView on macOS, WebKitGTK on Linux, WebView2 on Windows. Build the frontend with any web framework; it calls your Rust code through typed IPC with auto-generated TypeScript bindings.
 
 > Phase 1 delivers the web-viewer foundation: multi-window management, typed IPC, desktop APIs, and a CLI tool. A native GPU-rendered UI toolkit (wgpu) is planned for Phase 3.
