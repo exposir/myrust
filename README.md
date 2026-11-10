@@ -76,9 +76,26 @@ cargo run -p dashboard -- --web
 # Run as a native desktop window (system WebView)
 cargo run -p dashboard
 
+# Run the native self-drawn UI demo
+cargo run -p dashboard -- --native-ui
+
 # Generate TypeScript IPC declarations
 cargo run -p dashboard -- --generate-ts
 ```
+
+### Native UI renderer
+
+The default workspace build has no GPU dependency. `SoftwareRenderer` is
+always available and analyzes/validates display lists without producing
+pixels. Enable the real wgpu offscreen backend explicitly:
+
+```bash
+cargo build -p myrust-core --features gpu
+```
+
+HTTP, WebView, CLI, and Dashboard startup never initialize wgpu implicitly.
+Applications must call `create_renderer` explicitly and select
+`RendererKind::Wgpu` when a missing GPU must be treated as an error.
 
 ### CLI
 
@@ -214,7 +231,9 @@ let _guard = SingleInstance::acquire("myrust-app")?;
 
 **Phase 1** — complete. The core crate, WebView wrapper, typed IPC, desktop APIs, CLI, and dashboard example build and run on Linux.
 
-**Phase 2** — in progress. Batch A added native menus, clipboard access, WebView file drag & drop, and event-driven `notify`-based hot reload. Batch B added window-state persistence, logical WebView sessions, page-level APIs, window appearance options, fit-content sizing, and input regions. Batch C added recent documents, a public file watcher, in-process deep-link dispatch, downloads/custom protocols, locale and appearance reads, media controls, and login items. Batch D adds the three-stage updater, package-description generation, signing/notarization interfaces, and Unix single-instance activation forwarding.
+**Phase 2** — complete through Batch D. It added native menus, clipboard access, drag & drop, hot reload, window state, sessions, page APIs, appearance controls, recent documents, deep links, downloads, protocols, system/media APIs, updater foundations, package descriptions, signing interfaces, and single-instance forwarding.
+
+**Phase 3** — complete with the limitations below. The widget layer uses mygo's immediate-mode `View(callback)` shape: `NativeUi::new(|ctx| ...)`, `Context` widget constructors, inline per-frame state queries, and display-list generation. Interaction coverage includes hover regions, Tab/Shift+Tab focus traversal, Enter/Space activation, focus rings, text fields, checkboxes, sliders, and vertically scrollable clipped views. Built-in controls derive colors, spacing, and typography from `Theme`; `Theme::system()` detects light/dark appearance with a dark fallback. CPU-side scalar animation supports easing, elapsed-time progress, reduced-motion short-circuiting, and a `needs_animation_frame` signal. Each frame also emits platform-neutral accessibility metadata for labels, buttons, text fields, checkboxes, sliders, scroll views, and groups. `WindowContent::NativeUi` connects the paradigm to `App` and `WindowConfig`, and `--native-ui` runs the Dashboard demo. The CPU presenter prefers a real system TTF through `ab_glyph` and falls back to the built-in bitmap font when no supported font is found. Existing `WindowConfig::webview` usage remains supported, and the default Dashboard startup path is still HTTP/WebView only.
 
 ### Honest boundaries
 
@@ -226,14 +245,26 @@ let _guard = SingleInstance::acquire("myrust-app")?;
 - Package generation writes metadata skeletons only; it does not invoke `hdiutil`, `dpkg-deb`, `makepkg`, MSI tooling, or code-signing tools.
 - Code signing and notarization always return explicit errors until Phase 4 platform tooling is wired.
 - Windows named-pipe activation forwarding is not implemented; Windows single-instance support remains detection-only.
+- The wgpu renderer requires a working GPU or graphics driver at runtime. This Linux container has no `/dev/dri`, so the GPU path is compile-validated but not device-validated here; no adapter returns an explicit error and `RendererKind::Auto` falls back to software.
+- `NativeUiWindow` also falls back to `SoftwareRenderer` if an explicitly requested renderer cannot initialize, keeps the window/other windows alive, logs the failure, and exposes it through `AppContext::native_ui_last_error`.
+- `SoftwareRenderer` is not a pixel rasterizer. It validates and analyzes display-list commands, transforms, scissors, and bounds only.
+- Native UI has been run under an Xvfb virtual X11 display (`DISPLAY=:77`, 1280x900): the `myrust Native Dashboard` window opened at 1024x820 with the Software backend, rendered, and accepted real mouse clicks and keyboard input; click follow-up frames now settle synchronously. Real hardware desktop sessions and macOS/Windows behavior are still unverified. XTest buttons 4/5 are not interpreted as wheel events by GDK under Xvfb, so wheel behavior remains unit-tested rather than Xvfb-verified.
+- The wgpu renderer targets a single-sample offscreen texture. It does not expose a native wgpu surface or swapchain, and its offscreen texture is not copied to the window. The `--native-ui` window presents the same display list through `CpuRasterizer` and `softbuffer`.
+- `CpuRasterizer` is a basic CPU presenter, not a full UI renderer. It prefers one discovered system TTF and falls back to fixed 8x8 bitmap glyphs if loading fails. It does not implement shaping, kerning, bidi layout, multi-font fallback, text alignment/wrapping, IME composition, SVG path parsing, image decoding, or optimized spatial hit testing.
+- `Renderer` still reports Text, SVG path, and image commands as unsupported through `RenderStats`; the separate CPU presenter draws TTF or fallback bitmap text and supported geometry but does not change those renderer statistics.
+- `Theme::system()` only detects light versus dark appearance. It does not read the system accent color or high-contrast preference.
+- Animation is scalar/easing infrastructure plus button hover/pressed interpolation; content transitions, timeline orchestration, and spring physics are not implemented. Reduced motion checks `MYRUST_REDUCE_MOTION` and the existing neutral appearance layer, but native macOS and Windows reduced-motion APIs are not implemented. Animation redraw is best-effort through `request_redraw`; there is no timer-driven frame scheduler, and Linux wakeup behavior still depends on the host event loop.
+- Accessibility output is semantic data only. No AT-SPI, UIA, or NSAccessibility bridge is connected, so platform assistive technologies cannot observe the emitted nodes.
+- Hit testing remains a linear reverse-order scan of previous-frame widget regions. Tab order follows widget construction order. Duplicate explicit ids share interaction/focus/widget state and are therefore risky.
+- Text fields have no selection, clipboard operations, undo/redo, IME composition, dead-key composition, or text shaping. Slider and scroll behavior have no inertia or animation. Accessibility is exposed as semantic data without a platform bridge, and optimized spatial hit testing is not implemented.
 
 ### Roadmap
 
 | Phase | Focus |
 |-------|-------|
 | **✓ Phase 1** | Multi-window WebView, typed IPC, desktop APIs, CLI |
-| **Phase 2 (in progress)** | Batch A: menus/clipboard/drop/hot reload. Batch B: window state/sessions/page APIs/appearance/input regions. Batch C: recent docs/watcher/deep links/downloads/protocols/system/media/login. Batch D: updater/packaging descriptions/signing interfaces/single-instance forwarding |
-| **Phase 3** | wgpu-based native UI renderer (flexbox/grid layout, widgets, SVG) — not started |
+| **✓ Phase 2** | Menus, clipboard, drop/hot reload, window state, sessions, page APIs, deep links, downloads, protocols, system/media/login, updater, packaging descriptions, signing interfaces, single-instance forwarding |
+| **✓ Phase 3** | Immediate-mode `Context` + `NativeUi`, Theme/spacing/font tokens, hover animations and reduced-motion handling, semantic accessibility nodes, hover/focus/Tab and keyboard activation, TextField/Checkbox/Slider/ScrollView, pure-CPU layout, display lists, TTF/bitmap text, SVG icons, renderer abstraction, optional wgpu offscreen backend, CPU fallback/presenter, `WindowContent::NativeUi`, event/redraw wiring, `--native-ui` demo; platform AT bridges, native reduced-motion APIs, full text/SVG/image rendering, wgpu window presentation, IME, and cross-platform desktop validation remain incomplete |
 | **Phase 4** | Packaging (.app, .dmg, .msi, .deb, PKGBUILD, code signing, delta updates) |
 
 ## License

@@ -4,9 +4,11 @@
 //! typed IPC. `--web` instead serves the same Dashboard over HTTP on port 8090.
 
 use std::{
+    cell::RefCell,
     env,
     net::SocketAddr,
     path::PathBuf,
+    rc::Rc,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -27,11 +29,15 @@ use myrust_core::{
         file_watcher::{FileWatcher, WatchOptions},
         recent_documents::RecentDocuments,
         window_state::JsonFileStore,
-        App, WindowConfig,
+        App, WindowConfig, WindowContent,
     },
     desktop::menu::{Menu, MenuBuilder},
     ipc::{IpcError, IpcRouter, IpcType, NoRequest},
     release::packager::{PackageConfig, Packager},
+    ui::{
+        button, checkbox, column, row, scroll_view, slider, spacer, text, text_field, Color,
+        DrawCommand, NativeUi, Radius, RendererKind, TextAlignment, Theme,
+    },
     webview::{FileDropKind, PageOptions, PageSource, Session, SessionKind, WebViewConfig},
 };
 use rust_embed::RustEmbed;
@@ -137,7 +143,12 @@ fn main() -> Result<()> {
     init_tracing();
     let args = env::args().collect::<Vec<_>>();
 
-    if wants_web_mode(&args) {
+    if wants_native_ui(&args) {
+        if wants_web_mode(&args) {
+            anyhow::bail!("--native-ui cannot be combined with --web or --dev");
+        }
+        run_native_ui_demo()
+    } else if wants_web_mode(&args) {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -282,6 +293,282 @@ fn run_desktop(args: &[String]) -> Result<()> {
         Ok(())
     });
 
+    app.run()
+}
+
+struct NativeDashboardState {
+    stats_state: StatsState,
+    snapshot: Stats,
+    clicks: u32,
+    typed: String,
+    scroll: f32,
+    checked: bool,
+    slider_value: f32,
+}
+
+impl NativeDashboardState {
+    fn new() -> Self {
+        let stats_state = StatsState::new();
+        let snapshot = build_stats(&stats_state);
+        Self {
+            stats_state,
+            snapshot,
+            clicks: 0,
+            typed: String::new(),
+            scroll: 0.0,
+            checked: true,
+            slider_value: 42.0,
+        }
+    }
+
+    fn refresh(&mut self) {
+        self.snapshot = build_stats(&self.stats_state);
+    }
+}
+
+fn ring_metric(
+    c: &mut myrust_core::ui::Context,
+    label: &str,
+    percent: f32,
+    accent: Color,
+    theme: &Theme,
+) {
+    let percent = percent.clamp(0.0, 100.0);
+    let mut commands = vec![
+        DrawCommand::Circle {
+            x: 66.0,
+            y: 66.0,
+            radius: 51.0,
+            color: theme.border,
+        },
+        DrawCommand::Circle {
+            x: 66.0,
+            y: 66.0,
+            radius: 42.0,
+            color: theme.surface,
+        },
+    ];
+    let sweep = percent / 100.0 * std::f32::consts::TAU;
+    for segment in 0..48 {
+        let start = -std::f32::consts::FRAC_PI_2 + sweep * segment as f32 / 48.0;
+        let end = -std::f32::consts::FRAC_PI_2 + sweep * (segment + 1) as f32 / 48.0;
+        commands.push(DrawCommand::Line {
+            x1: 66.0 + 46.0 * start.cos(),
+            y1: 66.0 + 46.0 * start.sin(),
+            x2: 66.0 + 46.0 * end.cos(),
+            y2: 66.0 + 46.0 * end.sin(),
+            width: 7.0,
+            color: accent,
+        });
+    }
+    commands.push(DrawCommand::Text {
+        x: 42.0,
+        y: 51.0,
+        text: format!("{percent:.0}%"),
+        font_size: 22.0,
+        weight: 600,
+        color: theme.foreground,
+        max_width: None,
+        alignment: TextAlignment::Start,
+    });
+    commands.push(DrawCommand::Text {
+        x: 29.0,
+        y: 88.0,
+        text: label.to_string(),
+        font_size: 12.0,
+        weight: 500,
+        color: theme.muted,
+        max_width: None,
+        alignment: TextAlignment::Start,
+    });
+    column(c).size(132.0, 132.0).draw(commands);
+}
+
+fn bar_metric(
+    c: &mut myrust_core::ui::Context,
+    label: &str,
+    percent: f32,
+    accent: Color,
+    theme: &Theme,
+) {
+    let percent = percent.clamp(0.0, 100.0);
+    let commands = vec![
+        DrawCommand::RoundedRect {
+            x: 0.0,
+            y: 0.0,
+            width: 620.0,
+            height: 46.0,
+            radius: Radius::all(9.0),
+            color: theme.surface,
+        },
+        DrawCommand::RoundedRect {
+            x: 0.0,
+            y: 0.0,
+            width: (620.0 * percent / 100.0).max(8.0),
+            height: 46.0,
+            radius: Radius::all(9.0),
+            color: accent,
+        },
+        DrawCommand::Text {
+            x: 14.0,
+            y: 13.0,
+            text: label.to_string(),
+            font_size: 14.0,
+            weight: 600,
+            color: theme.foreground,
+            max_width: None,
+            alignment: TextAlignment::Start,
+        },
+        DrawCommand::Text {
+            x: 550.0,
+            y: 13.0,
+            text: format!("{percent:.0}%"),
+            font_size: 14.0,
+            weight: 500,
+            color: theme.foreground,
+            max_width: None,
+            alignment: TextAlignment::Start,
+        },
+    ];
+    column(c).size(620.0, 46.0).draw(commands);
+}
+
+fn run_native_ui_demo() -> Result<()> {
+    let mut app = App::new("myrust-dashboard-native")?;
+    let state = Rc::new(RefCell::new(NativeDashboardState::new()));
+    let render_state = state.clone();
+    let system_theme = Theme::system();
+    let callback_theme = system_theme.clone();
+    let native = NativeUi::new(move |c: &mut myrust_core::ui::Context| {
+        let theme = callback_theme.clone();
+        let spacing = theme.spacing;
+        let mut state = render_state.borrow_mut();
+        let cpu = state.snapshot.cpu.percent as f32;
+        let memory = state.snapshot.memory.percent as f32;
+        let disk_one = state
+            .snapshot
+            .disks
+            .first()
+            .map(|disk| f32::from(disk.percent))
+            .unwrap_or(0.0);
+        let disk_two = state
+            .snapshot
+            .disks
+            .get(1)
+            .map(|disk| f32::from(disk.percent))
+            .unwrap_or(0.0);
+        let size = c.available_size();
+        c.container()
+            .fill()
+            .draw([DrawCommand::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: size.width,
+                height: size.height,
+                color: theme.background,
+            }])
+            .children(|c| {
+                column(c).padding(spacing.lg).gap(spacing.md).children(|c| {
+                    text(c, "MYRUST NATIVE DASHBOARD")
+                        .font_size(theme.font_sizes.title)
+                        .bold()
+                        .color(theme.foreground);
+                    text(
+                        c,
+                        &format!(
+                            "{} / {} / refreshed {} time(s)",
+                            state.snapshot.hostname, state.snapshot.os, state.clicks
+                        ),
+                    )
+                    .font_size(theme.font_sizes.small)
+                    .color(theme.muted);
+                    row(c).gap(spacing.lg).children(|c| {
+                        ring_metric(c, "CPU", cpu, theme.accent, &theme);
+                        ring_metric(c, "MEMORY", memory, Color::rgb(251, 191, 36), &theme);
+                        spacer(c);
+                    });
+                    bar_metric(c, "Macintosh HD", disk_one, theme.accent, &theme);
+                    bar_metric(c, "Data", disk_two, Color::rgb(244, 114, 182), &theme);
+                    text(c, "TEXT FIELD")
+                        .font_size(theme.font_sizes.small)
+                        .color(theme.muted);
+                    text_field(c, "dashboard-text", &mut state.typed);
+                    checkbox(c, "dashboard-checkbox", &mut state.checked);
+                    text(c, &format!("SLIDER {:.0}", state.slider_value))
+                        .font_size(theme.font_sizes.small)
+                        .color(theme.muted);
+                    slider(c, "dashboard-slider", &mut state.slider_value, 0.0, 100.0);
+                    text(c, "SCROLL VIEW")
+                        .font_size(theme.font_sizes.small)
+                        .color(theme.muted);
+                    let scroll = scroll_view(c, "dashboard-scroll", 150.0, |c| {
+                        column(c).height(320.0).gap(spacing.sm).children(|c| {
+                            for index in 0..12 {
+                                text(
+                                    c,
+                                    &format!("Scroll row {index:02} - wheel and drag the bar"),
+                                )
+                                .font_size(theme.font_sizes.body)
+                                .color(theme.foreground);
+                            }
+                        });
+                    });
+                    state.scroll = scroll.scroll;
+                    c.id("refresh-stats");
+                    let refresh = button(
+                        c,
+                        &format!(
+                            "Refresh snapshot{}",
+                            if state.clicks == 0 {
+                                String::new()
+                            } else {
+                                format!(" ({})", state.clicks)
+                            }
+                        ),
+                    );
+                    if refresh.clicked {
+                        state.clicks += 1;
+                        state.refresh();
+                        tracing::info!(clicks = state.clicks, "native dashboard refreshed");
+                    }
+                    text(
+                        c,
+                        &format!(
+                            "text: {}    scroll: {:.0}    slider: {:.0}",
+                            if state.typed.is_empty() {
+                                "<type on the keyboard>"
+                            } else {
+                                state.typed.as_str()
+                            },
+                            state.scroll,
+                            state.slider_value
+                        ),
+                    )
+                    .font_size(theme.font_sizes.small)
+                    .color(theme.muted);
+                });
+            });
+    })
+    .with_renderer_kind(RendererKind::Software)
+    .with_theme(system_theme);
+
+    app.on_ready(move |context| {
+        let id = context.create_window(WindowConfig {
+            title: "myrust Native Dashboard".to_string(),
+            width: 1024.0,
+            height: 820.0,
+            min_size: Some((760.0, 620.0)),
+            window_key: Some("native-dashboard".to_string()),
+            content: Some(WindowContent::NativeUi(native.clone())),
+            ..WindowConfig::default()
+        })?;
+        tracing::info!(
+            backend = ?context.native_ui_backend(id)?,
+            stats = ?context.native_ui_stats(id)?,
+            "native dashboard window created"
+        );
+        Ok(())
+    });
     app.run()
 }
 
@@ -478,6 +765,13 @@ fn wants_web_mode(args: &[String]) -> bool {
         .any(|argument| argument == "--web" || argument == "--dev")
         || env::var("MYRUST_MODE")
             .map(|mode| mode == "web")
+            .unwrap_or(false)
+}
+
+fn wants_native_ui(args: &[String]) -> bool {
+    args.iter().any(|argument| argument == "--native-ui")
+        || env::var("MYRUST_MODE")
+            .map(|mode| mode == "native-ui")
             .unwrap_or(false)
 }
 

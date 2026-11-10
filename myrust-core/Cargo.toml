@@ -6,13 +6,19 @@ rust-version.workspace = true
 license.workspace = true
 description = "Desktop application framework for myrust"
 
+[features]
+default = []
+gpu = ["dep:wgpu"]
+
 [dependencies]
+ab_glyph.workspace = true
 anyhow.workspace = true
 arboard.workspace = true
 auto-launch.workspace = true
 dark-light.workspace = true
 dirs.workspace = true
 flate2.workspace = true
+font8x8.workspace = true
 global-hotkey.workspace = true
 muda.workspace = true
 notify.workspace = true
@@ -25,6 +31,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_repr.workspace = true
 single-instance.workspace = true
+softbuffer.workspace = true
 souvlaki.workspace = true
 sys-locale.workspace = true
 tar.workspace = true
@@ -35,6 +42,7 @@ tokio.workspace = true
 tracing.workspace = true
 tray-icon.workspace = true
 wry.workspace = true
+wgpu = { workspace = true, optional = true }
 zip.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -22,6 +22,7 @@ pub use window_state::{JsonFileStore, WindowState, WindowStateStore};
 use std::{
     collections::HashMap,
     env,
+    num::NonZeroU32,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -36,14 +37,20 @@ use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use tao::{
     dpi::{LogicalPosition, LogicalSize},
-    event::{Event, WindowEvent},
+    event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget},
+    keyboard::{Key as TaoKey, ModifiersState},
     window::{Fullscreen, Window, WindowBuilder, WindowId as TaoWindowId},
 };
 
 use crate::{
     desktop::menu::{self, Menu, MenuEvent},
     ipc::{self, IpcReply, IpcRouter},
+    ui::{
+        create_renderer, CpuFrame, CpuRasterizer, DisplayList, DrawCommand, InputState,
+        InputTranslator, Key, NativeInput, NativeUi, PointerButton, RenderSize, RenderStats,
+        Renderer, RendererBackend, RendererKind, Size, Transform,
+    },
     webview::{FileDropEvent, IpcMessageHandler, PageHandle, WebViewConfig, WebViewHandle},
 };
 
@@ -130,6 +137,15 @@ pub struct Rect {
     pub height: i32,
 }
 
+/// Content hosted by a native application window.
+#[derive(Debug, Clone)]
+pub enum WindowContent {
+    /// Existing system WebView content.
+    WebView(Box<WebViewConfig>),
+    /// Event-driven native UI drawn by the application runtime.
+    NativeUi(NativeUi),
+}
+
 /// Initial configuration for a native application window.
 #[derive(Debug, Clone)]
 pub struct WindowConfig {
@@ -169,7 +185,13 @@ pub struct WindowConfig {
     /// Optional title-bar button visibility preferences.
     pub title_buttons: Option<TitleButtons>,
     /// Optional native WebView configuration.
+    ///
+    /// This legacy field remains supported. New code may select either
+    /// [`WindowContent::WebView`] or [`WindowContent::NativeUi`] through
+    /// [`WindowConfig::content`]. Setting both fields is an error.
     pub webview: Option<WebViewConfig>,
+    /// Optional unified window content selection.
+    pub content: Option<WindowContent>,
 }
 
 impl Default for WindowConfig {
@@ -192,6 +214,7 @@ impl Default for WindowConfig {
             skip_taskbar: false,
             title_buttons: None,
             webview: None,
+            content: None,
         }
     }
 }
@@ -213,6 +236,8 @@ pub struct WindowInfo {
     pub decorations: bool,
     /// Whether the window owns a WebView.
     pub has_webview: bool,
+    /// Whether the window hosts native self-drawn UI.
+    pub has_native_ui: bool,
 }
 
 /// Application lifecycle and configuration.
@@ -464,6 +489,14 @@ impl App {
                         }
                     }
                 }
+                Event::WindowEvent {
+                    window_id, event, ..
+                } => {
+                    windows.handle_native_ui_window_event(window_id, &event);
+                }
+                Event::RedrawRequested(window_id) => {
+                    windows.redraw_native_ui_by_tao_id(window_id);
+                }
                 Event::Reopen {
                     has_visible_windows,
                     ..
@@ -657,6 +690,26 @@ impl<'a> AppContext<'a> {
         self.windows.request_fit_content(id)
     }
 
+    /// Returns renderer statistics for a native UI window.
+    pub fn native_ui_stats(&self, id: WindowId) -> Result<RenderStats> {
+        self.windows.native_ui_stats(id)
+    }
+
+    /// Returns the selected renderer backend for a native UI window.
+    pub fn native_ui_backend(&self, id: WindowId) -> Result<RendererBackend> {
+        self.windows.native_ui_backend(id)
+    }
+
+    /// Returns the most recent native UI renderer or presentation error.
+    pub fn native_ui_last_error(&self, id: WindowId) -> Result<Option<String>> {
+        self.windows.native_ui_last_error(id)
+    }
+
+    /// Renders and presents one native UI window immediately.
+    pub fn redraw_native_ui(&mut self, id: WindowId) -> Result<()> {
+        self.windows.render_native_ui(id)
+    }
+
     /// Restricts pointer input to the supplied logical rectangles.
     ///
     /// Implemented for GTK on Linux when the display advertises input-shape
@@ -692,10 +745,210 @@ struct ManagedWindow {
     title: String,
     window_key: Option<String>,
     webview: Option<WebViewHandle>,
+    native_ui: Option<NativeUiWindow>,
     menu: Option<Menu>,
     window: Window,
     fullscreen: bool,
     decorations: bool,
+}
+
+struct NativeUiWindow {
+    ui: NativeUi,
+    renderer: Box<dyn Renderer>,
+    translator: InputTranslator,
+    modifiers: ModifiersState,
+    physical_size: RenderSize,
+    logical_size: Size,
+    scale_factor: f64,
+    cpu_frame: Option<CpuFrame>,
+    last_stats: RenderStats,
+    last_input_consumed: bool,
+    needs_animation_frame: bool,
+    access_nodes_logged: bool,
+    fallback_reason: Option<String>,
+    last_error: Option<String>,
+}
+
+impl NativeUiWindow {
+    fn new(ui: NativeUi, physical_size: RenderSize, scale_factor: f64) -> Result<Self> {
+        let physical_size = normalize_render_size(physical_size);
+        let scale_factor = normalize_scale_factor(scale_factor);
+        let requested_renderer = ui.renderer_kind();
+        let (renderer, fallback_reason) = match create_renderer(requested_renderer, physical_size) {
+            Ok(renderer) => (renderer, None),
+            Err(error) => {
+                tracing::warn!(
+                    requested = %requested_renderer,
+                    %error,
+                    "native UI renderer unavailable; falling back to software"
+                );
+                let renderer = create_renderer(RendererKind::Software, physical_size)
+                    .context("failed to create native UI software fallback")?;
+                (
+                    renderer,
+                    Some(format!(
+                        "{requested_renderer} renderer unavailable: {error}"
+                    )),
+                )
+            }
+        };
+        let logical_size = physical_to_logical(physical_size, scale_factor);
+        let mut native = Self {
+            ui,
+            renderer,
+            translator: InputTranslator::new(scale_factor),
+            modifiers: ModifiersState::empty(),
+            physical_size,
+            logical_size,
+            scale_factor,
+            cpu_frame: None,
+            last_stats: RenderStats::default(),
+            last_input_consumed: false,
+            needs_animation_frame: false,
+            access_nodes_logged: false,
+            fallback_reason,
+            last_error: None,
+        };
+        if let Err(error) = native.render() {
+            tracing::warn!(%error, "initial native UI render failed");
+            native.last_error = Some(error);
+        }
+        Ok(native)
+    }
+
+    fn render(&mut self) -> std::result::Result<(), String> {
+        let frame = self
+            .ui
+            .render(self.logical_size)
+            .map_err(|error| error.to_string())?;
+        self.last_input_consumed = frame.input_consumed;
+        self.needs_animation_frame = frame.needs_animation_frame;
+        if !self.access_nodes_logged && !frame.access_nodes.is_empty() {
+            tracing::info!(
+                count = frame.access_nodes.len(),
+                "native UI accessibility metadata produced (platform AT bridge not implemented)"
+            );
+            self.access_nodes_logged = true;
+        }
+        let display = scaled_display(&frame.display, self.scale_factor as f32);
+        let background = self.ui.theme().background;
+        let cpu_frame = CpuRasterizer::rasterize(&display, self.physical_size, background)
+            .map_err(|error| error.to_string())?;
+        self.cpu_frame = Some(cpu_frame);
+        match self.renderer.render(&display) {
+            Ok(stats) => {
+                self.last_stats = stats;
+                self.last_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                let message = error.to_string();
+                self.last_error = Some(message.clone());
+                Err(message)
+            }
+        }
+    }
+
+    fn resize(&mut self, physical_size: RenderSize, scale_factor: f64) -> bool {
+        let physical_size = normalize_render_size(physical_size);
+        let scale_factor = normalize_scale_factor(scale_factor);
+        if physical_size == self.physical_size && scale_factor == self.scale_factor {
+            return false;
+        }
+        self.physical_size = physical_size;
+        self.logical_size = physical_to_logical(physical_size, scale_factor);
+        self.scale_factor = scale_factor;
+        self.translator.set_scale_factor(scale_factor);
+        if let Err(error) = self.renderer.resize(physical_size) {
+            tracing::warn!(%error, "native UI renderer resize failed");
+            self.last_error = Some(error.to_string());
+            return true;
+        }
+        true
+    }
+
+    fn effective_error(&self) -> Option<String> {
+        self.last_error
+            .clone()
+            .or_else(|| self.fallback_reason.clone())
+    }
+
+    fn handle_window_event(&mut self, event: &WindowEvent<'_>) -> bool {
+        match event {
+            WindowEvent::Resized(size) => {
+                return self.resize(RenderSize::new(size.width, size.height), self.scale_factor);
+            }
+            WindowEvent::ScaleFactorChanged {
+                scale_factor,
+                new_inner_size,
+            } => {
+                return self.resize(
+                    RenderSize::new(new_inner_size.width, new_inner_size.height),
+                    *scale_factor,
+                );
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = *modifiers;
+                return false;
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                return self.dispatch_input(NativeInput::CursorMoved {
+                    x: position.x,
+                    y: position.y,
+                });
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                return self.dispatch_input(NativeInput::MouseInput {
+                    state: if matches!(state, ElementState::Pressed) {
+                        InputState::Pressed
+                    } else {
+                        InputState::Released
+                    },
+                    button: pointer_button(*button),
+                });
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let (delta_x, delta_y) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (x * 20.0, y * 20.0),
+                    MouseScrollDelta::PixelDelta(position) => (
+                        (position.x / self.scale_factor) as f32,
+                        (position.y / self.scale_factor) as f32,
+                    ),
+                    _ => (0.0, 0.0),
+                };
+                return self.dispatch_input(NativeInput::Wheel { delta_x, delta_y });
+            }
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                let mut dispatched = false;
+                let key = map_tao_key(&event.logical_key, self.modifiers.shift_key());
+                if let Some(key) = key {
+                    dispatched |= self.dispatch_input(NativeInput::Key { key });
+                }
+                if let Some(text) = event.text {
+                    if key.map(key_accepts_text).unwrap_or(true) {
+                        dispatched |= self.dispatch_input(NativeInput::Text(text.to_string()));
+                    }
+                }
+                return dispatched;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn dispatch_input(&mut self, input: NativeInput) -> bool {
+        let Some(event) = self.translator.translate(&input) else {
+            return false;
+        };
+        match self.ui.input(event) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(%error, "native UI input queueing failed");
+                self.last_error = Some(error.to_string());
+                false
+            }
+        }
+    }
 }
 
 struct WindowManager {
@@ -740,6 +993,8 @@ impl WindowManager {
         target: &EventLoopWindowTarget<UserEvent>,
         config: WindowConfig,
     ) -> Result<WindowId> {
+        let mut config = config;
+        let content = resolve_window_content(config.content.take(), config.webview.take())?;
         let id = WindowId(self.next_id);
         self.next_id += 1;
         let window_key = config.window_key.clone();
@@ -806,62 +1061,78 @@ impl WindowManager {
                 .context("failed to attach application menu")?;
         }
 
-        let webview = if let Some(mut webview_config) = config.webview {
-            let direct_file_drop = webview_config.on_file_drop.clone();
-            if self.file_drop_enabled || direct_file_drop.is_some() {
+        let mut webview = None;
+        let mut native_ui = None;
+        match content {
+            Some(WindowContent::WebView(webview_config)) => {
+                let mut webview_config = *webview_config;
+                let direct_file_drop = webview_config.on_file_drop.clone();
+                if self.file_drop_enabled || direct_file_drop.is_some() {
+                    let proxy = self.proxy.clone();
+                    webview_config.on_file_drop = Some(Arc::new(move |event| {
+                        if let Some(callback) = &direct_file_drop {
+                            callback(event.clone());
+                        }
+                        if proxy
+                            .send_event(UserEvent::FileDrop {
+                                window_id: id,
+                                event,
+                            })
+                            .is_err()
+                        {
+                            tracing::warn!(?id, "failed to deliver file drop event");
+                        }
+                    }));
+                }
+
+                let router = self.ipc_router.clone();
                 let proxy = self.proxy.clone();
-                webview_config.on_file_drop = Some(Arc::new(move |event| {
-                    if let Some(callback) = &direct_file_drop {
-                        callback(event.clone());
+                let ipc_handler: IpcMessageHandler = Arc::new(move |body| {
+                    if let Some((width, height)) = parse_fit_content_request(&body) {
+                        if proxy
+                            .send_event(UserEvent::FitContent {
+                                window_id: id,
+                                width,
+                                height,
+                            })
+                            .is_err()
+                        {
+                            tracing::warn!(?id, "failed to deliver fit-content size");
+                        }
+                        return;
                     }
+
+                    let reply = router.dispatch_json(&body);
                     if proxy
-                        .send_event(UserEvent::FileDrop {
+                        .send_event(UserEvent::IpcReply {
                             window_id: id,
-                            event,
+                            reply,
                         })
                         .is_err()
                     {
-                        tracing::warn!(?id, "failed to deliver file drop event");
+                        tracing::warn!(?id, "failed to deliver IPC reply");
                     }
-                }));
+                });
+
+                webview = Some(
+                    WebViewHandle::new(&window, webview_config, ipc_handler, transparent)
+                        .context("failed to create WebView")?,
+                );
             }
-
-            let router = self.ipc_router.clone();
-            let proxy = self.proxy.clone();
-            let ipc_handler: IpcMessageHandler = Arc::new(move |body| {
-                if let Some((width, height)) = parse_fit_content_request(&body) {
-                    if proxy
-                        .send_event(UserEvent::FitContent {
-                            window_id: id,
-                            width,
-                            height,
-                        })
-                        .is_err()
-                    {
-                        tracing::warn!(?id, "failed to deliver fit-content size");
-                    }
-                    return;
-                }
-
-                let reply = router.dispatch_json(&body);
-                if proxy
-                    .send_event(UserEvent::IpcReply {
-                        window_id: id,
-                        reply,
-                    })
-                    .is_err()
-                {
-                    tracing::warn!(?id, "failed to deliver IPC reply");
-                }
-            });
-
-            Some(
-                WebViewHandle::new(&window, webview_config, ipc_handler, transparent)
-                    .context("failed to create WebView")?,
-            )
-        } else {
-            None
-        };
+            Some(WindowContent::NativeUi(ui)) => {
+                let scale_factor = window.scale_factor();
+                let physical_size = window.inner_size();
+                native_ui = Some(
+                    NativeUiWindow::new(
+                        ui,
+                        RenderSize::new(physical_size.width, physical_size.height),
+                        scale_factor,
+                    )
+                    .context("failed to initialize native UI window")?,
+                );
+            }
+            None => {}
+        }
 
         self.tao_ids.insert(tao_id, id);
         self.windows.insert(
@@ -871,12 +1142,18 @@ impl WindowManager {
                 title: config.title,
                 window_key,
                 webview,
+                native_ui,
                 menu,
                 window,
                 fullscreen,
                 decorations: config.decorations,
             },
         );
+        if let Some(window) = self.windows.get(&id) {
+            if window.native_ui.is_some() {
+                window.window.request_redraw();
+            }
+        }
 
         Ok(id)
     }
@@ -910,6 +1187,7 @@ impl WindowManager {
                     fullscreen: window.fullscreen,
                     decorations: window.decorations,
                     has_webview: window.webview.is_some(),
+                    has_native_ui: window.native_ui.is_some(),
                 }
             })
             .collect::<Vec<_>>();
@@ -940,6 +1218,76 @@ impl WindowManager {
             .webview
             .as_ref()
             .ok_or_else(|| anyhow!("window {:?} has no WebView", id))
+    }
+
+    fn native_ui(&self, id: WindowId) -> Result<&NativeUiWindow> {
+        self.windows
+            .get(&id)
+            .ok_or_else(|| anyhow!("window {:?} is not open", id))?
+            .native_ui
+            .as_ref()
+            .ok_or_else(|| anyhow!("window {:?} has no native UI", id))
+    }
+
+    fn native_ui_stats(&self, id: WindowId) -> Result<RenderStats> {
+        Ok(self.native_ui(id)?.last_stats.clone())
+    }
+
+    fn native_ui_backend(&self, id: WindowId) -> Result<RendererBackend> {
+        Ok(self.native_ui(id)?.renderer.backend())
+    }
+
+    fn native_ui_last_error(&self, id: WindowId) -> Result<Option<String>> {
+        Ok(self.native_ui(id)?.effective_error())
+    }
+
+    fn render_native_ui(&mut self, id: WindowId) -> Result<()> {
+        let window = self
+            .windows
+            .get_mut(&id)
+            .ok_or_else(|| anyhow!("window {:?} is not open", id))?;
+        let native = window
+            .native_ui
+            .as_mut()
+            .ok_or_else(|| anyhow!("window {:?} has no native UI", id))?;
+        let render_result = native.render();
+        let present_result = native
+            .cpu_frame
+            .as_ref()
+            .ok_or_else(|| anyhow!("native UI produced no CPU frame"))
+            .and_then(|frame| present_cpu_frame(&window.window, frame));
+        if let Err(error) = &present_result {
+            native.last_error = Some(error.to_string());
+        }
+        render_result.map_err(anyhow::Error::msg)?;
+        present_result?;
+        if native.last_input_consumed || native.needs_animation_frame {
+            window.window.request_redraw();
+        }
+        Ok(())
+    }
+
+    fn handle_native_ui_window_event(&mut self, tao_id: TaoWindowId, event: &WindowEvent<'_>) {
+        let Some(id) = self.tao_ids.get(&tao_id).copied() else {
+            return;
+        };
+        if let Some(window) = self.windows.get_mut(&id) {
+            let Some(native) = window.native_ui.as_mut() else {
+                return;
+            };
+            if native.handle_window_event(event) {
+                window.window.request_redraw();
+            }
+        }
+    }
+
+    fn redraw_native_ui_by_tao_id(&mut self, tao_id: TaoWindowId) {
+        let Some(id) = self.tao_ids.get(&tao_id).copied() else {
+            return;
+        };
+        if let Err(error) = self.render_native_ui(id) {
+            tracing::error!(%error, ?id, "native UI redraw failed");
+        }
     }
 
     fn send_reply(&mut self, id: WindowId, reply: &IpcReply) {
@@ -1039,6 +1387,115 @@ impl WindowManager {
             );
         }
     }
+}
+
+fn resolve_window_content(
+    content: Option<WindowContent>,
+    legacy_webview: Option<WebViewConfig>,
+) -> Result<Option<WindowContent>> {
+    match (content, legacy_webview) {
+        (Some(content), None) => Ok(Some(content)),
+        (None, Some(webview)) => Ok(Some(WindowContent::WebView(Box::new(webview)))),
+        (Some(_), Some(_)) => {
+            bail!("WindowConfig cannot set both `content` and legacy `webview`")
+        }
+        (None, None) => Ok(None),
+    }
+}
+
+fn scaled_display(display: &DisplayList, scale_factor: f32) -> DisplayList {
+    let mut commands = display.commands.clone();
+    if scale_factor.is_finite() && (scale_factor - 1.0).abs() > f32::EPSILON {
+        commands.insert(
+            0,
+            DrawCommand::TransformPush {
+                transform: Transform::scale(crate::ui::Point::new(scale_factor, scale_factor)),
+            },
+        );
+        commands.push(DrawCommand::TransformPop);
+    }
+    DisplayList::from_commands(commands)
+}
+
+fn present_cpu_frame(window: &Window, frame: &CpuFrame) -> Result<()> {
+    let width =
+        NonZeroU32::new(frame.width).ok_or_else(|| anyhow!("native UI frame has zero width"))?;
+    let height =
+        NonZeroU32::new(frame.height).ok_or_else(|| anyhow!("native UI frame has zero height"))?;
+    let context = softbuffer::Context::new(window)
+        .map_err(|error| anyhow!("failed to create native software display context: {error:?}"))?;
+    let mut surface = softbuffer::Surface::new(&context, window)
+        .map_err(|error| anyhow!("failed to create native software window surface: {error:?}"))?;
+    surface
+        .resize(width, height)
+        .map_err(|error| anyhow!("failed to resize native software surface: {error:?}"))?;
+    let mut buffer = surface
+        .buffer_mut()
+        .map_err(|error| anyhow!("failed to acquire native software buffer: {error:?}"))?;
+    buffer.copy_from_slice(&frame.pixels);
+    buffer
+        .present()
+        .map_err(|error| anyhow!("failed to present native software frame: {error:?}"))
+}
+
+fn physical_to_logical(size: RenderSize, scale_factor: f64) -> Size {
+    Size::new(
+        size.width as f32 / scale_factor as f32,
+        size.height as f32 / scale_factor as f32,
+    )
+}
+
+fn normalize_render_size(size: RenderSize) -> RenderSize {
+    RenderSize::new(size.width.max(1), size.height.max(1))
+}
+
+fn normalize_scale_factor(scale_factor: f64) -> f64 {
+    if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    }
+}
+
+fn pointer_button(button: MouseButton) -> PointerButton {
+    match button {
+        MouseButton::Left => PointerButton::Left,
+        MouseButton::Right => PointerButton::Right,
+        MouseButton::Middle => PointerButton::Middle,
+        MouseButton::Other(code) => PointerButton::Other(code),
+        _ => PointerButton::Other(u16::MAX),
+    }
+}
+
+fn map_tao_key(key: &TaoKey<'_>, shift: bool) -> Option<Key> {
+    match key {
+        TaoKey::Tab if shift => Some(Key::ShiftTab),
+        TaoKey::Tab => Some(Key::Tab),
+        TaoKey::Enter => Some(Key::Enter),
+        TaoKey::Space => Some(Key::Space),
+        TaoKey::Backspace => Some(Key::Backspace),
+        TaoKey::Delete => Some(Key::Delete),
+        TaoKey::ArrowLeft => Some(Key::ArrowLeft),
+        TaoKey::ArrowRight => Some(Key::ArrowRight),
+        TaoKey::Home => Some(Key::Home),
+        TaoKey::End => Some(Key::End),
+        _ => None,
+    }
+}
+
+fn key_accepts_text(key: Key) -> bool {
+    !matches!(
+        key,
+        Key::Tab
+            | Key::ShiftTab
+            | Key::Enter
+            | Key::Backspace
+            | Key::Delete
+            | Key::ArrowLeft
+            | Key::ArrowRight
+            | Key::Home
+            | Key::End
+    )
 }
 
 fn apply_platform_window_options(window: &Window, config: &WindowConfig) -> Result<()> {
@@ -1234,5 +1691,91 @@ impl Drop for MenuEventForwarder {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::{button, column, text, NativeUi};
+
+    fn test_native_ui() -> NativeUi {
+        NativeUi::new(|context| {
+            column(context).children(|context| {
+                text(context, "native renderer");
+                button(context, "action");
+            });
+        })
+    }
+
+    #[test]
+    fn window_content_selects_native_ui_without_legacy_webview() {
+        let content = resolve_window_content(Some(WindowContent::NativeUi(test_native_ui())), None)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(content, WindowContent::NativeUi(_)));
+    }
+
+    #[test]
+    fn legacy_webview_field_still_resolves_to_webview_content() {
+        let content = resolve_window_content(None, Some(WebViewConfig::default()))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(content, WindowContent::WebView(_)));
+    }
+
+    #[test]
+    fn conflicting_content_and_webview_are_rejected() {
+        let error = resolve_window_content(
+            Some(WindowContent::NativeUi(test_native_ui())),
+            Some(WebViewConfig::default()),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cannot set both"));
+    }
+
+    #[test]
+    fn native_ui_window_consumes_display_list_through_renderer() {
+        let mut window =
+            NativeUiWindow::new(test_native_ui(), RenderSize::new(320, 200), 1.0).unwrap();
+        assert_eq!(window.renderer.backend(), RendererBackend::Software);
+        assert_eq!(window.last_stats.total_commands, 3);
+        assert!(window.cpu_frame.is_some());
+        window.render().unwrap();
+        assert_eq!(window.last_stats.command_counts.text, 2);
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn native_ui_auto_falls_back_without_gpu_feature() {
+        let ui = test_native_ui().with_renderer_kind(crate::ui::RendererKind::Auto);
+        let window = NativeUiWindow::new(ui, RenderSize::new(100, 80), 1.0).unwrap();
+        assert_eq!(window.renderer.backend(), RendererBackend::Software);
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn explicit_wgpu_request_falls_back_and_reports_the_error() {
+        let ui = test_native_ui().with_renderer_kind(crate::ui::RendererKind::Wgpu);
+        let window = NativeUiWindow::new(ui, RenderSize::new(100, 80), 1.0).unwrap();
+        assert_eq!(window.renderer.backend(), RendererBackend::Software);
+        assert!(window
+            .effective_error()
+            .expect("fallback reason")
+            .contains("wgpu renderer unavailable"));
+    }
+
+    #[test]
+    fn tao_named_keys_map_to_navigation_keys() {
+        assert_eq!(map_tao_key(&TaoKey::Tab, false), Some(Key::Tab));
+        assert_eq!(map_tao_key(&TaoKey::Tab, true), Some(Key::ShiftTab));
+        assert_eq!(map_tao_key(&TaoKey::Enter, false), Some(Key::Enter));
+        assert_eq!(
+            map_tao_key(&TaoKey::ArrowRight, false),
+            Some(Key::ArrowRight)
+        );
+        assert_eq!(map_tao_key(&TaoKey::Character("x"), false), None);
+        assert!(key_accepts_text(Key::Space));
+        assert!(!key_accepts_text(Key::Enter));
     }
 }
