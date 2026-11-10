@@ -1,0 +1,11 @@
+[package]
+name = "example-gallery"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MyRust example: gallery"
+
+[dependencies]
+anyhow.workspace = true
+myrust-core = { path = "../../myrust-core" }

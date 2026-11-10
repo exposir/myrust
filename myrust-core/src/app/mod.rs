@@ -265,6 +265,18 @@ type FileDropCallback =
     Box<dyn for<'a> FnMut(&mut AppContext<'a>, WindowId, FileDropEvent) -> Result<()> + 'static>;
 type OpenUrlCallback = Box<dyn for<'a> FnMut(&mut AppContext<'a>, String) -> Result<()> + 'static>;
 
+/// Disables WebKitGTK's DMA-BUF compositing renderer on Linux systems without a
+/// DRM device. There is no GPU to share those buffers with, and the renderer
+/// otherwise costs tens of megabytes of anonymous memory. An explicit
+/// `WEBKIT_DISABLE_DMABUF_RENDERER` setting is left untouched.
+#[cfg(target_os = "linux")]
+fn configure_linux_webview_memory() {
+    if env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some() || Path::new("/dev/dri").exists() {
+        return;
+    }
+    env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+}
+
 impl App {
     /// Creates the process singleton application.
     ///
@@ -273,6 +285,9 @@ impl App {
         if APP_CREATED.swap(true, Ordering::SeqCst) {
             bail!("myrust App is already created in this process");
         }
+
+        #[cfg(target_os = "linux")]
+        configure_linux_webview_memory();
 
         Ok(Self {
             name: name.into(),
@@ -558,6 +573,13 @@ impl App {
                             .set_inner_size(LogicalSize::new(width, height));
                     } else {
                         tracing::warn!(?window_id, "fit-content target window is closed");
+                    }
+                }
+                Event::UserEvent(UserEvent::NativeUiRepaint(window_id)) => {
+                    if let Some(window) = windows.get_mut(window_id) {
+                        if window.native_ui.is_some() {
+                            window.window.request_redraw();
+                        }
                     }
                 }
                 Event::UserEvent(UserEvent::ReloadAll) => {
@@ -1134,6 +1156,22 @@ impl WindowManager {
             None => {}
         }
 
+        #[cfg(target_os = "linux")]
+        if native_ui.is_some() {
+            use gtk::prelude::WidgetExt;
+            use tao::platform::unix::WindowExtUnix;
+
+            // GTK paints its window background over the frame presented right after
+            // creation, so every GTK draw asks for a fresh native frame.
+            let proxy = self.proxy.clone();
+            window.gtk_window().connect_draw(move |_, _| {
+                if proxy.send_event(UserEvent::NativeUiRepaint(id)).is_err() {
+                    tracing::warn!(?id, "failed to schedule native UI repaint after draw");
+                }
+                gtk::glib::Propagation::Proceed
+            });
+        }
+
         self.tao_ids.insert(tao_id, id);
         self.windows.insert(
             id,
@@ -1612,6 +1650,7 @@ enum UserEvent {
         height: f64,
     },
     ReloadAll,
+    NativeUiRepaint(WindowId),
     Quit,
 }
 

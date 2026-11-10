@@ -1,5 +1,18 @@
 [workspace]
-members = ["myrust-core", "myrust-cli", "examples/dashboard"]
+members = [
+    "myrust-core",
+    "myrust-cli",
+    "examples/dashboard",
+    "examples/hello",
+    "examples/counter-native",
+    "examples/clipboard",
+    "examples/text-input",
+    "examples/loading",
+    "examples/chart-streaming",
+    "examples/todo",
+    "examples/gallery",
+    "examples/drag-drop",
+]
 resolver = "2"
 
 [workspace.package]

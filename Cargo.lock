@@ -1118,6 +1118,83 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-chart-streaming"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "myrust-core",
+]
+
+[[package]]
+name = "example-clipboard"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "myrust-core",
+]
+
+[[package]]
+name = "example-counter-native"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "myrust-core",
+]
+
+[[package]]
+name = "example-drag-drop"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "myrust-core",
+ "serde_json",
+]
+
+[[package]]
+name = "example-gallery"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "myrust-core",
+]
+
+[[package]]
+name = "example-hello"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "myrust-core",
+ "serde",
+]
+
+[[package]]
+name = "example-loading"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "myrust-core",
+]
+
+[[package]]
+name = "example-text-input"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "myrust-core",
+]
+
+[[package]]
+name = "example-todo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs 7.0.0",
+ "myrust-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,11 @@
+[package]
+name = "example-loading"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MyRust example: loading"
+
+[dependencies]
+anyhow.workspace = true
+myrust-core = { path = "../../myrust-core" }

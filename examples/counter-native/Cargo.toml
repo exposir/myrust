@@ -1,0 +1,11 @@
+[package]
+name = "example-counter-native"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "A counter drawn in native UI, with no web page"
+
+[dependencies]
+anyhow.workspace = true
+myrust-core = { path = "../../myrust-core" }

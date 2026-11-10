@@ -1,0 +1,12 @@
+[package]
+name = "example-drag-drop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MyRust example: native file drag and drop into a WebView"
+
+[dependencies]
+anyhow.workspace = true
+myrust-core = { path = "../../myrust-core" }
+serde_json.workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "example-todo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MyRust example: a web frontend calling Rust through typed IPC"
+
+[dependencies]
+anyhow.workspace = true
+dirs.workspace = true
+myrust-core = { path = "../../myrust-core" }
+serde.workspace = true
+serde_json.workspace = true

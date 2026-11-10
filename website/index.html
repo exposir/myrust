@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MyRust — Desktop apps in Rust, with a native UI or a web frontend</title>
+<meta name="description" content="Build desktop apps in Rust. Draw a native UI with an immediate-mode engine on the CPU, or load a web frontend in the system webview that calls Rust through typed IPC with generated TypeScript bindings. No unsafe in the core.">
+<link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjEyMCAxMDAgMTYwIDE5MCI+PHBhdGggZmlsbD0iIzIyMjIyNiIgZD0iTTIwMCAyODAgMTMwLjcyIDI0MCAxMzAuNzIgMTYwIDIwMCAxMjAgMjY5LjI4IDE2MCAyNjkuMjggMjQwWiIvPjxnIGZpbGw9IiNmZmZmZmYiPjxjaXJjbGUgY3g9IjE2NS4zNiIgY3k9IjI2MCIgcj0iMTYiLz48Y2lyY2xlIGN4PSIxMzAuNzIiIGN5PSIyMDAiIHI9IjE2Ii8+PGNpcmNsZSBjeD0iMTY1LjM2IiBjeT0iMTQwIiByPSIxNiIvPjxjaXJjbGUgY3g9IjIzNC42NCIgY3k9IjE0MCIgcj0iMTYiLz48Y2lyY2xlIGN4PSIyNjkuMjgiIGN5PSIyMDAiIHI9IjE2Ii8+PGNpcmNsZSBjeD0iMjM0LjY0IiBjeT0iMjYwIiByPSIxNiIvPjxwYXRoIGQ9Ik0yMDAgMjQ5LjQ0IDE1Ny4xNiAyMjQuNzIgMTU3LjE2IDE3NS4yOCAyMDAgMTUwLjU2IDI0Mi44NCAxNzUuMjggMjQyLjg0IDIyNC43MloiLz48cGF0aCBkPSJNMjAwIDE3NiAyMjQgMjEyIDE3NiAyMTJaIi8+PGNpcmNsZSBjeD0iMjAwIiBjeT0iMjAwIiByPSI5Ii8+PC9nPjxwYXRoIGZpbGw9IiMyMjIyMjYiIGQ9Ik0yMDAgMjI0IDE3NiAxODggMjI0IDE4OFoiLz48L3N2Zz4=" type="image/svg+xml">
+<style>
+@font-face{font-family:"Geist";src:local("Inter"),local("-apple-system"),local("Segoe UI"),local("Helvetica Neue");font-display:swap}
+:root{
+  --bg:#fff;--fg:#1c1c1e;--muted:#6b6b70;--border:#e5e5e7;--code:#fafafa;--card:#fff;
+  --accent:#0f8fb8;--accent-ink:#0a6d8d;--warn:#c2410c;--ok:#15803d;
+  --radius:8px;
+}
+@media (prefers-color-scheme:dark){
+  :root{--bg:#141416;--fg:#f2f2f4;--muted:#9a9aa2;--border:#2a2a2e;--code:#1a1a1d;--card:#1a1a1d;
+    --accent:#3fc0e0;--accent-ink:#6fd3ec;--warn:#fb923c;--ok:#4ade80}
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-padding-top:6rem;color-scheme:light dark}
+body{
+  font-family:"Geist",ui-sans-serif,system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",Roboto,sans-serif;
+  background:var(--bg);color:var(--fg);-webkit-font-smoothing:antialiased;
+  font-size:16px;line-height:1.5;
+}
+code,pre,.mono{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace}
+a{color:inherit;text-decoration:none}
+::selection{background:color-mix(in srgb,var(--accent) 26%,transparent)}
+
+/* The column of the page, between two hairlines. */
+.frame{max-width:72rem;margin:0 auto;border-left:1px solid var(--border);border-right:1px solid var(--border)}
+.label{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;font-weight:500;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+html[lang="zh-CN"] .label{letter-spacing:.08em}
+
+/* Header */
+header.site{position:sticky;top:0;z-index:40;display:flex;align-items:center;gap:1.5rem;
+  height:3.5rem;padding:0 1rem;border-bottom:1px solid var(--border);
+  background:color-mix(in srgb,var(--bg) 82%,transparent);backdrop-filter:blur(14px)}
+.wordmark{display:flex;align-items:center;gap:.5rem;font-weight:700;letter-spacing:-.02em;font-size:1.0625rem}
+.wordmark svg{width:20px;height:24px;flex:none}
+header.site nav{display:none;align-items:center;gap:1.25rem;font-size:.875rem}
+@media(min-width:640px){header.site nav{display:flex}}
+header.site nav a{color:var(--muted);transition:color .15s}
+header.site nav a:hover{color:var(--fg)}
+header.site .right{margin-left:auto;display:flex;align-items:center;gap:.25rem}
+.icon-link{display:inline-flex;align-items:center;justify-content:center;width:2.25rem;height:2.25rem;
+  border-radius:var(--radius);color:var(--muted);transition:color .15s,background .15s}
+.icon-link:hover{color:var(--fg);background:color-mix(in srgb,var(--fg) 7%,transparent)}
+.lang{display:inline-flex;align-items:center;justify-content:center;height:2.25rem;min-width:3.25rem;padding:0 .625rem;
+  margin-right:.25rem;border:1px solid var(--border);border-radius:var(--radius);background:none;
+  color:var(--muted);font-family:ui-monospace,Menlo,monospace;font-size:12px;font-weight:500;
+  cursor:pointer;transition:color .15s,border-color .15s}
+.lang:hover{color:var(--fg);border-color:color-mix(in srgb,var(--fg) 25%,var(--border))}
+
+/* Hero */
+.hero{position:relative;padding:5rem 1rem}
+@media(min-width:640px){.hero{padding:5rem 2.5rem}}
+@media(min-width:768px){.hero{padding:7rem 2.5rem}}
+.hero-inner{position:relative;max-width:44rem}
+.hero-mark{position:absolute;right:-2rem;top:-4rem;width:22rem;height:26rem;opacity:.09;pointer-events:none}
+@media(max-width:1023px){.hero-mark{display:none}}
+@media(min-width:1280px){.hero-mark{width:26rem;right:-6rem}}
+.version{display:inline-flex;align-items:center;gap:.5rem}
+.version:hover{color:var(--fg)}
+.version .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);flex:none}
+h1{margin-top:1.5rem;font-size:2.25rem;line-height:1.05;font-weight:600;letter-spacing:-.04em}
+@media(min-width:640px){h1{font-size:3rem}}
+@media(min-width:768px){h1{font-size:3.75rem}}
+h1 .sub{display:block;color:var(--muted)}
+.lede{margin-top:1.5rem;max-width:36rem;font-size:1.125rem;line-height:1.85;color:var(--muted)}
+.cta{margin-top:2.5rem;display:flex;flex-wrap:wrap;align-items:center;gap:.75rem}
+.install{display:inline-flex;align-items:center;gap:.625rem;height:2.75rem;padding:0 .75rem 0 1rem;
+  border:1px solid var(--border);border-radius:var(--radius);background:var(--code);
+  font-size:.8125rem;color:var(--fg);transition:border-color .15s;max-width:100%}
+.install{min-width:0}
+.install code{white-space:nowrap;overflow-x:auto;scrollbar-width:none;min-width:0}
+.install code::-webkit-scrollbar{display:none}
+.install:hover{border-color:color-mix(in srgb,var(--fg) 25%,var(--border))}
+.install .prompt{color:var(--muted);user-select:none}
+.install .copy{display:inline-flex;padding:.25rem;border-radius:4px;color:var(--muted);background:none;border:0;cursor:pointer}
+.install .copy:hover{color:var(--fg);background:color-mix(in srgb,var(--fg) 8%,transparent)}
+.install .copy svg{width:14px;height:14px}
+.install .copy .check{display:none}
+.install[data-copied] .copy .check{display:block;color:var(--ok)}
+.install[data-copied] .copy .clip{display:none}
+.btn{display:inline-flex;align-items:center;gap:.5rem;height:2.75rem;padding:0 1.25rem;
+  border-radius:var(--radius);background:var(--fg);color:var(--bg);font-size:.875rem;font-weight:500;
+  transition:opacity .15s}
+.btn:hover{opacity:.86}
+.btn svg{width:16px;height:16px}
+
+/* Stats */
+.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:1px;border-top:1px solid var(--border);
+  background:var(--border)}
+@media(min-width:768px){.stats{grid-template-columns:repeat(4,1fr)}}
+.stat{display:flex;flex-direction:column-reverse;justify-content:flex-end;gap:.5rem;
+  padding:1.5rem 1rem;background:var(--bg)}
+@media(min-width:640px){.stat{padding:2rem 2.5rem}}
+.stat dd{font-size:1.875rem;font-weight:600;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+@media(min-width:640px){.stat dd{font-size:2.25rem}}
+.stat dd .unit{margin-left:.25rem;font-size:1rem;font-weight:400;color:var(--muted)}
+.stat dt{font-family:ui-monospace,Menlo,monospace;font-size:11px;font-weight:500;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.stats-note{padding:.75rem 1rem;border-top:1px solid var(--border);background:var(--bg);
+  font-size:.75rem;line-height:1.6;color:var(--muted)}
+@media(min-width:640px){.stats-note{padding:.75rem 2.5rem}}
+
+/* Code panel */
+.codepanel{border-top:1px solid var(--border);background:var(--code)}
+.tabs{display:flex;border-bottom:1px solid var(--border)}
+.tabs button{appearance:none;border:0;border-right:1px solid var(--border);border-bottom:1px solid transparent;
+  margin-bottom:-1px;padding:.75rem 1rem;background:none;cursor:pointer;
+  font-family:ui-monospace,Menlo,monospace;font-size:11px;font-weight:500;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--muted);transition:color .15s,background .15s}
+@media(min-width:640px){.tabs button{padding:.75rem 1.5rem}}
+.tabs button:hover{color:var(--fg)}
+.tabs button[aria-selected="true"]{color:var(--fg);background:var(--bg);border-bottom-color:var(--accent)}
+.panel{display:grid}
+@media(min-width:1024px){.panel{grid-template-columns:1.3fr 1fr}
+  .panel>*+*{border-left:1px solid var(--border)}}
+.panel figure{min-width:0;display:flex;flex-direction:column}
+.panel figcaption{padding:.75rem 1rem;border-bottom:1px solid var(--border);
+  font-family:ui-monospace,Menlo,monospace;font-size:11px;font-weight:500;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--muted)}
+@media(min-width:640px){.panel figcaption{padding:.75rem 1.5rem}}
+.panel pre{overflow-x:auto;padding:1.25rem 1rem;font-size:13px;line-height:1.7;tab-size:4;
+  font-variant-ligatures:none}
+@media(min-width:640px){.panel pre{padding:1.25rem 1.5rem}}
+.panel .side{padding:1.25rem 1rem;display:flex;flex-direction:column;gap:1rem;
+  font-size:.875rem;line-height:1.6;color:var(--muted)}
+.panel .side[hidden]{display:none}
+@media(min-width:640px){.panel .side{padding:1.25rem 1.5rem}}
+@media(max-width:1023px){.panel .side{border-top:1px solid var(--border)}}
+.panel .side code{color:var(--fg)}
+.panel .side .foot{margin-top:auto;padding-top:1rem;border-top:1px solid var(--border)}
+.panel .side .foot pre{padding:0;font-size:12.5px;line-height:1.75}
+
+/* Syntax */
+.kw{color:#a626a4}.ty{color:#c18401}.fn{color:#4078f2}.str{color:#50a14f}.cm{color:#a0a1a7;font-style:italic}
+.num{color:#986801}.attr{color:#e45649}
+@media(prefers-color-scheme:dark){
+  .kw{color:#c678dd}.ty{color:#e5c07b}.fn{color:#61afef}.str{color:#98c379}.cm{color:#7f848e}
+  .num{color:#d19a66}.attr{color:#e06c75}
+}
+
+/* Features */
+.features{display:grid;gap:1px;border-top:1px solid var(--border);background:var(--border);list-style:none}
+@media(min-width:640px){.features{grid-template-columns:1fr 1fr}}
+.features li{background:var(--bg)}
+.feature{display:flex;flex-direction:column;height:100%;padding:2rem 1rem;transition:background .15s}
+@media(min-width:640px){.feature{padding:2rem 2.5rem}}
+.feature:hover{background:var(--code)}
+.feature h2{display:flex;align-items:center;justify-content:space-between;gap:1rem;
+  font-size:1rem;font-weight:600;letter-spacing:-.01em}
+.feature h2 svg{width:16px;height:16px;flex:none;color:var(--muted);transition:transform .15s,color .15s}
+.feature:hover h2 svg{transform:translateX(2px);color:var(--fg)}
+.feature p{margin-top:.5rem;max-width:28rem;font-size:.875rem;line-height:1.65;color:var(--muted)}
+
+/* Footer */
+footer.site{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:1rem;
+  padding:1.5rem 1rem;border-top:1px solid var(--border);
+  font-family:ui-monospace,Menlo,monospace;font-size:11px;font-weight:500;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--muted)}
+@media(min-width:640px){footer.site{padding:1.5rem 2.5rem}}
+footer.site a:hover{color:var(--fg)}
+footer.site nav{display:flex;flex-wrap:wrap;gap:.5rem 1.5rem}
+
+/* Boundaries section */
+.bounds{border-top:1px solid var(--border);padding:2.5rem 1rem;background:var(--bg)}
+@media(min-width:640px){.bounds{padding:2.5rem 2.5rem}}
+.bounds h2{font-size:1rem;font-weight:600;letter-spacing:-.01em;margin-bottom:.75rem}
+.bounds p{font-size:.875rem;line-height:1.7;color:var(--muted);max-width:52rem}
+.bounds ul{margin-top:.75rem;padding-left:1.1rem;font-size:.8125rem;line-height:1.75;color:var(--muted)}
+.bounds li{margin:.2rem 0}
+.bounds li::marker{color:color-mix(in srgb,var(--muted) 60%,transparent)}
+</style>
+</head>
+<body>
+
+<header class="site frame">
+  <a class="wordmark" href="/">
+    <svg viewBox="120 100 160 190" aria-hidden="true">
+      <path fill="currentColor" d="M200 280 130.72 240 130.72 160 200 120 269.28 160 269.28 240Z"/>
+      <g fill="var(--bg)">
+        <circle cx="165.36" cy="260" r="16"/><circle cx="130.72" cy="200" r="16"/>
+        <circle cx="165.36" cy="140" r="16"/><circle cx="234.64" cy="140" r="16"/>
+        <circle cx="269.28" cy="200" r="16"/><circle cx="234.64" cy="260" r="16"/>
+        <path d="M200 249.44 157.16 224.72 157.16 175.28 200 150.56 242.84 175.28 242.84 224.72Z"/>
+        <path d="M200 176 224 212 176 212Z"/>
+        <circle cx="200" cy="200" r="9"/>
+      </g>
+      <path fill="currentColor" d="M200 224 176 188 224 188Z"/>
+    </svg>
+    MyRust
+  </a>
+  <nav>
+    <a href="#native-ui" data-i18n="nav.native">Native UI</a>
+    <a href="#code" data-i18n="nav.code">Code</a>
+    <a href="https://github.com/exposir/myrust/tree/main/examples" data-i18n="nav.examples">Examples</a>
+    <a href="#boundaries" data-i18n="nav.boundaries">Boundaries</a>
+  </nav>
+  <div class="right">
+    <button class="lang" id="lang-toggle" type="button" aria-label="Switch to Chinese">中文</button>
+    <a class="icon-link" href="https://github.com/exposir/myrust" aria-label="GitHub">
+      <svg viewBox="0 0 16 16" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+    </a>
+  </div>
+</header>
+
+<main class="frame">
+
+  <section class="hero">
+    <svg class="hero-mark" viewBox="120 100 160 190" aria-hidden="true">
+      <path fill="currentColor" d="M200 280 130.72 240 130.72 160 200 120 269.28 160 269.28 240Z"/>
+      <g fill="var(--bg)">
+        <circle cx="165.36" cy="260" r="16"/><circle cx="130.72" cy="200" r="16"/>
+        <circle cx="165.36" cy="140" r="16"/><circle cx="234.64" cy="140" r="16"/>
+        <circle cx="269.28" cy="200" r="16"/><circle cx="234.64" cy="260" r="16"/>
+        <path d="M200 249.44 157.16 224.72 157.16 175.28 200 150.56 242.84 175.28 242.84 224.72Z"/>
+        <path d="M200 176 224 212 176 212Z"/>
+        <circle cx="200" cy="200" r="9"/>
+      </g>
+      <path fill="currentColor" d="M200 224 176 188 224 188Z"/>
+    </svg>
+    <div class="hero-inner">
+      <a class="label version" href="https://github.com/exposir/myrust/releases">
+        <span class="dot"></span><span data-i18n="hero.version">v0.1.0 · Linux verified, macOS and Windows untested</span>
+      </a>
+      <h1>
+        <span data-i18n="hero.h1">Desktop apps in Rust.</span>
+        <span class="sub" data-i18n="hero.sub">Small, typed, no unsafe core.</span>
+      </h1>
+      <p class="lede" data-i18n="hero.lede">
+        One binary for macOS, Windows and Linux. Draw a native UI with an immediate-mode engine, or load a web
+        frontend in the webview the OS already has and call Rust through typed IPC.
+      </p>
+      <div class="cta">
+        <div class="install" role="group" aria-label="Install command" data-i18n-aria="aria.install">
+          <span class="prompt">$</span>
+          <code>cargo run -p dashboard -- --native-ui</code>
+          <button class="copy" type="button" aria-label="Copy command" data-i18n-aria="aria.copy" data-copy="cargo run -p dashboard -- --native-ui">
+            <svg class="clip" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 3.5v-1a1 1 0 0 0-1-1h-7a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h1"/></svg>
+            <svg class="check" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 8.5 6.5 12 13 4.5"/></svg>
+          </button>
+        </div>
+        <a class="btn" href="https://github.com/exposir/myrust#getting-started">
+          <span data-i18n="hero.cta">Get started</span>
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4"/></svg>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <dl class="stats">
+    <div class="stat">
+      <dd>4.2<span class="unit">MB</span></dd>
+      <dt data-i18n="stat.binary">Binary, stripped</dt>
+    </div>
+    <div class="stat">
+      <dd>~17<span class="unit">MB</span></dd>
+      <dt data-i18n="stat.memNative">Memory, native UI</dt>
+    </div>
+    <div class="stat">
+      <dd>~66<span class="unit">MB</span></dd>
+      <dt data-i18n="stat.memWeb">Memory, webview included</dt>
+    </div>
+    <div class="stat">
+      <dd>0<span class="unit">%</span></dd>
+      <dt data-i18n="stat.cpu">CPU at idle</dt>
+    </div>
+  </dl>
+  <p class="stats-note" data-i18n-html="stats.note">
+    Measured on this project's Linux container under Xvfb, release build, with a hello-world app (an
+    800×600 window with static content): binary after <code>strip</code>; memory as dirty anonymous pages
+    summed across the process tree; CPU sampled over ten seconds at rest. Dirty pages are the Linux
+    counterpart of macOS's physical footprint: clean file-backed pages are excluded, including the WebView
+    libraries a native window never calls. Without a DRM device MyRust disables WebKitGTK's DMA-BUF
+    renderer before it starts; machines with a GPU keep accelerated compositing. PSS, which counts those
+    pages, is 57 MB for native UI and 205 MB with the webview. The webview figure includes the WebKitGTK web
+    and network processes; macOS and Windows use different engines and are unmeasured.
+  </p>
+
+  <div class="codepanel" id="code">
+    <div class="tabs" role="tablist" aria-label="Kind of window" data-i18n-aria="aria.tabs">
+      <button type="button" role="tab" id="tab-native" aria-selected="true" aria-controls="panel-code" data-i18n="tab.native">Native UI</button>
+      <button type="button" role="tab" id="tab-web" aria-selected="false" aria-controls="panel-code" data-i18n="tab.web">Web frontend</button>
+    </div>
+    <div class="panel" id="panel-code" role="tabpanel" aria-labelledby="tab-native">
+
+      <figure>
+        <figcaption>main.rs</figcaption>
+<pre id="code-native"><span class="kw">use</span> myrust_core::{
+    app::{App, WindowConfig, WindowContent},
+    ui::{button, column, text, NativeUi},
+};
+
+<span class="kw">fn</span> <span class="fn">main</span>() -&gt; <span class="ty">anyhow::Result</span>&lt;()&gt; {
+    <span class="kw">let</span> <span class="kw">mut</span> app = App::<span class="fn">new</span>(<span class="str">"counter"</span>)?;
+    <span class="kw">let</span> <span class="kw">mut</span> count = <span class="num">0</span>;
+
+    <span class="kw">let</span> ui = NativeUi::<span class="fn">new</span>(<span class="kw">move</span> |c| {
+        column(c).<span class="fn">gap</span>(<span class="num">12.0</span>).<span class="fn">children</span>(|c| {
+            <span class="fn">text</span>(c, &amp;<span class="fn">format</span>(<span class="str">"{count}"</span>));
+            <span class="kw">if</span> <span class="fn">button</span>(c, <span class="str">"Increment"</span>).clicked {
+                count += <span class="num">1</span>;
+            }
+        });
+    });
+
+    app.<span class="fn">on_ready</span>(<span class="kw">move</span> |ctx| {
+        ctx.<span class="fn">create_window</span>(WindowConfig {
+            title: <span class="str">"Counter"</span>.<span class="fn">into</span>(),
+            content: <span class="ty">Some</span>(<span class="ty">WindowContent</span>::<span class="fn">NativeUi</span>(ui.<span class="fn">clone</span>())),
+            ..<span class="ty">WindowConfig</span>::<span class="fn">default</span>()
+        })?;
+        <span class="ty">Ok</span>(())
+    })?;
+    app.<span class="fn">run</span>()
+}</pre>
+      </figure>
+
+      <div class="side" id="side-native">
+        <p class="label" data-i18n="side.native.label">No webview</p>
+        <p data-i18n-html="side.native.p1">
+          The view is a Rust closure over your app's state. MyRust calls it to build each frame, resolves
+          layout on the CPU, and rasterizes the display list into the window through <code>softbuffer</code>.
+          No HTML, no JavaScript, no IPC hop.
+        </p>
+        <p data-i18n-html="side.native.p2">
+          Interaction is immediate-mode: <code>button(c, "Increment").clicked</code> is the click state for
+          this frame, not a callback registration.
+        </p>
+        <div class="foot">
+          <p class="label" style="margin-bottom:.5rem" data-i18n="side.native.run">Run it</p>
+<pre><span style="color:var(--muted);user-select:none">$ </span>cargo run -p dashboard -- --native-ui</pre>
+        </div>
+      </div>
+
+      <div class="side" id="side-web" hidden>
+        <p class="label" data-i18n="side.web.label">System webview</p>
+        <p data-i18n="side.web.p1">
+          A page in the webview the OS already ships — WKWebView on macOS, WebKitGTK on Linux, WebView2 on
+          Windows. No bundled browser. Build the frontend with any stack.
+        </p>
+        <p data-i18n="side.web.p2">
+          Pages call registered Rust handlers and receive typed events. The TypeScript client is generated
+          from your Rust signatures.
+        </p>
+        <div class="foot">
+          <p class="label" style="margin-bottom:.5rem" data-i18n="side.web.bindings">Bindings</p>
+<pre><span class="kw">export const</span> <span class="fn">greet</span>: () =&gt; <span class="ty">Promise</span>&lt;<span class="ty">GreetResponse</span>&gt;;
+
+<span class="kw">const</span> res = <span class="kw">await</span> <span class="fn">greet</span>();
+document.body.textContent = res.message;</pre>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <ul class="features" id="native-ui">
+    <li><a class="feature" href="https://github.com/exposir/myrust#readme">
+      <h2><span data-i18n="f1.t">Native UI, no webview</span>
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4"/></svg>
+      </h2>
+      <p data-i18n="f1.d">An immediate-mode engine written in Rust: flex layout, display lists, TTF glyph rasterization, hover,
+         focus, Tab traversal, text fields, checkboxes, sliders and clipped scroll views.</p>
+    </a></li>
+    <li><a class="feature" href="https://github.com/exposir/myrust#readme">
+      <h2><span data-i18n="f2.t">Web frontends</span>
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4"/></svg>
+      </h2>
+      <p data-i18n="f2.d">Any web stack in the webview the OS already has: WKWebView, WebKitGTK, WebView2. No browser bundled,
+         no second runtime to ship.</p>
+    </a></li>
+    <li><a class="feature" href="https://github.com/exposir/myrust#readme">
+      <h2><span data-i18n="f3.t">Typed IPC</span>
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4"/></svg>
+      </h2>
+      <p data-i18n="f3.d">Register Rust handlers, generate a TypeScript client from their signatures, and push typed events
+         from Rust to the page.</p>
+    </a></li>
+    <li><a class="feature" href="https://github.com/exposir/myrust#readme">
+      <h2><span data-i18n="f4.t">Desktop APIs</span>
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4"/></svg>
+      </h2>
+      <p data-i18n="f4.d">Windows, menus, tray, notifications, clipboard, file dialogs, global shortcuts, drag and drop,
+         window state, deep links, downloads and single-instance locking.</p>
+    </a></li>
+    <li><a class="feature" href="https://github.com/exposir/myrust#readme">
+      <h2><span data-i18n="f5.t">No unsafe in the core</span>
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4"/></svg>
+      </h2>
+      <p data-i18n-html="f5.d"><code>myrust-core</code> is <code>#![forbid(unsafe_code)]</code>. The platform webview and windowing
+         backends come from upstream crates; our code stays safe Rust.</p>
+    </a></li>
+    <li><a class="feature" href="https://github.com/exposir/myrust#readme">
+      <h2><span data-i18n="f6.t">Ready to extend</span>
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4"/></svg>
+      </h2>
+      <p data-i18n="f6.d">A Cargo workspace with a core library, a CLI, and examples. Updater, packager and signing interfaces
+         are wired; platform packaging tools are not invoked yet.</p>
+    </a></li>
+  </ul>
+
+  <section class="bounds" id="boundaries">
+    <h2 data-i18n="bounds.t">What is not done yet</h2>
+    <p data-i18n="bounds.p">
+      This is an early framework. The list below is the honest boundary of what the current code does,
+      matching the README:
+    </p>
+    <ul>
+      <li data-i18n="bounds.l1">Native UI has no IME, text selection, clipboard, undo, or text shaping; the CPU presenter draws one
+          system TTF with no kerning, bidi, or font fallback.</li>
+      <li data-i18n="bounds.l2">Accessibility emits semantic nodes only — no AT-SPI, UIA, or NSAccessibility bridge is connected.</li>
+      <li data-i18n-html="bounds.l3">Animation redraw is best-effort through <code>request_redraw</code>; there is no timer-driven frame
+          scheduler.</li>
+      <li data-i18n-html="bounds.l4">The wgpu backend renders to an offscreen texture and is compile-validated only; the window presents
+          through the CPU rasterizer and <code>softbuffer</code>.</li>
+      <li data-i18n="bounds.l5">Window creation, rendering, mouse clicks, keyboard input and scrolling are verified under Xvfb on
+          Linux. Real desktop sessions, macOS and Windows are untested.</li>
+      <li data-i18n="bounds.l6">No code editor, rich text, Markdown, chart, or shader libraries — the engine stops at the UI
+          primitives.</li>
+    </ul>
+  </section>
+
+  <footer class="site">
+    <span>MyRust 0.1.0 · MIT License</span>
+    <nav>
+      <a href="https://github.com/exposir/myrust">GitHub</a>
+      <a href="https://github.com/exposir/myrust/releases" data-i18n="footer.releases">Releases</a>
+      <a href="https://github.com/exposir/myrust/tree/main/examples" data-i18n="nav.examples">Examples</a>
+      <a href="#boundaries" data-i18n="nav.boundaries">Boundaries</a>
+    </nav>
+  </footer>
+
+</main>
+
+<script>
+(function () {
+  var I18N = {
+    en: {
+      'title': 'MyRust — Desktop apps in Rust, with a native UI or a web frontend',
+      'desc': 'Build desktop apps in Rust. Draw a native UI with an immediate-mode engine on the CPU, or load a web frontend in the system webview that calls Rust through typed IPC with generated TypeScript bindings. No unsafe in the core.',
+      'nav.native': 'Native UI',
+      'nav.code': 'Code',
+      'nav.examples': 'Examples',
+      'nav.boundaries': 'Boundaries',
+      'hero.version': 'v0.1.0 · Linux verified, macOS and Windows untested',
+      'hero.h1': 'Desktop apps in Rust.',
+      'hero.sub': 'Small, typed, no unsafe core.',
+      'hero.lede': 'One binary for macOS, Windows and Linux. Draw a native UI with an immediate-mode engine, or load a web frontend in the webview the OS already has and call Rust through typed IPC.',
+      'hero.cta': 'Get started',
+      'stat.binary': 'Binary, stripped',
+      'stat.memNative': 'Memory, native UI',
+      'stat.memWeb': 'Memory, webview included',
+      'stat.cpu': 'CPU at idle',
+      'stats.note': 'Measured on this project\'s Linux container under Xvfb, release build, with a hello-world app (an 800×600 window with static content): binary after <code>strip</code>; memory as dirty anonymous pages summed across the process tree; CPU sampled over ten seconds at rest. Dirty pages are the Linux counterpart of macOS\'s physical footprint: clean file-backed pages are excluded, including the WebView libraries a native window never calls. Without a DRM device MyRust disables WebKitGTK\'s DMA-BUF renderer before it starts; machines with a GPU keep accelerated compositing. PSS, which counts those pages, is 57 MB for native UI and 205 MB with the webview. The webview figure includes the WebKitGTK web and network processes; macOS and Windows use different engines and are unmeasured.',
+      'tab.native': 'Native UI',
+      'tab.web': 'Web frontend',
+      'side.native.label': 'No webview',
+      'side.native.p1': 'The view is a Rust closure over your app\'s state. MyRust calls it to build each frame, resolves layout on the CPU, and rasterizes the display list into the window through <code>softbuffer</code>. No HTML, no JavaScript, no IPC hop.',
+      'side.native.p2': 'Interaction is immediate-mode: <code>button(c, "Increment").clicked</code> is the click state for this frame, not a callback registration.',
+      'side.native.run': 'Run it',
+      'side.web.label': 'System webview',
+      'side.web.p1': 'A page in the webview the OS already ships — WKWebView on macOS, WebKitGTK on Linux, WebView2 on Windows. No bundled browser. Build the frontend with any stack.',
+      'side.web.p2': 'Pages call registered Rust handlers and receive typed events. The TypeScript client is generated from your Rust signatures.',
+      'side.web.bindings': 'Bindings',
+      'f1.t': 'Native UI, no webview',
+      'f1.d': 'An immediate-mode engine written in Rust: flex layout, display lists, TTF glyph rasterization, hover, focus, Tab traversal, text fields, checkboxes, sliders and clipped scroll views.',
+      'f2.t': 'Web frontends',
+      'f2.d': 'Any web stack in the webview the OS already has: WKWebView, WebKitGTK, WebView2. No browser bundled, no second runtime to ship.',
+      'f3.t': 'Typed IPC',
+      'f3.d': 'Register Rust handlers, generate a TypeScript client from their signatures, and push typed events from Rust to the page.',
+      'f4.t': 'Desktop APIs',
+      'f4.d': 'Windows, menus, tray, notifications, clipboard, file dialogs, global shortcuts, drag and drop, window state, deep links, downloads and single-instance locking.',
+      'f5.t': 'No unsafe in the core',
+      'f5.d': '<code>myrust-core</code> is <code>#![forbid(unsafe_code)]</code>. The platform webview and windowing backends come from upstream crates; our code stays safe Rust.',
+      'f6.t': 'Ready to extend',
+      'f6.d': 'A Cargo workspace with a core library, a CLI, and examples. Updater, packager and signing interfaces are wired; platform packaging tools are not invoked yet.',
+      'bounds.t': 'What is not done yet',
+      'bounds.p': 'This is an early framework. The list below is the honest boundary of what the current code does, matching the README:',
+      'bounds.l1': 'Native UI has no IME, text selection, clipboard, undo, or text shaping; the CPU presenter draws one system TTF with no kerning, bidi, or font fallback.',
+      'bounds.l2': 'Accessibility emits semantic nodes only — no AT-SPI, UIA, or NSAccessibility bridge is connected.',
+      'bounds.l3': 'Animation redraw is best-effort through <code>request_redraw</code>; there is no timer-driven frame scheduler.',
+      'bounds.l4': 'The wgpu backend renders to an offscreen texture and is compile-validated only; the window presents through the CPU rasterizer and <code>softbuffer</code>.',
+      'bounds.l5': 'Window creation, rendering, mouse clicks, keyboard input and scrolling are verified under Xvfb on Linux. Real desktop sessions, macOS and Windows are untested.',
+      'bounds.l6': 'No code editor, rich text, Markdown, chart, or shader libraries — the engine stops at the UI primitives.',
+      'footer.releases': 'Releases',
+      'aria.install': 'Install command',
+      'aria.copy': 'Copy command',
+      'aria.tabs': 'Kind of window',
+      'lang.button': '中文',
+      'lang.aria': 'Switch to Chinese'
+    },
+    zh: {
+      'title': 'MyRust — Rust 桌面应用，原生 UI 或 Web 前端',
+      'desc': '用 Rust 构建桌面应用。用即时模式引擎在 CPU 上自绘原生界面，或在系统自带 WebView 里加载 Web 前端，通过类型化 IPC 和生成的 TypeScript 绑定调用 Rust。核心零 unsafe。',
+      'nav.native': '原生界面',
+      'nav.code': '代码',
+      'nav.examples': '示例',
+      'nav.boundaries': '边界',
+      'hero.version': 'v0.1.0 · Linux 已实机验证，macOS 与 Windows 未测',
+      'hero.h1': 'Rust 桌面应用。',
+      'hero.sub': '小体积、强类型、核心零 unsafe。',
+      'hero.lede': '一个二进制覆盖 macOS、Windows 与 Linux。用即时模式引擎自绘原生界面，或在系统自带 WebView 中加载 Web 前端，通过类型化 IPC 调用 Rust。',
+      'hero.cta': '开始使用',
+      'stat.binary': '二进制大小（strip 后）',
+      'stat.memNative': '内存（原生 UI）',
+      'stat.memWeb': '内存（含 WebView）',
+      'stat.cpu': '空闲 CPU',
+      'stats.note': '在本项目的 Linux 容器内、Xvfb 下以 release 构建和 hello-world 应用（800×600 窗口、静态内容）实测：二进制为 <code>strip</code> 后的大小；内存为按整棵进程树求和的脏匿名页；CPU 为空闲十秒内的采样。脏匿名页是 macOS 物理占用（physical footprint）在 Linux 上的对应口径，不计入干净的文件映射页，包括原生窗口从不调用的 WebView 库。没有 DRM 设备时，MyRust 会在 WebKit 启动前关闭它的 DMA-BUF 渲染器；有 GPU 的机器仍走硬件合成。计入这些页面的 PSS 分别为原生 UI 57 MB、含 WebView 205 MB。含 WebView 的数值包含 WebKitGTK 的 web 与 network 进程；macOS 与 Windows 使用不同引擎，尚未测量。',
+      'tab.native': '原生界面',
+      'tab.web': 'Web 前端',
+      'side.native.label': '无 WebView',
+      'side.native.p1': '视图是应用状态上的一个 Rust 闭包。MyRust 每帧调用它构建界面，在 CPU 上完成布局，再通过 <code>softbuffer</code> 把显示列表光栅化进窗口。没有 HTML，没有 JavaScript，没有 IPC 往返。',
+      'side.native.p2': '交互是即时模式的：<code>button(c, "Increment").clicked</code> 是这一帧的点击状态，不是回调注册。',
+      'side.native.run': '运行',
+      'side.web.label': '系统 WebView',
+      'side.web.p1': '页面运行在操作系统自带的 WebView 里 —— macOS 的 WKWebView、Linux 的 WebKitGTK、Windows 的 WebView2。不打包浏览器，前端可用任意技术栈。',
+      'side.web.p2': '页面调用注册的 Rust 处理函数并接收类型化事件。TypeScript 客户端由 Rust 签名生成。',
+      'side.web.bindings': '绑定',
+      'f1.t': '原生界面，不用 WebView',
+      'f1.d': '用 Rust 写的即时模式引擎：flex 布局、显示列表、TTF 字形光栅化、悬停、焦点、Tab 遍历、文本框、复选框、滑块与裁剪滚动视图。',
+      'f2.t': 'Web 前端',
+      'f2.d': '任意 Web 技术栈跑在系统自带 WebView 里：WKWebView、WebKitGTK、WebView2。不打包浏览器，不多带一个运行时。',
+      'f3.t': '类型化 IPC',
+      'f3.d': '注册 Rust 处理函数，按签名生成 TypeScript 客户端，并从 Rust 向页面推送类型化事件。',
+      'f4.t': '桌面能力',
+      'f4.d': '窗口、菜单、托盘、通知、剪贴板、文件对话框、全局快捷键、拖放、窗口状态、深链、下载与单实例锁。',
+      'f5.t': '核心零 unsafe',
+      'f5.d': '<code>myrust-core</code> 声明 <code>#![forbid(unsafe_code)]</code>。平台 WebView 与窗口后端来自上游 crate，我们的代码保持安全 Rust。',
+      'f6.t': '可扩展',
+      'f6.d': 'Cargo workspace：核心库、CLI 与示例。更新器、打包器与签名接口已接通，但尚未调用平台打包工具。',
+      'bounds.t': '尚未完成的部分',
+      'bounds.p': '这是一个早期框架。下面是当前代码能力的诚实边界，与 README 一致：',
+      'bounds.l1': '原生界面没有输入法、文本选择、剪贴板、撤销与文本整形；CPU 呈现器只绘制一个系统 TTF，无字距调整、双向文本与字体回退。',
+      'bounds.l2': '无障碍只输出语义节点 —— 没有接入 AT-SPI、UIA 或 NSAccessibility 桥。',
+      'bounds.l3': '动画重绘通过 <code>request_redraw</code> 尽力而为；没有定时器驱动的帧调度。',
+      'bounds.l4': 'wgpu 后端渲染到离屏纹理，仅做过编译验证；窗口通过 CPU 光栅化器与 <code>softbuffer</code> 呈现。',
+      'bounds.l5': '窗口创建、渲染、鼠标点击、键盘输入与滚动已在 Linux 的 Xvfb 下验证。真实桌面会话、macOS 与 Windows 未测。',
+      'bounds.l6': '没有代码编辑器、富文本、Markdown、图表或着色器库 —— 引擎止步于 UI 原语。',
+      'footer.releases': '发布',
+      'aria.install': '安装命令',
+      'aria.copy': '复制命令',
+      'aria.tabs': '窗口类型',
+      'lang.button': 'EN',
+      'lang.aria': 'Switch to English'
+    }
+  };
+
+  var langBtn = document.getElementById('lang-toggle');
+  var metaDesc = document.querySelector('meta[name="description"]');
+  var lang = 'en';
+
+  function t(key) {
+    return (I18N[lang] && I18N[lang][key]) || I18N.en[key] || key;
+  }
+
+  function applyLang() {
+    document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
+    document.title = t('title');
+    if (metaDesc) metaDesc.setAttribute('content', t('desc'));
+    var nodes = document.querySelectorAll('[data-i18n]');
+    for (var i = 0; i < nodes.length; i++) nodes[i].textContent = t(nodes[i].getAttribute('data-i18n'));
+    var rich = document.querySelectorAll('[data-i18n-html]');
+    for (var j = 0; j < rich.length; j++) rich[j].innerHTML = t(rich[j].getAttribute('data-i18n-html'));
+    var aria = document.querySelectorAll('[data-i18n-aria]');
+    for (var k = 0; k < aria.length; k++) aria[k].setAttribute('aria-label', t(aria[k].getAttribute('data-i18n-aria')));
+    langBtn.textContent = t('lang.button');
+    langBtn.setAttribute('aria-label', t('lang.aria'));
+  }
+
+  var stored = null;
+  try { stored = localStorage.getItem('myrust-lang'); } catch (e) {}
+  var query = null;
+  try { query = new URLSearchParams(location.search).get('lang'); } catch (e) {}
+  if (query === 'zh' || query === 'en') {
+    lang = query;
+    try { localStorage.setItem('myrust-lang', lang); } catch (e) {}
+  } else if (stored === 'zh' || stored === 'en') {
+    lang = stored;
+  } else if ((navigator.language || '').toLowerCase().indexOf('zh') === 0) {
+    lang = 'zh';
+  }
+  applyLang();
+
+  langBtn.addEventListener('click', function () {
+    lang = lang === 'en' ? 'zh' : 'en';
+    try { localStorage.setItem('myrust-lang', lang); } catch (e) {}
+    applyLang();
+  });
+
+  var tabs = document.querySelectorAll('.tabs [role="tab"]');
+  var sideNative = document.getElementById('side-native');
+  var sideWeb = document.getElementById('side-web');
+  var codeNative = document.getElementById('code-native');
+  var panel = document.getElementById('panel-code');
+
+  function select(kind) {
+    var isNative = kind === 'native';
+    tabs.forEach(function (tab) {
+      tab.setAttribute('aria-selected', String(tab.id === 'tab-' + kind));
+    });
+    panel.setAttribute('aria-labelledby', 'tab-' + kind);
+    sideNative.hidden = !isNative;
+    sideWeb.hidden = isNative;
+    codeNative.style.display = isNative ? '' : 'none';
+    if (!isNative && !document.getElementById('code-web')) {
+      var pre = document.createElement('pre');
+      pre.id = 'code-web';
+      pre.innerHTML = webSource();
+      codeNative.parentNode.insertBefore(pre, codeNative.nextSibling);
+    }
+    var web = document.getElementById('code-web');
+    if (web) web.style.display = isNative ? 'none' : '';
+  }
+
+  function webSource() {
+    return [
+      '<span class="kw">use</span> myrust_core::{',
+      '    app::{App, WindowConfig},',
+      '    ipc::{IpcType, NoRequest},',
+      '    webview::{PageSource, WebViewConfig},',
+      '};',
+      '<span class="kw">use</span> serde::Serialize;',
+      '',
+      '<span class="attr">#[derive(Serialize)]</span>',
+      '<span class="kw">struct</span> <span class="ty">GreetResponse</span> { message: <span class="ty">String</span> }',
+      '',
+      '<span class="kw">fn</span> <span class="fn">main</span>() -&gt; <span class="ty">anyhow::Result</span>&lt;()&gt; {',
+      '    <span class="kw">let</span> <span class="kw">mut</span> app = App::<span class="fn">new</span>(<span class="str">"hello"</span>)?;',
+      '    app.<span class="fn">ipc_router</span>().<span class="fn">register</span>::&lt;<span class="ty">NoRequest</span>, <span class="ty">GreetResponse</span>, _&gt;(',
+      '        <span class="str">"greet"</span>, <span class="str">"Returns a greeting."</span>,',
+      '        |_| <span class="ty">Ok</span>(<span class="ty">GreetResponse</span> { message: <span class="str">"Hello from Rust!"</span>.<span class="fn">into</span>() }),',
+      '    )?;',
+      '',
+      '    app.<span class="fn">on_ready</span>(|ctx| {',
+      '        ctx.<span class="fn">create_window</span>(WindowConfig {',
+      '            title: <span class="str">"Hello"</span>.<span class="fn">into</span>(),',
+      '            webview: <span class="ty">Some</span>(<span class="ty">WebViewConfig</span> {',
+      '                source: <span class="ty">PageSource</span>::<span class="fn">Html</span>(HTML.<span class="fn">into</span>()),',
+      '                devtools: <span class="kw">false</span>,',
+      '            }),',
+      '            ..<span class="ty">WindowConfig</span>::<span class="fn">default</span>()',
+      '        })?;',
+      '        <span class="ty">Ok</span>(())',
+      '    })?;',
+      '    app.<span class="fn">run</span>()',
+      '}'
+    ].join('\n');
+  }
+
+  tabs.forEach(function (tab) {
+    tab.addEventListener('click', function () {
+      select(tab.id === 'tab-web' ? 'web' : 'native');
+    });
+  });
+
+  document.querySelectorAll('.copy[data-copy]').forEach(function (btn) {
+    btn.addEventListener('click', function (event) {
+      event.stopPropagation();
+      var text = btn.getAttribute('data-copy');
+      var host = btn.closest('.install');
+      var done = function () {
+        if (host) host.setAttribute('data-copied', '');
+        setTimeout(function () { if (host) host.removeAttribute('data-copied'); }, 1600);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, done);
+      } else {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); } catch (e) {}
+        document.body.removeChild(ta);
+        done();
+      }
+    });
+  });
+})();
+</script>
+</body>
+</html>

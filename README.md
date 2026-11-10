@@ -6,6 +6,11 @@
 
 **Desktop apps in Rust, with a web frontend or a native WebView.**
 
+The project site is a single static file: [`website/index.html`](website/index.html). Open it directly or serve the
+`website/` directory — no build step. It is published at <https://myrust.pages.dev/> in English and Simplified
+Chinese; the language toggle in the header switches the page, remembers the choice, and accepts `?lang=zh` or
+`?lang=en` in the URL.
+
 Each MyRust window loads a **web page** in the system's native WebView — WKWebView on macOS, WebKitGTK on Linux, WebView2 on Windows. Build the frontend with any web framework; it calls your Rust code through typed IPC with auto-generated TypeScript bindings.
 
 - **No `unsafe` in the core** — `myrust-core` uses `#![forbid(unsafe_code)]` (platform WebView backends are provided by upstream crates).
@@ -83,6 +88,9 @@ cargo run -p dashboard -- --native-ui
 cargo run -p dashboard -- --generate-ts
 ```
 
+More focused examples — WebView IPC, native UI, animation, drag and drop —
+live in [`examples/`](examples/README.md).
+
 ### Native UI renderer
 
 The default workspace build has no GPU dependency. `SoftwareRenderer` is
@@ -96,6 +104,14 @@ cargo build -p myrust-core --features gpu
 HTTP, WebView, CLI, and Dashboard startup never initialize wgpu implicitly.
 Applications must call `create_renderer` explicitly and select
 `RendererKind::Wgpu` when a missing GPU must be treated as an error.
+
+Developer tools follow the upstream `wry` gate: `WebView::open_devtools` and
+`Page::open_devtools` exist in debug builds and when the `devtools` feature is
+enabled. A release build without that feature does not compile those methods.
+
+```bash
+cargo build -p myrust-core --features devtools
+```
 
 ### CLI
 
@@ -150,7 +166,7 @@ myrust/
 │           ├── shortcut.rs # Global keyboard shortcuts
 │           └── instance.rs # Single-instance lock
 ├── myrust-cli/             # CLI (dev server, build)
-├── examples/dashboard/     # Dashboard example
+├── examples/               # Dashboard plus focused example apps (see examples/README.md)
 └── frontend/               # Web frontend assets
 ```
 

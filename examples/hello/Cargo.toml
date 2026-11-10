@@ -1,0 +1,12 @@
+[package]
+name = "example-hello"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Smallest MyRust app: one window and one typed IPC call"
+
+[dependencies]
+anyhow.workspace = true
+myrust-core = { path = "../../myrust-core" }
+serde.workspace = true
