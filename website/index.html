@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>MyRust — Desktop apps in Rust, with a native UI or a web frontend</title>
 <meta name="description" content="Build desktop apps in Rust. Draw a native UI with an immediate-mode engine on the CPU, or load a web frontend in the system webview that calls Rust through typed IPC with generated TypeScript bindings. No unsafe in the core.">
+<script src="/assets/theme-init.js"></script>
 <link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjEyMCAxMDAgMTYwIDE5MCI+PHBhdGggZmlsbD0iIzIyMjIyNiIgZD0iTTIwMCAyODAgMTMwLjcyIDI0MCAxMzAuNzIgMTYwIDIwMCAxMjAgMjY5LjI4IDE2MCAyNjkuMjggMjQwWiIvPjxnIGZpbGw9IiNmZmZmZmYiPjxjaXJjbGUgY3g9IjE2NS4zNiIgY3k9IjI2MCIgcj0iMTYiLz48Y2lyY2xlIGN4PSIxMzAuNzIiIGN5PSIyMDAiIHI9IjE2Ii8+PGNpcmNsZSBjeD0iMTY1LjM2IiBjeT0iMTQwIiByPSIxNiIvPjxjaXJjbGUgY3g9IjIzNC42NCIgY3k9IjE0MCIgcj0iMTYiLz48Y2lyY2xlIGN4PSIyNjkuMjgiIGN5PSIyMDAiIHI9IjE2Ii8+PGNpcmNsZSBjeD0iMjM0LjY0IiBjeT0iMjYwIiByPSIxNiIvPjxwYXRoIGQ9Ik0yMDAgMjQ5LjQ0IDE1Ny4xNiAyMjQuNzIgMTU3LjE2IDE3NS4yOCAyMDAgMTUwLjU2IDI0Mi44NCAxNzUuMjggMjQyLjg0IDIyNC43MloiLz48cGF0aCBkPSJNMjAwIDE3NiAyMjQgMjEyIDE3NiAyMTJaIi8+PGNpcmNsZSBjeD0iMjAwIiBjeT0iMjAwIiByPSI5Ii8+PC9nPjxwYXRoIGZpbGw9IiMyMjIyMjYiIGQ9Ik0yMDAgMjI0IDE3NiAxODggMjI0IDE4OFoiLz48L3N2Zz4=" type="image/svg+xml">
 <style>
 @font-face{font-family:"Geist";src:local("Inter"),local("-apple-system"),local("Segoe UI"),local("Helvetica Neue");font-display:swap}
@@ -13,12 +14,13 @@
   --accent:#0f8fb8;--accent-ink:#0a6d8d;--warn:#c2410c;--ok:#15803d;
   --radius:8px;
 }
-@media (prefers-color-scheme:dark){
-  :root{--bg:#141416;--fg:#f2f2f4;--muted:#9a9aa2;--border:#2a2a2e;--code:#1a1a1d;--card:#1a1a1d;
-    --accent:#3fc0e0;--accent-ink:#6fd3ec;--warn:#fb923c;--ok:#4ade80}
+html.dark{
+  color-scheme:dark;
+  --bg:#141416;--fg:#f2f2f4;--muted:#9a9aa2;--border:#2a2a2e;--code:#1a1a1d;--card:#1a1a1d;
+  --accent:#3fc0e0;--accent-ink:#6fd3ec;--warn:#fb923c;--ok:#4ade80
 }
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-html{scroll-padding-top:6rem;color-scheme:light dark}
+html{scroll-padding-top:6rem;color-scheme:light}
 body{
   font-family:"Geist",ui-sans-serif,system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",Roboto,sans-serif;
   background:var(--bg);color:var(--fg);-webkit-font-smoothing:antialiased;
@@ -140,10 +142,13 @@ h1 .sub{display:block;color:var(--muted)}
 /* Syntax */
 .kw{color:#a626a4}.ty{color:#c18401}.fn{color:#4078f2}.str{color:#50a14f}.cm{color:#a0a1a7;font-style:italic}
 .num{color:#986801}.attr{color:#e45649}
-@media(prefers-color-scheme:dark){
-  .kw{color:#c678dd}.ty{color:#e5c07b}.fn{color:#61afef}.str{color:#98c379}.cm{color:#7f848e}
-  .num{color:#d19a66}.attr{color:#e06c75}
-}
+html.dark .kw{color:#c678dd}
+html.dark .ty{color:#e5c07b}
+html.dark .fn{color:#61afef}
+html.dark .str{color:#98c379}
+html.dark .cm{color:#7f848e}
+html.dark .num{color:#d19a66}
+html.dark .attr{color:#e06c75}
 
 /* Features */
 .features{display:grid;gap:1px;border-top:1px solid var(--border);background:var(--border);list-style:none}
@@ -175,6 +180,53 @@ footer.site nav{display:flex;flex-wrap:wrap;gap:.5rem 1.5rem}
 .bounds ul{margin-top:.75rem;padding-left:1.1rem;font-size:.8125rem;line-height:1.75;color:var(--muted)}
 .bounds li{margin:.2rem 0}
 .bounds li::marker{color:color-mix(in srgb,var(--muted) 60%,transparent)}
+
+/* Header controls */
+.search-btn{display:none;align-items:center;gap:.5rem;height:2.25rem;width:14rem;padding:0 .625rem;
+  border:1px solid var(--border);border-radius:var(--radius);background:color-mix(in srgb,var(--fg) 4%,transparent);
+  color:var(--muted);font-size:.875rem;cursor:pointer;transition:background .15s,color .15s}
+.search-btn:hover{color:var(--fg);background:color-mix(in srgb,var(--fg) 7%,transparent)}
+.search-btn svg{width:15px;height:15px;flex:none}
+.search-btn kbd{margin-left:auto;padding:.05rem .3rem;border:1px solid var(--border);border-radius:4px;
+  font-family:ui-monospace,Menlo,monospace;font-size:10px;line-height:1.4;color:var(--muted)}
+@media(min-width:1024px){.search-btn{display:inline-flex}}
+.icon-btn{display:inline-flex;align-items:center;justify-content:center;width:2.25rem;height:2.25rem;border:0;
+  border-radius:var(--radius);background:none;color:var(--muted);cursor:pointer;transition:color .15s,background .15s}
+.icon-btn:hover{color:var(--fg);background:color-mix(in srgb,var(--fg) 7%,transparent)}
+.icon-btn svg{width:16px;height:16px}
+.search-icon{display:inline-flex}
+@media(min-width:1024px){.search-icon{display:none}}
+.menu-trigger{display:inline-flex}
+@media(min-width:640px){.menu-trigger{display:none}}
+.theme-sun{display:block}
+html.dark .theme-sun{display:none}
+html.dark .theme-moon{display:block}
+.theme-moon{display:none}
+.menu{position:absolute;top:3.25rem;right:1rem;z-index:50;min-width:9rem;padding:.25rem;border:1px solid var(--border);
+  border-radius:var(--radius);background:var(--bg);color:var(--fg);box-shadow:0 16px 40px -16px rgb(0 0 0/.45)}
+.menu[hidden]{display:none}
+.menu a,.menu button{display:flex;align-items:center;gap:.5rem;width:100%;padding:.4rem .6rem;border:0;
+  border-radius:calc(var(--radius) - 3px);background:none;color:inherit;font:inherit;font-size:.875rem;
+  text-align:left;cursor:pointer}
+.menu a:hover,.menu button:hover{background:color-mix(in srgb,var(--fg) 7%,transparent)}
+.menu button[aria-checked="true"]{background:color-mix(in srgb,var(--fg) 7%,transparent)}
+
+/* Search dialog */
+.search-overlay{position:fixed;inset:0;z-index:60;display:none;align-items:flex-start;justify-content:center;
+  padding:12vh 1rem 1rem;background:rgb(0 0 0/.45);backdrop-filter:blur(4px)}
+.search-overlay[data-open]{display:flex}
+.search-panel{width:100%;max-width:34rem;overflow:hidden;border:1px solid var(--border);border-radius:var(--radius);
+  background:var(--bg);color:var(--fg);box-shadow:0 24px 64px -24px rgb(0 0 0/.55)}
+.search-panel input{width:100%;padding:.8rem 1rem;border:0;border-bottom:1px solid var(--border);
+  background:transparent;color:inherit;font:inherit;outline:none}
+.search-results{max-height:52vh;overflow-y:auto;padding:.35rem}
+.search-result{display:flex;width:100%;align-items:center;gap:.65rem;padding:.5rem .75rem;border:0;
+  border-radius:calc(var(--radius) - 3px);background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.search-result:hover,.search-result[data-active]{background:color-mix(in srgb,var(--fg) 7%,transparent)}
+.search-title{font-size:.875rem}
+.search-section{margin-left:auto;font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--muted)}
+.search-empty{padding:1.5rem 1rem;text-align:center;font-size:.875rem;color:var(--muted)}
 </style>
 </head>
 <body>
@@ -197,16 +249,41 @@ footer.site nav{display:flex;flex-wrap:wrap;gap:.5rem 1.5rem}
   </a>
   <nav>
     <a href="/docs/ui" data-i18n="nav.docs">Docs</a>
-    <a href="#native-ui" data-i18n="nav.native">Native UI</a>
-    <a href="#code" data-i18n="nav.code">Code</a>
+    <a href="/docs/ui" data-i18n="nav.ui">UI</a>
     <a href="https://github.com/exposir/myrust/tree/main/examples" data-i18n="nav.examples">Examples</a>
-    <a href="#boundaries" data-i18n="nav.boundaries">Boundaries</a>
+    <a href="/" data-i18n="nav.home">Home</a>
   </nav>
   <div class="right">
+    <button class="search-btn" type="button" data-search-open aria-label="Search docs">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+      <span data-i18n="search.label">Search docs…</span>
+      <kbd>⌘K</kbd>
+    </button>
+    <button class="icon-btn search-icon" type="button" data-search-open aria-label="Search docs">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+    </button>
     <button class="lang" id="lang-toggle" type="button" aria-label="Switch to Chinese">中文</button>
     <a class="icon-link" href="https://github.com/exposir/myrust" aria-label="GitHub">
       <svg viewBox="0 0 16 16" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
     </a>
+    <button class="icon-btn" id="theme-trigger" type="button" aria-label="Theme" aria-haspopup="menu">
+      <svg class="theme-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+      <svg class="theme-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+    </button>
+    <div class="menu" id="theme-menu" role="menu" hidden>
+      <button type="button" role="menuitemradio" data-theme-value="light" data-i18n="theme.light">Light</button>
+      <button type="button" role="menuitemradio" data-theme-value="dark" data-i18n="theme.dark">Dark</button>
+      <button type="button" role="menuitemradio" data-theme-value="system" data-i18n="theme.system">System</button>
+    </div>
+    <button class="icon-btn menu-trigger" id="nav-trigger" type="button" aria-label="Navigation menu" aria-haspopup="menu">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16"/><path d="M4 12h16"/><path d="M4 19h16"/></svg>
+    </button>
+    <div class="menu" id="nav-menu" role="menu" hidden>
+      <a role="menuitem" href="/docs/ui" data-i18n="nav.docs">Docs</a>
+      <a role="menuitem" href="/docs/ui" data-i18n="nav.ui">UI</a>
+      <a role="menuitem" href="https://github.com/exposir/myrust/tree/main/examples" data-i18n="nav.examples">Examples</a>
+      <a role="menuitem" href="/" data-i18n="nav.home">Home</a>
+    </div>
   </div>
 </header>
 
@@ -440,6 +517,14 @@ document.body.textContent = res.message;</pre>
 
 </main>
 
+<div class="search-overlay" id="search-overlay">
+  <div class="search-panel" role="dialog" aria-modal="true" aria-label="Search docs">
+    <input id="search-input" type="text" placeholder="Search docs…" autocomplete="off">
+    <div class="search-results" id="search-results"></div>
+  </div>
+</div>
+<script src="/assets/docs-entries.js"></script>
+<script src="/assets/search.js"></script>
 <script>
 (function () {
   var I18N = {
@@ -447,6 +532,12 @@ document.body.textContent = res.message;</pre>
       'title': 'MyRust — Desktop apps in Rust, with a native UI or a web frontend',
       'desc': 'Build desktop apps in Rust. Draw a native UI with an immediate-mode engine on the CPU, or load a web frontend in the system webview that calls Rust through typed IPC with generated TypeScript bindings. No unsafe in the core.',
       'nav.docs': 'Docs',
+      'nav.ui': 'UI',
+      'nav.home': 'Home',
+      'search.label': 'Search docs…',
+      'theme.light': 'Light',
+      'theme.dark': 'Dark',
+      'theme.system': 'System',
       'nav.native': 'Native UI',
       'nav.code': 'Code',
       'nav.examples': 'Examples',
@@ -502,6 +593,12 @@ document.body.textContent = res.message;</pre>
       'title': 'MyRust — Rust 桌面应用，原生 UI 或 Web 前端',
       'desc': '用 Rust 构建桌面应用。用即时模式引擎在 CPU 上自绘原生界面，或在系统自带 WebView 里加载 Web 前端，通过类型化 IPC 和生成的 TypeScript 绑定调用 Rust。核心零 unsafe。',
       'nav.docs': '文档',
+      'nav.ui': '界面',
+      'nav.home': '首页',
+      'search.label': '搜索文档…',
+      'theme.light': '浅色',
+      'theme.dark': '深色',
+      'theme.system': '跟随系统',
       'nav.native': '原生界面',
       'nav.code': '代码',
       'nav.examples': '示例',
@@ -685,6 +782,57 @@ document.body.textContent = res.message;</pre>
       }
     });
   });
+})();
+</script>
+<script>
+(function () {
+  var root = document.documentElement;
+  var trigger = document.getElementById('theme-trigger');
+  var menu = document.getElementById('theme-menu');
+  var navTrigger = document.getElementById('nav-trigger');
+  var navMenu = document.getElementById('nav-menu');
+  var themeButtons = menu.querySelectorAll('[data-theme-value]');
+  function closeMenus() { menu.hidden = true; navMenu.hidden = true; }
+  function stored() {
+    try { var v = localStorage.getItem('theme'); return v === 'light' || v === 'dark' ? v : 'system'; }
+    catch (e) { return 'system'; }
+  }
+  function mark() {
+    var current = stored();
+    for (var i = 0; i < themeButtons.length; i++) {
+      themeButtons[i].setAttribute('aria-checked',
+        themeButtons[i].getAttribute('data-theme-value') === current ? 'true' : 'false');
+    }
+  }
+  function apply(theme) {
+    try {
+      if (theme === 'system') localStorage.removeItem('theme');
+      else localStorage.setItem('theme', theme);
+    } catch (e) {}
+    var dark = theme === 'dark' || (theme === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
+    root.classList.toggle('dark', dark);
+    mark();
+  }
+  for (var i = 0; i < themeButtons.length; i++) {
+    themeButtons[i].addEventListener('click', function () { apply(this.getAttribute('data-theme-value')); closeMenus(); });
+  }
+  trigger.addEventListener('click', function (event) {
+    event.stopPropagation();
+    var wasOpen = !menu.hidden;
+    closeMenus();
+    menu.hidden = wasOpen;
+  });
+  navTrigger.addEventListener('click', function (event) {
+    event.stopPropagation();
+    var wasOpen = !navMenu.hidden;
+    closeMenus();
+    navMenu.hidden = wasOpen;
+  });
+  [menu, navMenu].forEach(function (el) { el.addEventListener('click', function (event) { event.stopPropagation(); }); });
+  document.addEventListener('click', closeMenus);
+  document.addEventListener('keydown', function (event) { if (event.key === 'Escape') closeMenus(); });
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function () { if (stored() === 'system') apply('system'); });
+  mark();
 })();
 </script>
 </body>
