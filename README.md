@@ -6,8 +6,9 @@
 
 **Desktop apps in Rust, with a web frontend or a native WebView.**
 
-The project site is a single static file: [`website/index.html`](website/index.html). Open it directly or serve the
-`website/` directory — no build step. It is published at <https://myrust.pages.dev/> in English and Simplified
+The project site is static: [`website/index.html`](website/index.html) is the homepage, and
+[`website/docs/ui/index.html`](website/docs/ui/index.html) is the native UI documentation. Serve the `website/`
+directory directly — no build step. It is published at <https://myrust.pages.dev/> in English and Simplified
 Chinese; the language toggle in the header switches the page, remembers the choice, and accepts `?lang=zh` or
 `?lang=en` in the URL.
 
