@@ -699,7 +699,7 @@ fn tabs_demo(context: &mut Context, selected: &Rc<RefCell<usize>>, frame: &Rc<Ce
             });
             text(
                 context,
-                "Click a tab or use Left/Right. The selected index is caller-owned.",
+                "Click a tab to focus it, then use Left/Right. The selected index is caller-owned.",
             )
             .font_size(12.0)
             .color(Color::rgb(148, 163, 184));
