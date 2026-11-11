@@ -46,14 +46,24 @@ pub enum Key {
     Backspace,
     /// Delete the character after the cursor.
     Delete,
-    /// Move left.
+    /// Dismiss the active overlay or clear transient state.
+    Escape,
+    /// Move left or to the previous choice.
     ArrowLeft,
-    /// Move right.
+    /// Move right or to the next choice.
     ArrowRight,
+    /// Move up or to the previous choice.
+    ArrowUp,
+    /// Move down or to the next choice.
+    ArrowDown,
     /// Move to the beginning.
     Home,
     /// Move to the end.
     End,
+    /// Move to the previous page or month.
+    PageUp,
+    /// Move to the next page or month.
+    PageDown,
 }
 
 /// Platform-neutral input emitted by the window integration layer.

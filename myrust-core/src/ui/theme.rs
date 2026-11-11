@@ -131,6 +131,21 @@ impl Theme {
         }
     }
 
+    /// Returns a high-contrast warning color for validation and error text.
+    ///
+    /// This is an additive method rather than a `Theme` field so existing
+    /// struct literals keep compiling. The value is derived from the
+    /// background luminance instead of a separately stored token.
+    pub fn warn(&self) -> Color {
+        let brightness =
+            (self.background.r as u16 + self.background.g as u16 + self.background.b as u16) / 3;
+        if brightness >= 140 {
+            Color::rgb(180, 83, 9)
+        } else {
+            Color::rgb(251, 191, 36)
+        }
+    }
+
     /// Detects light/dark appearance, falling back to dark when unavailable.
     ///
     /// Accent color and high-contrast preference are not queried.

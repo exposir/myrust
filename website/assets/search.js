@@ -11,7 +11,23 @@
   var active = 0;
   var current = [];
 
+  function lang() {
+    if (window.__docLang === "zh" || window.__docLang === "en") return window.__docLang;
+    try {
+      var stored = localStorage.getItem("myrust-lang");
+      if (stored === "zh" || stored === "en") return stored;
+    } catch (e) {}
+    return "en";
+  }
+
+  function field(entry, name) {
+    return lang() === "zh" ? entry[name + "Zh"] || entry[name] : entry[name];
+  }
+
   function statusLabel(status) {
+    if (lang() === "zh") {
+      return status === "done" ? "已实现" : status === "partial" ? "部分实现" : "未实现";
+    }
     return status === "done" ? "Implemented" : status === "partial" ? "Partial" : "Not implemented";
   }
 
@@ -39,14 +55,19 @@
     var q = query.trim().toLowerCase();
     current = data.filter(function (entry) {
       if (!q) return true;
-      return (entry.title + " " + entry.section + " " + entry.text).toLowerCase().indexOf(q) !== -1;
+      var hay = [
+        entry.title, entry.titleZh || "",
+        entry.section, entry.sectionZh || "",
+        entry.text, entry.textZh || "",
+      ].join(" ").toLowerCase();
+      return hay.indexOf(q) !== -1;
     });
     active = 0;
     results.replaceChildren();
     if (!current.length) {
       var empty = document.createElement("div");
       empty.className = "search-empty";
-      empty.textContent = "No matches.";
+      empty.textContent = lang() === "zh" ? "没有匹配结果。" : "No matches.";
       results.append(empty);
       return;
     }
@@ -57,10 +78,10 @@
       if (index === active) button.setAttribute("data-active", "");
       var title = document.createElement("span");
       title.className = "search-title";
-      title.textContent = entry.title;
+      title.textContent = field(entry, "title");
       var meta = document.createElement("span");
       meta.className = "search-section";
-      meta.textContent = entry.section + " · " + statusLabel(entry.status);
+      meta.textContent = field(entry, "section") + " · " + statusLabel(entry.status);
       button.append(title, meta);
       button.addEventListener("click", function () { go(entry); });
       results.append(button);

@@ -23,6 +23,30 @@ pub enum Role {
     Label,
     /// Scrollable region.
     ScrollView,
+    /// On/off switch.
+    Switch,
+    /// Group of mutually exclusive radio buttons.
+    RadioGroup,
+    /// One radio button.
+    Radio,
+    /// Drop-down choice control.
+    ComboBox,
+    /// One choice in a list or drop-down.
+    Option,
+    /// Row of tabs.
+    TabList,
+    /// One tab.
+    Tab,
+    /// Determinate or indeterminate progress.
+    ProgressBar,
+    /// Busy indicator.
+    Spinner,
+    /// Short count or status pill.
+    Badge,
+    /// Header that shows or hides content.
+    Disclosure,
+    /// Floating surface above the window content.
+    Popup,
 }
 
 /// One frame's accessibility node.

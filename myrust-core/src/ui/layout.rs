@@ -528,24 +528,23 @@ fn layout_grid(
     let columns = node.style.grid_columns.max(1);
     let total_column_gap = node.style.gap * columns.saturating_sub(1) as f32;
     let column_width = ((content_width - total_column_gap) / columns as f32).max(0.0);
+    let row_height = children
+        .iter()
+        .map(|child| {
+            let size = base_size(child);
+            size.height + child.style.margin.top + child.style.margin.bottom
+        })
+        .fold(0.0_f32, f32::max);
     let mut y_cursor = 0.0;
 
-    for (row_index, row) in children.chunks(columns).enumerate() {
-        let row_height = row
-            .iter()
-            .map(|child| {
-                let size = base_size(child);
-                size.height + child.style.margin.top + child.style.margin.bottom
-            })
-            .fold(0.0_f32, f32::max);
-
+    for row in children.chunks(columns) {
         for (column, child) in row.iter().enumerate() {
             let margins = child.style.margin;
             let width = clamp_axis_for_child(
                 (column_width - margins.left - margins.right).max(0.0),
                 child,
                 FlexDirection::Row,
-                false,
+                true,
             );
             let height = base_size(child).height;
             let x =
@@ -555,9 +554,6 @@ fn layout_grid(
         }
 
         y_cursor += row_height + node.style.gap;
-        if row_index + 1 >= children.len().div_ceil(columns) {
-            break;
-        }
     }
 
     let _ = content_height;

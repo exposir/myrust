@@ -519,7 +519,7 @@ document.body.textContent = res.message;</pre>
 
 <div class="search-overlay" id="search-overlay">
   <div class="search-panel" role="dialog" aria-modal="true" aria-label="Search docs">
-    <input id="search-input" type="text" placeholder="Search docs…" autocomplete="off">
+    <input id="search-input" type="text" placeholder="Search docs…" data-i18n-placeholder="search.label" autocomplete="off">
     <div class="search-results" id="search-results"></div>
   </div>
 </div>
@@ -670,8 +670,11 @@ document.body.textContent = res.message;</pre>
     for (var j = 0; j < rich.length; j++) rich[j].innerHTML = t(rich[j].getAttribute('data-i18n-html'));
     var aria = document.querySelectorAll('[data-i18n-aria]');
     for (var k = 0; k < aria.length; k++) aria[k].setAttribute('aria-label', t(aria[k].getAttribute('data-i18n-aria')));
+    var placeholders = document.querySelectorAll('[data-i18n-placeholder]');
+    for (var m = 0; m < placeholders.length; m++) placeholders[m].setAttribute('placeholder', t(placeholders[m].getAttribute('data-i18n-placeholder')));
     langBtn.textContent = t('lang.button');
     langBtn.setAttribute('aria-label', t('lang.aria'));
+    window.__docLang = lang;
   }
 
   var stored = null;

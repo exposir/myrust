@@ -13,6 +13,7 @@ use super::font::{default_font, FontFace};
 use super::layout::Point;
 use super::paint::{Color, DisplayList, DrawCommand, GradientStop, Radius, Rect};
 use super::render::{color_to_array, intersect_rects, CommandCounts, RenderSize, TransformMatrix};
+use super::svg::{parse_svg_path, SvgContour};
 
 /// Error produced while rasterizing a display list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -40,7 +41,7 @@ pub struct CpuFrame {
     pub pixels: Vec<u32>,
     /// Command counts consumed while drawing.
     pub command_counts: CommandCounts,
-    /// SVG/image commands that were not drawn by the presenter.
+    /// Image commands that were not drawn by the presenter.
     pub unsupported_commands: usize,
     /// Glyphs missing from the active real font or bitmap fallback.
     pub unsupported_glyphs: usize,
@@ -61,10 +62,11 @@ impl CpuRasterizer {
     /// Rasterizes a display list into a packed RGB pixel buffer.
     ///
     /// Supported: rectangles, rounded rectangles, circles, lines, linear
-    /// gradients, transforms, and scissors. Text uses the process-wide TTF
-    /// font when available and falls back to the built-in 8x8 bitmap font.
-    /// SVG paths and images are explicitly counted as unsupported. There is no
-    /// shaping, kerning, bidi, font fallback, alignment, or wrapping here.
+    /// gradients, SVG path fills/strokes, transforms, and scissors. Text uses
+    /// the process-wide TTF font when available and falls back to the built-in
+    /// 8x8 bitmap font. Images are still counted as unsupported because the
+    /// display list carries only a source handle, not decoded pixels. There is
+    /// no shaping, kerning, bidi, font fallback, alignment, or wrapping here.
     pub fn rasterize(
         display_list: &DisplayList,
         size: RenderSize,
@@ -139,7 +141,28 @@ impl CpuRasterizer {
                         *color,
                     );
                 }
-                DrawCommand::SvgPath { .. } | DrawCommand::Image { .. } => {}
+                DrawCommand::SvgPath {
+                    path,
+                    fill,
+                    stroke,
+                    stroke_width,
+                    ..
+                } => {
+                    let outline = parse_svg_path(path);
+                    if let Some(fill) = fill {
+                        canvas.fill_contours(transform, scissor, &outline.contours, *fill);
+                    }
+                    if let Some(stroke) = stroke {
+                        canvas.stroke_contours(
+                            transform,
+                            scissor,
+                            &outline.contours,
+                            *stroke_width,
+                            *stroke,
+                        );
+                    }
+                }
+                DrawCommand::Image { .. } => {}
                 _ => match command {
                     DrawCommand::Rect {
                         x,
@@ -211,7 +234,7 @@ impl CpuRasterizer {
             }
         }
 
-        let unsupported_commands = canvas.command_counts.svg_path + canvas.command_counts.image;
+        let unsupported_commands = canvas.command_counts.image;
         Ok(CpuFrame {
             width: size.width,
             height: size.height,
@@ -622,6 +645,117 @@ impl Canvas {
         }
     }
 
+    fn fill_contours(
+        &mut self,
+        transform: TransformMatrix,
+        scissor: Option<Rect>,
+        contours: &[SvgContour],
+        color: Color,
+    ) {
+        let transformed = contours
+            .iter()
+            .map(|contour| {
+                contour
+                    .points
+                    .iter()
+                    .map(|point| transform.apply(*point))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let points = transformed.iter().flatten().collect::<Vec<_>>();
+        if points.is_empty() {
+            return;
+        }
+        let color = color_to_array(color);
+        let mut min_x = points
+            .iter()
+            .map(|point| point.x)
+            .fold(f32::INFINITY, f32::min)
+            .floor()
+            .max(0.0) as u32;
+        let mut min_y = points
+            .iter()
+            .map(|point| point.y)
+            .fold(f32::INFINITY, f32::min)
+            .floor()
+            .max(0.0) as u32;
+        let mut max_x = points
+            .iter()
+            .map(|point| point.x)
+            .fold(f32::NEG_INFINITY, f32::max)
+            .ceil()
+            .min(self.width as f32) as u32;
+        let mut max_y = points
+            .iter()
+            .map(|point| point.y)
+            .fold(f32::NEG_INFINITY, f32::max)
+            .ceil()
+            .min(self.height as f32) as u32;
+        if let Some(clip) = scissor {
+            min_x = min_x.max(clip.x.max(0.0).floor() as u32);
+            min_y = min_y.max(clip.y.max(0.0).floor() as u32);
+            max_x = max_x.min(clip.right().ceil().clamp(0.0, self.width as f32) as u32);
+            max_y = max_y.min(clip.bottom().ceil().clamp(0.0, self.height as f32) as u32);
+        }
+        if min_x >= max_x || min_y >= max_y {
+            return;
+        }
+        for y in min_y..max_y {
+            for x in min_x..max_x {
+                let point = Point::new(x as f32 + 0.5, y as f32 + 0.5);
+                let mut inside = false;
+                for contour in &transformed {
+                    let count = contour.len();
+                    if count < 3 {
+                        continue;
+                    }
+                    for index in 0..count {
+                        let first = contour[index];
+                        let second = contour[(index + 1) % count];
+                        if (first.y > point.y) != (second.y > point.y) {
+                            let crossing = (second.x - first.x) * (point.y - first.y)
+                                / (second.y - first.y)
+                                + first.x;
+                            if point.x < crossing {
+                                inside = !inside;
+                            }
+                        }
+                    }
+                }
+                if inside {
+                    self.blend(x, y, color);
+                }
+            }
+        }
+    }
+
+    fn stroke_contours(
+        &mut self,
+        transform: TransformMatrix,
+        scissor: Option<Rect>,
+        contours: &[SvgContour],
+        stroke_width: f32,
+        color: Color,
+    ) {
+        let width = stroke_width * transform.scale_factor();
+        if width <= 0.0 {
+            return;
+        }
+        for contour in contours {
+            if contour.points.len() < 2 {
+                continue;
+            }
+            for pair in contour.points.windows(2) {
+                self.draw_line(transform, scissor, pair[0], pair[1], width, color);
+            }
+            if contour.closed {
+                let first = contour.points[0];
+                let last = *contour.points.last().expect("contour has points");
+                self.draw_line(transform, scissor, last, first, width, color);
+            }
+        }
+    }
+
     fn blend(&mut self, x: u32, y: u32, color: [f32; 4]) {
         let alpha = color[3].clamp(0.0, 1.0);
         if alpha <= 0.0 {
@@ -705,6 +839,7 @@ fn pack_color(color: Color) -> u32 {
 mod tests {
     use super::*;
     use crate::ui::font::FontRegistry;
+    use crate::ui::icon::Icon;
     use crate::ui::paint::Transform;
 
     fn pixel(frame: &CpuFrame, x: u32, y: u32) -> u32 {
@@ -841,5 +976,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame.unsupported_glyphs, 1);
+    }
+
+    #[test]
+    fn rasterizes_filled_svg_path_polygon() {
+        let display = DisplayList::from_commands(vec![DrawCommand::SvgPath {
+            x: 0.0,
+            y: 0.0,
+            width: 20.0,
+            height: 20.0,
+            path: "M0 0L20 0L20 20L0 20Z".to_string(),
+            fill: Some(Color::rgb(255, 0, 0)),
+            stroke: None,
+            stroke_width: 0.0,
+        }]);
+        let frame =
+            CpuRasterizer::rasterize(&display, RenderSize::new(32, 32), Color::BLACK).unwrap();
+        assert_eq!(pixel(&frame, 10, 10), 0x00ff0000);
+        assert_eq!(pixel(&frame, 30, 30), 0x00000000);
+        assert_eq!(frame.unsupported_commands, 0);
+        assert_eq!(frame.command_counts.svg_path, 1);
+    }
+
+    #[test]
+    fn rasterizes_stroked_builtin_icon() {
+        let icon = Icon::check();
+        let display = DisplayList::from_commands(icon.to_commands(24.0, Color::WHITE));
+        let frame =
+            CpuRasterizer::rasterize(&display, RenderSize::new(32, 32), Color::BLACK).unwrap();
+        assert_eq!(frame.unsupported_commands, 0);
+        assert_eq!(frame.command_counts.svg_path, 1);
+        let white = frame
+            .pixels
+            .iter()
+            .filter(|pixel| **pixel == 0x00ffffff)
+            .count();
+        assert!(white > 0, "check icon must produce visible pixels");
     }
 }

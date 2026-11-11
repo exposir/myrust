@@ -131,8 +131,11 @@ impl CommandCounts {
     }
 
     /// Returns commands that this batch cannot draw yet.
+    ///
+    /// Text and SVG paths are now drawn by the CPU presenter; images remain
+    /// unsupported because the display list carries only a source handle.
     pub fn unsupported(self) -> usize {
-        self.text + self.svg_path + self.image
+        self.image
     }
 
     pub(crate) fn record(&mut self, command: &DrawCommand) {
@@ -160,7 +163,7 @@ pub struct RenderStats {
     pub total_commands: usize,
     /// Counts split by command kind.
     pub command_counts: CommandCounts,
-    /// Text, SVG path, and image commands that were not rendered.
+    /// Image commands that were not rendered.
     pub unsupported_commands: usize,
     /// GPU draw calls issued. Always zero for the software backend.
     pub draw_calls: usize,
@@ -192,7 +195,8 @@ pub trait Renderer {
 
     /// Renders one display list and returns observable statistics.
     ///
-    /// Text, SVG path, and image commands are not drawable in this batch.
+    /// Image commands are not drawable in this batch. Text and SVG paths are
+    /// analyzed by the software renderer and drawn by the CPU presenter.
     /// Implementations report them through [`RenderStats::unsupported_commands`]
     /// and the corresponding [`CommandCounts`] fields instead of silently
     /// discarding them.
@@ -571,6 +575,12 @@ impl TransformMatrix {
         }
     }
 
+    pub(crate) fn scale_factor(self) -> f32 {
+        let x = (self.m11 * self.m11 + self.m21 * self.m21).sqrt();
+        let y = (self.m12 * self.m12 + self.m22 * self.m22).sqrt();
+        (x + y) / 2.0
+    }
+
     pub(crate) fn transform_rect(self, rect: Rect) -> Rect {
         let points = [
             self.apply(Point::new(rect.x, rect.y)),
@@ -713,7 +723,7 @@ mod tests {
         assert_eq!(stats.command_counts.text, 1);
         assert_eq!(stats.command_counts.svg_path, 1);
         assert_eq!(stats.command_counts.image, 1);
-        assert_eq!(stats.unsupported_commands, 3);
+        assert_eq!(stats.unsupported_commands, 1);
         assert_eq!(stats.draw_calls, 0);
         assert_eq!(stats.drawn_vertices, 0);
     }

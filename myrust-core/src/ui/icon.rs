@@ -6,8 +6,28 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::context::Context;
+use super::direction::Direction;
 use super::layout::Point;
 use super::paint::{Color, DrawCommand, Rect, SvgPath, Transform};
+
+/// Result of placing an icon in the immediate-mode view.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct IconState {
+    /// Requested icon name.
+    pub name: String,
+    /// Logical size.
+    pub size: f32,
+    /// Whether the name resolved to a built-in icon.
+    pub found: bool,
+    /// Number of generated display-list commands.
+    pub commands: usize,
+}
+
+/// Draws a built-in icon as a fixed-size widget.
+pub fn icon(context: &mut Context, id: &str, name: &str, size: f32, color: Color) -> IconState {
+    context.icon(id, name, size, color)
+}
 
 /// A named icon defined inside a rectangular SVG view box.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -58,11 +78,27 @@ impl Icon {
     /// The requested color replaces the built-in path stroke color; this
     /// method does not perform rasterization.
     pub fn to_commands(&self, size: f32, color: Color) -> Vec<DrawCommand> {
+        self.to_commands_with_direction(size, color, Direction::Ltr)
+    }
+
+    /// Produces transform-wrapped SVG commands for a layout direction.
+    ///
+    /// RTL mirrors the icon horizontally within its target box.
+    pub fn to_commands_with_direction(
+        &self,
+        size: f32,
+        color: Color,
+        direction: Direction,
+    ) -> Vec<DrawCommand> {
         let target_size = if size.is_finite() { size.max(0.0) } else { 0.0 };
         let view_width = self.view_box.width.max(f32::EPSILON);
         let view_height = self.view_box.height.max(f32::EPSILON);
-        let scale = Point::new(target_size / view_width, target_size / view_height);
-        let translation = Point::new(-self.view_box.x * scale.x, -self.view_box.y * scale.y);
+        let mut scale = Point::new(target_size / view_width, target_size / view_height);
+        let mut translation = Point::new(-self.view_box.x * scale.x, -self.view_box.y * scale.y);
+        if direction.is_rtl() {
+            scale.x = -scale.x;
+            translation.x = target_size - self.view_box.x * scale.x;
+        }
         let mut commands = vec![DrawCommand::TransformPush {
             transform: Transform {
                 translation,
@@ -183,6 +219,36 @@ mod tests {
         assert_eq!(transform.scale, Point::new(2.0, 2.0));
         assert_eq!(transform.translation, Point::new(0.0, 0.0));
         assert!(matches!(commands[2], DrawCommand::TransformPop));
+    }
+
+    #[test]
+    fn icon_control_emits_svg_commands_and_access_semantics() {
+        let size = crate::ui::layout::Size::new(200.0, 100.0);
+        let mut context = Context::new(size);
+        context.begin_frame(size);
+        let state = icon(
+            &mut context,
+            "search-icon",
+            "search",
+            32.0,
+            Color::rgb(1, 2, 3),
+        );
+        let missing = icon(
+            &mut context,
+            "missing-icon",
+            "does-not-exist",
+            32.0,
+            Color::WHITE,
+        );
+        let frame = context.produce().unwrap();
+        assert!(state.found);
+        assert_eq!(state.commands, 4);
+        assert!(!missing.found);
+        assert_eq!(missing.commands, 0);
+        assert!(frame
+            .access_nodes
+            .iter()
+            .any(|node| node.label == "search" && node.value.as_deref() == Some("icon")));
     }
 
     #[test]
