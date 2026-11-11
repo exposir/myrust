@@ -796,6 +796,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "demo-wasm"
+version = "0.1.0"
+dependencies = [
+ "myrust-ui",
+]
+
+[[package]]
 name = "deranged"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2541,6 +2548,7 @@ dependencies = [
  "global-hotkey",
  "gtk",
  "muda",
+ "myrust-ui",
  "notify",
  "notify-rust",
  "reqwest",
@@ -2564,6 +2572,21 @@ dependencies = [
  "wgpu",
  "wry",
  "zip",
+]
+
+[[package]]
+name = "myrust-ui"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "anyhow",
+ "dark-light",
+ "font8x8",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tracing",
+ "wgpu",
 ]
 
 [[package]]

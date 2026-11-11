@@ -43,7 +43,9 @@
   }
 
   function go(entry) {
-    if (docsPage) {
+    if (entry.url) {
+      location.href = entry.url;
+    } else if (docsPage) {
       location.hash = "#" + entry.sectionId;
     } else {
       location.href = "/docs/ui/#" + entry.sectionId;

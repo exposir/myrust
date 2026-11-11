@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "myrust-core",
+    "myrust-ui",
+    "demo-wasm",
     "myrust-cli",
     "examples/dashboard",
     "examples/hello",

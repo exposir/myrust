@@ -1,0 +1,13 @@
+[package]
+name = "demo-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Raw-ABI wasm demos for the MyRust UI docs"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+myrust-ui = { path = "../myrust-ui" }

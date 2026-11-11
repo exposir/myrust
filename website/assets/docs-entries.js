@@ -8,7 +8,8 @@ window.__DOC_ENTRIES__ = [
 "sectionId": "guides",
 "status": "done",
 "text": "The per-frame closure, Context, inline state queries, and how a view is rebuilt whenever input or animation asks for a frame.",
-"textZh": "每帧闭包、Context、内联状态查询，以及输入或动画请求新帧时视图如何重建。"
+"textZh": "每帧闭包、Context、内联状态查询，以及输入或动画请求新帧时视图如何重建。",
+"url": "/docs/ui/views/"
 },
 {
 "title": "Layout",
@@ -18,7 +19,8 @@ window.__DOC_ENTRIES__ = [
 "sectionId": "guides",
 "status": "done",
 "text": "Rows and columns, fixed and filled sizes, padding, margins, gaps, alignment and justification, solved on the CPU.",
-"textZh": "行与列、固定与填充尺寸、内边距、外边距、间距、对齐与两端对齐，全部在 CPU 上求解。"
+"textZh": "行与列、固定与填充尺寸、内边距、外边距、间距、对齐与两端对齐，全部在 CPU 上求解。",
+"url": "/docs/ui/layout/"
 },
 {
 "title": "Text",
@@ -28,7 +30,8 @@ window.__DOC_ENTRIES__ = [
 "sectionId": "guides",
 "status": "done",
 "text": "Text with font size, weight, color, wrap width and alignment, measured and wrapped without shaping or kerning.",
-"textZh": "带字号、字重、颜色、换行宽度与对齐的文本，测量与换行，不做字形整形或字距调整。"
+"textZh": "带字号、字重、颜色、换行宽度与对齐的文本，测量与换行，不做字形整形或字距调整。",
+"url": "/docs/ui/text/"
 },
 {
 "title": "Styling and themes",
@@ -38,7 +41,8 @@ window.__DOC_ENTRIES__ = [
 "sectionId": "guides",
 "status": "done",
 "text": "Colors, spacing and type tokens from Theme, light/dark detection, and raw drawing commands for backgrounds, borders and gradients.",
-"textZh": "Theme 提供的颜色、间距与字号令牌，明暗检测，以及背景、边框与渐变的原始绘制命令。"
+"textZh": "Theme 提供的颜色、间距与字号令牌，明暗检测，以及背景、边框与渐变的原始绘制命令。",
+"url": "/docs/ui/styling-and-themes/"
 },
 {
 "title": "Input",
@@ -48,7 +52,8 @@ window.__DOC_ENTRIES__ = [
 "sectionId": "guides",
 "status": "done",
 "text": "The pointer, hover and press, Tab focus traversal, keyboard activation, single-line text entry, and wheel scrolling.",
-"textZh": "指针、悬停与按压、Tab 焦点遍历、键盘激活、单行文本输入，以及滚轮滚动。"
+"textZh": "指针、悬停与按压、Tab 焦点遍历、键盘激活、单行文本输入，以及滚轮滚动。",
+"url": "/docs/ui/input/"
 },
 {
 "title": "Drag and drop",
@@ -56,9 +61,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Guides",
 "sectionZh": "指南",
 "sectionId": "guides",
-"status": "none",
+"status": "done",
 "text": "Values dragged within the window, and rows reordered by dragging. Native UI does not take drops; file drops reach WebView windows only.",
-"textZh": "窗口内拖动的值，以及拖动重排的行。原生界面不接收投放；文件投放只进入 WebView 窗口。"
+"textZh": "窗口内拖动的值，以及拖动重排的行。原生界面不接收投放；文件投放只进入 WebView 窗口。",
+"url": "/docs/ui/drag-and-drop/"
 },
 {
 "title": "Pages and navigation",
@@ -66,9 +72,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Guides",
 "sectionZh": "指南",
 "sectionId": "guides",
-"status": "none",
+"status": "partial",
 "text": "A router of pages with a history, layouts, transitions, and going back and forward.",
-"textZh": "带历史、布局、过渡与前进后退的页面路由。"
+"textZh": "带历史、布局、过渡与前进后退的页面路由。",
+"url": "/docs/ui/pages-and-navigation/"
 },
 {
 "title": "Overlays",
@@ -76,9 +83,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Guides",
 "sectionZh": "指南",
 "sectionId": "guides",
-"status": "none",
+"status": "done",
 "text": "What dialogs, popovers and the layer above the window share: the focus, Escape, and what is behind them.",
-"textZh": "对话框、弹出框与窗口之上那层共有的东西：焦点、Escape，以及它们背后的内容。"
+"textZh": "对话框、弹出框与窗口之上那层共有的东西：焦点、Escape，以及它们背后的内容。",
+"url": "/docs/ui/overlays/"
 },
 {
 "title": "Accessibility",
@@ -88,7 +96,8 @@ window.__DOC_ENTRIES__ = [
 "sectionId": "guides",
 "status": "partial",
 "text": "Semantic nodes are emitted for labels, buttons, fields, choices, sliders, scroll views and groups; no AT-SPI, UIA or NSAccessibility bridge is connected yet.",
-"textZh": "为标签、按钮、输入框、选项、滑块、滚动视图与分组发出语义节点；尚未连接 AT-SPI、UIA 或 NSAccessibility 桥。"
+"textZh": "为标签、按钮、输入框、选项、滑块、滚动视图与分组发出语义节点；尚未连接 AT-SPI、UIA 或 NSAccessibility 桥。",
+"url": "/docs/ui/accessibility/"
 },
 {
 "title": "Right to left",
@@ -96,9 +105,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Guides",
 "sectionZh": "指南",
 "sectionId": "guides",
-"status": "none",
+"status": "partial",
 "text": "Interfaces laid out from the right for Arabic and Hebrew, logical edges, and what mirrors.",
-"textZh": "为阿拉伯语与希伯来语从右布局的界面、逻辑边，以及镜像的内容。"
+"textZh": "为阿拉伯语与希伯来语从右布局的界面、逻辑边，以及镜像的内容。",
+"url": "/docs/ui/right-to-left/"
 },
 {
 "title": "Languages",
@@ -106,9 +116,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Guides",
 "sectionZh": "指南",
 "sectionId": "guides",
-"status": "none",
+"status": "partial",
 "text": "The window's language and regional formats, numbers and dates written in them, and the controls' own strings.",
-"textZh": "窗口语言与地区格式、按其书写的数字与日期，以及控件自身的文案。"
+"textZh": "窗口语言与地区格式、按其书写的数字与日期，以及控件自身的文案。",
+"url": "/docs/ui/languages/"
 },
 {
 "title": "Drawing and animation",
@@ -118,7 +129,8 @@ window.__DOC_ENTRIES__ = [
 "sectionId": "guides",
 "status": "done",
 "text": "Raw DisplayList commands, and Animation and Easing values driven from the frame clock.",
-"textZh": "原始 DisplayList 命令，以及由帧时钟驱动的 Animation 与 Easing 值。"
+"textZh": "原始 DisplayList 命令，以及由帧时钟驱动的 Animation 与 Easing 值。",
+"url": "/docs/ui/drawing-and-animation/"
 },
 {
 "title": "Shaders",
@@ -128,7 +140,8 @@ window.__DOC_ENTRIES__ = [
 "sectionId": "guides",
 "status": "none",
 "text": "Pixels computed on the GPU by shaders.",
-"textZh": "由着色器在 GPU 上计算的像素。"
+"textZh": "由着色器在 GPU 上计算的像素。",
+"url": "/docs/ui/shaders/"
 },
 {
 "title": "Transitions",
@@ -136,9 +149,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Guides",
 "sectionZh": "指南",
 "sectionId": "guides",
-"status": "none",
+"status": "partial",
 "text": "Elements that move, resize, recolor and shade smoothly as the layout changes.",
-"textZh": "随布局变化平滑移动、缩放、变色与渐隐的元素。"
+"textZh": "随布局变化平滑移动、缩放、变色与渐隐的元素。",
+"url": "/docs/ui/transitions/"
 },
 {
 "title": "Motion",
@@ -148,7 +162,8 @@ window.__DOC_ENTRIES__ = [
 "sectionId": "guides",
 "status": "partial",
 "text": "Easing and per-frame animate values are built in; springs, keyframes and timelines are not.",
-"textZh": "内置缓动与逐帧 animate 值；不含弹簧、关键帧与时间线。"
+"textZh": "内置缓动与逐帧 animate 值；不含弹簧、关键帧与时间线。",
+"url": "/docs/ui/motion/"
 },
 {
 "title": "Transforms",
@@ -156,9 +171,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Guides",
 "sectionZh": "指南",
 "sectionId": "guides",
-"status": "partial",
-"text": "Display-list transform and scissor commands rasterize; pointer hit-testing and text input do not follow them yet.",
-"textZh": "显示列表的变换与裁剪命令可以光栅化；指针命中测试与文本输入尚未跟随变换。"
+"status": "done",
+"text": "Display-list transform and scissor commands rasterize, and pointer hit-testing inverse-transforms the pointer into local bounds.",
+"textZh": "显示列表的变换与裁剪命令可以光栅化，指针命中测试会把指针逆变换回局部坐标。",
+"url": "/docs/ui/transforms/"
 },
 {
 "title": "Custom widgets",
@@ -168,7 +184,8 @@ window.__DOC_ENTRIES__ = [
 "sectionId": "guides",
 "status": "partial",
 "text": "Containers plus drawing commands can compose custom visuals; there is no widget-base protocol to reuse behavior.",
-"textZh": "容器加绘制命令可以组合出自定义视觉；没有可复用行为的控件基类协议。"
+"textZh": "容器加绘制命令可以组合出自定义视觉；没有可复用行为的控件基类协议。",
+"url": "/docs/ui/custom-widgets/"
 },
 {
 "title": "Windows with native UI",
@@ -178,7 +195,8 @@ window.__DOC_ENTRIES__ = [
 "sectionId": "guides",
 "status": "done",
 "text": "WindowContent::NativeUi, window options, window-state persistence, and the CPU presenter that paints each frame.",
-"textZh": "WindowContent::NativeUi、窗口选项、窗口状态持久化，以及逐帧绘制的 CPU 呈现器。"
+"textZh": "WindowContent::NativeUi、窗口选项、窗口状态持久化，以及逐帧绘制的 CPU 呈现器。",
+"url": "/docs/ui/windows-with-native-ui/"
 },
 {
 "title": "Testing",
@@ -188,7 +206,8 @@ window.__DOC_ENTRIES__ = [
 "sectionId": "guides",
 "status": "done",
 "text": "NativeUi::render(size) runs a view without a window and returns the display list, frame timing and accessibility nodes.",
-"textZh": "NativeUi::render(size) 在没有窗口的情况下运行视图，返回显示列表、帧耗时与无障碍节点。"
+"textZh": "NativeUi::render(size) 在没有窗口的情况下运行视图，返回显示列表、帧耗时与无障碍节点。",
+"url": "/docs/ui/testing/"
 },
 {
 "title": "Inspector",
@@ -196,9 +215,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Guides",
 "sectionZh": "指南",
 "sectionId": "guides",
-"status": "none",
+"status": "done",
 "text": "The elements of a window, their boxes and styles, and the time frames take, beside the content.",
-"textZh": "窗口的元素、它们的盒子与样式，以及每帧耗时，显示在内容旁边。"
+"textZh": "窗口的元素、它们的盒子与样式，以及每帧耗时，显示在内容旁边。",
+"url": "/docs/ui/inspector/"
 },
 {
 "title": "Rendering",
@@ -208,7 +228,8 @@ window.__DOC_ENTRIES__ = [
 "sectionId": "guides",
 "status": "done",
 "text": "Layout on the CPU, a rasterizer for geometry and text, softbuffer presentation, and an optional wgpu offscreen renderer.",
-"textZh": "在 CPU 上布局，几何与文本光栅化器，softbuffer 呈现，以及可选的 wgpu 离屏渲染器。"
+"textZh": "在 CPU 上布局，几何与文本光栅化器，softbuffer 呈现，以及可选的 wgpu 离屏渲染器。",
+"url": "/docs/ui/rendering/"
 },
 {
 "title": "Browsers",
@@ -218,7 +239,8 @@ window.__DOC_ENTRIES__ = [
 "sectionId": "guides",
 "status": "none",
 "text": "The same app in a page, compiled to WebAssembly and drawn with WebGL.",
-"textZh": "同一个应用放进网页，编译为 WebAssembly 并用 WebGL 绘制。"
+"textZh": "同一个应用放进网页，编译为 WebAssembly 并用 WebGL 绘制。",
+"url": "/docs/ui/browsers/"
 },
 {
 "title": "Migration",
@@ -226,9 +248,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Guides",
 "sectionZh": "指南",
 "sectionId": "guides",
-"status": "none",
+"status": "done",
 "text": "Element values, persistent handles, focus bindings and source migration.",
-"textZh": "元素值、持久句柄、焦点绑定与源码迁移。"
+"textZh": "元素值、持久句柄、焦点绑定与源码迁移。",
+"url": "/docs/ui/migration/"
 },
 {
 "title": "Performance",
@@ -236,9 +259,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Guides",
 "sectionZh": "指南",
 "sectionId": "guides",
-"status": "none",
+"status": "done",
 "text": "Measured frame costs and retained memory.",
-"textZh": "测量的帧开销与保留内存。"
+"textZh": "测量的帧开销与保留内存。",
+"url": "/docs/ui/performance/"
 },
 {
 "title": "Button",
@@ -248,7 +272,8 @@ window.__DOC_ENTRIES__ = [
 "sectionId": "actions",
 "status": "done",
 "text": "A push button with hover, press and keyboard activation; fill, border and label use the theme.",
-"textZh": "带悬停、按压与键盘激活的按钮；填充、边框与标签取自主题。"
+"textZh": "带悬停、按压与键盘激活的按钮；填充、边框与标签取自主题。",
+"url": "/docs/ui/button/"
 },
 {
 "title": "Link",
@@ -256,9 +281,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Actions",
 "sectionZh": "操作",
 "sectionId": "actions",
-"status": "none",
+"status": "done",
 "text": "Text that opens a URL, or a page of a router.",
-"textZh": "打开 URL 或路由器页面的文本。"
+"textZh": "打开 URL 或路由器页面的文本。",
+"url": "/docs/ui/link/"
 },
 {
 "title": "Menu button",
@@ -266,9 +292,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Actions",
 "sectionZh": "操作",
 "sectionId": "actions",
-"status": "none",
+"status": "done",
 "text": "A button opening a menu below it, the system's or one drawn in the window with the theme's look.",
-"textZh": "在其下方打开菜单的按钮，系统的菜单或用主题外观在窗口内绘制的菜单。"
+"textZh": "在其下方打开菜单的按钮，系统的菜单或用主题外观在窗口内绘制的菜单。",
+"url": "/docs/ui/menu-button/"
 },
 {
 "title": "Context menu",
@@ -276,9 +303,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Actions",
 "sectionZh": "操作",
 "sectionId": "actions",
-"status": "none",
+"status": "done",
 "text": "A menu of the system's for any element, on a right click. Application-level context menus exist outside the view.",
-"textZh": "右键时为任意元素显示的系统菜单。应用级上下文菜单存在于视图之外。"
+"textZh": "右键时为任意元素显示的系统菜单。应用级上下文菜单存在于视图之外。",
+"url": "/docs/ui/context-menu/"
 },
 {
 "title": "Toggle",
@@ -286,9 +314,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Actions",
 "sectionZh": "操作",
 "sectionId": "actions",
-"status": "none",
+"status": "done",
 "text": "A button that stays pressed, and toggles joined in a group.",
-"textZh": "保持按下状态的按钮，以及成组联动的开关。"
+"textZh": "保持按下状态的按钮，以及成组联动的开关。",
+"url": "/docs/ui/toggle/"
 },
 {
 "title": "Segmented control",
@@ -296,9 +325,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Actions",
 "sectionZh": "操作",
 "sectionId": "actions",
-"status": "none",
+"status": "done",
 "text": "Segments choosing one of a few views.",
-"textZh": "在一组视图中选择一个的分段。"
+"textZh": "在一组视图中选择一个的分段。",
+"url": "/docs/ui/segmented-control/"
 },
 {
 "title": "Toolbar",
@@ -306,9 +336,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Actions",
 "sectionZh": "操作",
 "sectionId": "actions",
-"status": "none",
+"status": "done",
 "text": "A row of controls along a window, which overflow into a menu.",
-"textZh": "沿窗口排列的一行控件，溢出时收入菜单。"
+"textZh": "沿窗口排列的一行控件，溢出时收入菜单。",
+"url": "/docs/ui/toolbar/"
 },
 {
 "title": "Checkbox",
@@ -318,7 +349,8 @@ window.__DOC_ENTRIES__ = [
 "sectionId": "choices",
 "status": "done",
 "text": "A check box with hover, focus and click or keyboard toggling, drawn from the theme.",
-"textZh": "带悬停、焦点与点击或键盘切换的复选框，外观取自主题。"
+"textZh": "带悬停、焦点与点击或键盘切换的复选框，外观取自主题。",
+"url": "/docs/ui/checkbox/"
 },
 {
 "title": "Switch",
@@ -326,9 +358,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Choices",
 "sectionZh": "选择",
 "sectionId": "choices",
-"status": "none",
+"status": "done",
 "text": "A switch that turns a setting on and off.",
-"textZh": "开启和关闭设置的开关。"
+"textZh": "开启和关闭设置的开关。",
+"url": "/docs/ui/switch/"
 },
 {
 "title": "Radio",
@@ -336,9 +369,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Choices",
 "sectionZh": "选择",
 "sectionId": "choices",
-"status": "none",
+"status": "done",
 "text": "Radio buttons choosing one value, in a group.",
-"textZh": "成组选择单个值的单选按钮。"
+"textZh": "成组选择单个值的单选按钮。",
+"url": "/docs/ui/radio/"
 },
 {
 "title": "Select",
@@ -346,9 +380,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Choices",
 "sectionZh": "选择",
 "sectionId": "choices",
-"status": "none",
+"status": "done",
 "text": "A drop-down choosing one of a list.",
-"textZh": "从列表中选择一项的下拉框。"
+"textZh": "从列表中选择一项的下拉框。",
+"url": "/docs/ui/select/"
 },
 {
 "title": "Slider",
@@ -358,7 +393,8 @@ window.__DOC_ENTRIES__ = [
 "sectionId": "choices",
 "status": "done",
 "text": "A horizontal slider setting a value in a range, with hover, drag and keyboard focus.",
-"textZh": "在范围内设定值的水平滑块，带悬停、拖动与键盘焦点。"
+"textZh": "在范围内设定值的水平滑块，带悬停、拖动与键盘焦点。",
+"url": "/docs/ui/slider/"
 },
 {
 "title": "Range slider",
@@ -366,9 +402,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Choices",
 "sectionZh": "选择",
 "sectionId": "choices",
-"status": "none",
+"status": "done",
 "text": "Two knobs setting a low and a high value.",
-"textZh": "用两个手柄设定下限与上限。"
+"textZh": "用两个手柄设定下限与上限。",
+"url": "/docs/ui/range-slider/"
 },
 {
 "title": "Stepper",
@@ -376,9 +413,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Choices",
 "sectionZh": "选择",
 "sectionId": "choices",
-"status": "none",
+"status": "done",
 "text": "Arrows stepping a value up and down.",
-"textZh": "用箭头上下调整数值。"
+"textZh": "用箭头上下调整数值。",
+"url": "/docs/ui/stepper/"
 },
 {
 "title": "Rating",
@@ -386,9 +424,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Choices",
 "sectionZh": "选择",
 "sectionId": "choices",
-"status": "none",
+"status": "done",
 "text": "Stars setting a rating.",
-"textZh": "用星标打分。"
+"textZh": "用星标打分。",
+"url": "/docs/ui/rating/"
 },
 {
 "title": "Text input",
@@ -397,8 +436,9 @@ window.__DOC_ENTRIES__ = [
 "sectionZh": "文本输入",
 "sectionId": "text-input",
 "status": "done",
-"text": "A single-line field with character input, Backspace, Delete, Home/End and cursor movement; selection, clipboard, undo and IME are not implemented.",
-"textZh": "单行输入框，支持字符输入、Backspace、Delete、Home/End 与光标移动；未实现选择、剪贴板、撤销与 IME。"
+"text": "A single-line field with character input, Backspace, Delete, Home/End and cursor movement; clipboard, undo and IME are not implemented.",
+"textZh": "单行输入框，支持字符输入、Backspace、Delete、Home/End 与光标移动；未实现剪贴板、撤销与 IME。",
+"url": "/docs/ui/text-input/"
 },
 {
 "title": "Text-input primitives",
@@ -406,9 +446,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Text input",
 "sectionZh": "文本输入",
 "sectionId": "text-input",
-"status": "none",
+"status": "done",
 "text": "Application-owned text, native composition and queries, and retained geometry for custom controls.",
-"textZh": "应用自持文本、原生输入法组合与查询，以及自定义控件可复用的保留几何。"
+"textZh": "应用自持文本、原生输入法组合与查询，以及自定义控件可复用的保留几何。",
+"url": "/docs/ui/text-input-primitives/"
 },
 {
 "title": "Number input",
@@ -416,9 +457,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Text input",
 "sectionZh": "文本输入",
 "sectionId": "text-input",
-"status": "none",
+"status": "done",
 "text": "A number in a range, typed or stepped.",
-"textZh": "范围内的数字，可键入或步进。"
+"textZh": "范围内的数字，可键入或步进。",
+"url": "/docs/ui/number-input/"
 },
 {
 "title": "Decimal input",
@@ -426,9 +468,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Text input",
 "sectionZh": "文本输入",
 "sectionId": "text-input",
-"status": "none",
+"status": "done",
 "text": "An exact decimal, as an amount of money, typed or stepped, never rounded.",
-"textZh": "精确小数（如金额），可键入或步进，永不四舍五入。"
+"textZh": "精确小数（如金额），可键入或步进，永不四舍五入。",
+"url": "/docs/ui/decimal-input/"
 },
 {
 "title": "Search field",
@@ -436,9 +479,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Text input",
 "sectionZh": "文本输入",
 "sectionId": "text-input",
-"status": "none",
+"status": "done",
 "text": "A field for searching, which Escape clears.",
-"textZh": "用于搜索的输入框，Escape 清空。"
+"textZh": "用于搜索的输入框，Escape 清空。",
+"url": "/docs/ui/search-field/"
 },
 {
 "title": "Combobox",
@@ -446,9 +490,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Text input",
 "sectionZh": "文本输入",
 "sectionId": "text-input",
-"status": "none",
+"status": "done",
 "text": "A field choosing one of a list, which typing filters.",
-"textZh": "从列表选择一项的输入框，键入即过滤。"
+"textZh": "从列表选择一项的输入框，键入即过滤。",
+"url": "/docs/ui/combobox/"
 },
 {
 "title": "Autocomplete",
@@ -456,9 +501,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Text input",
 "sectionZh": "文本输入",
 "sectionId": "text-input",
-"status": "none",
+"status": "done",
 "text": "A text input suggesting what was typed.",
-"textZh": "对已输入内容提供建议的文本框。"
+"textZh": "对已输入内容提供建议的文本框。",
+"url": "/docs/ui/autocomplete/"
 },
 {
 "title": "Token field",
@@ -466,9 +512,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Text input",
 "sectionZh": "文本输入",
 "sectionId": "text-input",
-"status": "none",
+"status": "done",
 "text": "A list of strings as chips, as tags or recipients.",
-"textZh": "以 chip 呈现的字符串列表，如标签或收件人。"
+"textZh": "以 chip 呈现的字符串列表，如标签或收件人。",
+"url": "/docs/ui/token-field/"
 },
 {
 "title": "Editable text",
@@ -476,9 +523,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Text input",
 "sectionZh": "文本输入",
 "sectionId": "text-input",
-"status": "none",
+"status": "done",
 "text": "A text renamed in place, as a file's name in Finder.",
-"textZh": "就地重命名的文本，如 Finder 中的文件名。"
+"textZh": "就地重命名的文本，如 Finder 中的文件名。",
+"url": "/docs/ui/editable-text/"
 },
 {
 "title": "Find bar",
@@ -486,9 +534,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Text input",
 "sectionZh": "文本输入",
 "sectionId": "text-input",
-"status": "none",
+"status": "done",
 "text": "A bar for finding text, with the count of matches and the next and previous ones.",
-"textZh": "查找文本的栏，显示匹配数并提供上一个/下一个。"
+"textZh": "查找文本的栏，显示匹配数并提供上一个/下一个。",
+"url": "/docs/ui/find-bar/"
 },
 {
 "title": "Rich text editor",
@@ -496,9 +545,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Text input",
 "sectionZh": "文本输入",
 "sectionId": "text-input",
-"status": "none",
+"status": "partial",
 "text": "Attributed text with formats, links, headings, lists, tasks and images.",
-"textZh": "带格式、链接、标题、列表、任务与图片的属性文本。"
+"textZh": "带格式、链接、标题、列表、任务与图片的属性文本。",
+"url": "/docs/ui/rich-text-editor/"
 },
 {
 "title": "Code editor",
@@ -506,9 +556,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Code",
 "sectionZh": "代码",
 "sectionId": "code",
-"status": "none",
+"status": "partial",
 "text": "An editor of code with highlighting, several carets, folding, completions and diagnostics.",
-"textZh": "带高亮、多光标、折叠、补全与诊断的代码编辑器。"
+"textZh": "带高亮、多光标、折叠、补全与诊断的代码编辑器。",
+"url": "/docs/ui/code-editor/"
 },
 {
 "title": "Diff viewer",
@@ -516,9 +567,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Code",
 "sectionZh": "代码",
 "sectionId": "code",
-"status": "none",
+"status": "partial",
 "text": "The changes between two texts, side by side or unified, with the new text editable.",
-"textZh": "两段文本之间的更改，并排或统一显示，新文本可编辑。"
+"textZh": "两段文本之间的更改，并排或统一显示，新文本可编辑。",
+"url": "/docs/ui/diff-viewer/"
 },
 {
 "title": "Markdown",
@@ -526,9 +578,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Documents",
 "sectionZh": "文档",
 "sectionId": "documents",
-"status": "none",
+"status": "partial",
 "text": "CommonMark and GitHub's Markdown, as finished documents, selectable and copied as text.",
-"textZh": "CommonMark 与 GitHub Markdown，作为完成的文档显示，可选中并以文本复制。"
+"textZh": "CommonMark 与 GitHub Markdown，作为完成的文档显示，可选中并以文本复制。",
+"url": "/docs/ui/markdown/"
 },
 {
 "title": "Calendar",
@@ -536,9 +589,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Dates and colors",
 "sectionZh": "日期与颜色",
 "sectionId": "dates-and-colors",
-"status": "none",
+"status": "done",
 "text": "A month choosing a day.",
-"textZh": "选择日期的月份视图。"
+"textZh": "选择日期的月份视图。",
+"url": "/docs/ui/calendar/"
 },
 {
 "title": "Date input",
@@ -546,9 +600,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Dates and colors",
 "sectionZh": "日期与颜色",
 "sectionId": "dates-and-colors",
-"status": "none",
+"status": "done",
 "text": "A date in a field, chosen in a calendar below it.",
-"textZh": "输入框中的日期，在下方日历中选择。"
+"textZh": "输入框中的日期，在下方日历中选择。",
+"url": "/docs/ui/date-input/"
 },
 {
 "title": "Time input",
@@ -556,9 +611,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Dates and colors",
 "sectionZh": "日期与颜色",
 "sectionId": "dates-and-colors",
-"status": "none",
+"status": "done",
 "text": "The time of day, its hours and minutes typed or stepped.",
-"textZh": "一天中的时间，时与分可键入或步进。"
+"textZh": "一天中的时间，时与分可键入或步进。",
+"url": "/docs/ui/time-input/"
 },
 {
 "title": "Color picker",
@@ -566,9 +622,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Dates and colors",
 "sectionZh": "日期与颜色",
 "sectionId": "dates-and-colors",
-"status": "none",
+"status": "done",
 "text": "A color well, and the picker it opens.",
-"textZh": "色块及其打开的取色面板。"
+"textZh": "色块及其打开的取色面板。",
+"url": "/docs/ui/color-picker/"
 },
 {
 "title": "List",
@@ -576,9 +633,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Collections",
 "sectionZh": "集合",
 "sectionId": "collections",
-"status": "none",
+"status": "done",
 "text": "Rows of any number and height, built only while in view.",
-"textZh": "任意数量与高度的行，仅在可见时构建。"
+"textZh": "任意数量与高度的行，仅在可见时构建。",
+"url": "/docs/ui/list/"
 },
 {
 "title": "Table",
@@ -586,9 +644,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Collections",
 "sectionZh": "集合",
 "sectionId": "collections",
-"status": "none",
+"status": "partial",
 "text": "Rows in columns that the user sorts, resizes and moves.",
-"textZh": "列中的行，用户可排序、调整大小与移动。"
+"textZh": "列中的行，用户可排序、调整大小与移动。",
+"url": "/docs/ui/table/"
 },
 {
 "title": "Tree",
@@ -596,9 +655,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Collections",
 "sectionZh": "集合",
 "sectionId": "collections",
-"status": "none",
+"status": "done",
 "text": "Items that open and close, built inside the items they belong to.",
-"textZh": "可展开与收起的项目，在其所属项目内构建。"
+"textZh": "可展开与收起的项目，在其所属项目内构建。",
+"url": "/docs/ui/tree/"
 },
 {
 "title": "Outline",
@@ -606,9 +666,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Collections",
 "sectionZh": "集合",
 "sectionId": "collections",
-"status": "none",
+"status": "partial",
 "text": "A tree of any size, as a list or a table.",
-"textZh": "任意规模的树，以列表或表格呈现。"
+"textZh": "任意规模的树，以列表或表格呈现。",
+"url": "/docs/ui/outline/"
 },
 {
 "title": "Grid view",
@@ -616,9 +677,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Collections",
 "sectionZh": "集合",
 "sectionId": "collections",
-"status": "none",
+"status": "done",
 "text": "Items in a grid of any size, as a photo library.",
-"textZh": "任意规模的项目网格，如图片库。"
+"textZh": "任意规模的项目网格，如图片库。",
+"url": "/docs/ui/grid-view/"
 },
 {
 "title": "Scroll view",
@@ -628,7 +690,8 @@ window.__DOC_ENTRIES__ = [
 "sectionId": "containers",
 "status": "done",
 "text": "A clipped, vertically scrollable container with wheel, drag-bar and keyboard input.",
-"textZh": "裁剪的垂直可滚动容器，支持滚轮、拖条与键盘输入。"
+"textZh": "裁剪的垂直可滚动容器，支持滚轮、拖条与键盘输入。",
+"url": "/docs/ui/scroll-view/"
 },
 {
 "title": "Grid",
@@ -636,9 +699,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Containers",
 "sectionZh": "容器",
 "sectionId": "containers",
-"status": "none",
-"text": "Children in equal-width columns and rows. The layout engine can place them internally, but no public builder exposes a grid yet.",
-"textZh": "等宽列与行中的子元素。布局引擎可在内部放置它们，但尚无公开构建器暴露网格。"
+"status": "done",
+"text": "Children in equal-width columns and rows. A public grid builder places them.",
+"textZh": "等宽列与行中的子元素。公开的 grid 构建器可放置它们。",
+"url": "/docs/ui/grid/"
 },
 {
 "title": "Split view",
@@ -646,9 +710,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Containers",
 "sectionZh": "容器",
 "sectionId": "containers",
-"status": "none",
+"status": "done",
 "text": "Two panes with a divider the user drags.",
-"textZh": "两个面板，中间的分隔条可拖动。"
+"textZh": "两个面板，中间的分隔条可拖动。",
+"url": "/docs/ui/split-view/"
 },
 {
 "title": "Collapsible",
@@ -656,9 +721,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Containers",
 "sectionZh": "容器",
 "sectionId": "containers",
-"status": "none",
+"status": "done",
 "text": "Content that a label shows and hides.",
-"textZh": "由标签显示与隐藏的内容。"
+"textZh": "由标签显示与隐藏的内容。",
+"url": "/docs/ui/collapsible/"
 },
 {
 "title": "Accordion",
@@ -666,9 +732,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Containers",
 "sectionZh": "容器",
 "sectionId": "containers",
-"status": "none",
+"status": "done",
 "text": "Sections that open and close, one above the other.",
-"textZh": "上下排列、可展开与收起的区块。"
+"textZh": "上下排列、可展开与收起的区块。",
+"url": "/docs/ui/accordion/"
 },
 {
 "title": "Form",
@@ -676,9 +743,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Containers",
 "sectionZh": "容器",
 "sectionId": "containers",
-"status": "none",
+"status": "done",
 "text": "Labeled controls with descriptions and errors.",
-"textZh": "带描述与错误提示的标签控件。"
+"textZh": "带描述与错误提示的标签控件。",
+"url": "/docs/ui/form/"
 },
 {
 "title": "Web view",
@@ -688,7 +756,8 @@ window.__DOC_ENTRIES__ = [
 "sectionId": "containers",
 "status": "none",
 "text": "A web page in the window, under the native UI painted after it.",
-"textZh": "窗口中的网页，位于其上层绘制的原生界面之下。"
+"textZh": "窗口中的网页，位于其上层绘制的原生界面之下。",
+"url": "/docs/ui/web-view/"
 },
 {
 "title": "Tabs",
@@ -696,9 +765,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Navigation",
 "sectionZh": "导航",
 "sectionId": "navigation",
-"status": "none",
+"status": "done",
 "text": "A row of tabs choosing a page.",
-"textZh": "选择页面的一行标签。"
+"textZh": "选择页面的一行标签。",
+"url": "/docs/ui/tabs/"
 },
 {
 "title": "Sidebar",
@@ -706,9 +776,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Navigation",
 "sectionZh": "导航",
 "sectionId": "navigation",
-"status": "none",
+"status": "done",
 "text": "A source list of items in sections.",
-"textZh": "按分区组织项目的源列表。"
+"textZh": "按分区组织项目的源列表。",
+"url": "/docs/ui/sidebar/"
 },
 {
 "title": "Breadcrumbs",
@@ -716,9 +787,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Navigation",
 "sectionZh": "导航",
 "sectionId": "navigation",
-"status": "none",
+"status": "done",
 "text": "A path whose items take the user back.",
-"textZh": "项目可带你返回的路径。"
+"textZh": "项目可带你返回的路径。",
+"url": "/docs/ui/breadcrumbs/"
 },
 {
 "title": "Back and forward buttons",
@@ -726,9 +798,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Navigation",
 "sectionZh": "导航",
 "sectionId": "navigation",
-"status": "none",
+"status": "done",
 "text": "Buttons going through a router's history.",
-"textZh": "在路由器历史中前进与后退的按钮。"
+"textZh": "在路由器历史中前进与后退的按钮。",
+"url": "/docs/ui/back-and-forward-buttons/"
 },
 {
 "title": "Dialog",
@@ -736,9 +809,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Dialogs and messages",
 "sectionZh": "对话框与消息",
 "sectionId": "dialogs-and-messages",
-"status": "none",
+"status": "done",
 "text": "A dialog over the dimmed window.",
-"textZh": "浮在变暗窗口之上的对话框。"
+"textZh": "浮在变暗窗口之上的对话框。",
+"url": "/docs/ui/dialog/"
 },
 {
 "title": "Alert dialog",
@@ -746,9 +820,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Dialogs and messages",
 "sectionZh": "对话框与消息",
 "sectionId": "dialogs-and-messages",
-"status": "none",
+"status": "done",
 "text": "A question about something important, with buttons.",
-"textZh": "关于重要事项的提问，带按钮。"
+"textZh": "关于重要事项的提问，带按钮。",
+"url": "/docs/ui/alert-dialog/"
 },
 {
 "title": "Popover",
@@ -756,9 +831,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Dialogs and messages",
 "sectionZh": "对话框与消息",
 "sectionId": "dialogs-and-messages",
-"status": "none",
+"status": "done",
 "text": "A panel below an element.",
-"textZh": "元素下方的面板。"
+"textZh": "元素下方的面板。",
+"url": "/docs/ui/popover/"
 },
 {
 "title": "Tooltip",
@@ -766,9 +842,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Dialogs and messages",
 "sectionZh": "对话框与消息",
 "sectionId": "dialogs-and-messages",
-"status": "none",
+"status": "done",
 "text": "A tip shown as the pointer rests on an element, or the keyboard focus comes to it.",
-"textZh": "指针停留或键盘焦点到达元素时显示的提示。"
+"textZh": "指针停留或键盘焦点到达元素时显示的提示。",
+"url": "/docs/ui/tooltip/"
 },
 {
 "title": "Toast",
@@ -776,9 +853,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Dialogs and messages",
 "sectionZh": "对话框与消息",
 "sectionId": "dialogs-and-messages",
-"status": "none",
+"status": "done",
 "text": "A short message near the bottom of the window, with an action or not.",
-"textZh": "窗口底部附近的短消息，可带操作。"
+"textZh": "窗口底部附近的短消息，可带操作。",
+"url": "/docs/ui/toast/"
 },
 {
 "title": "Progress bar",
@@ -786,9 +864,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Status",
 "sectionZh": "状态",
 "sectionId": "status",
-"status": "none",
+"status": "done",
 "text": "Work done so far, or of unknown length.",
-"textZh": "已完成的工作，或长度未知的进度。"
+"textZh": "已完成的工作，或长度未知的进度。",
+"url": "/docs/ui/progress-bar/"
 },
 {
 "title": "Spinner",
@@ -796,9 +875,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Status",
 "sectionZh": "状态",
 "sectionId": "status",
-"status": "none",
+"status": "done",
 "text": "Spokes turning while work of unknown length goes on. The loading example draws one by hand.",
-"textZh": "长度未知的工作进行时旋转的辐条。loading 示例手工绘制了一个。"
+"textZh": "长度未知的工作进行时旋转的辐条。loading 示例手工绘制了一个。",
+"url": "/docs/ui/spinner/"
 },
 {
 "title": "Meter",
@@ -806,9 +886,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Status",
 "sectionZh": "状态",
 "sectionId": "status",
-"status": "none",
+"status": "done",
 "text": "A value in a range, colored by its level.",
-"textZh": "范围内的值，按级别着色。"
+"textZh": "范围内的值，按级别着色。",
+"url": "/docs/ui/meter/"
 },
 {
 "title": "Badge",
@@ -816,9 +897,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Status",
 "sectionZh": "状态",
 "sectionId": "status",
-"status": "none",
+"status": "done",
 "text": "A short text in a pill, as a count.",
-"textZh": "胶囊中的短文本，如计数。"
+"textZh": "胶囊中的短文本，如计数。",
+"url": "/docs/ui/badge/"
 },
 {
 "title": "Charts",
@@ -826,9 +908,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Charts",
 "sectionZh": "图表",
 "sectionId": "charts",
-"status": "none",
+"status": "partial",
 "text": "Scales, axes and marks without a look, for bars, lines, areas, stacks and donuts. The streaming example draws lines by hand.",
-"textZh": "无外观的刻度、坐标轴与标记，用于柱状、折线、面积、堆叠与环形。streaming 示例手工绘制折线。"
+"textZh": "无外观的刻度、坐标轴与标记，用于柱状、折线、面积、堆叠与环形。streaming 示例手工绘制折线。",
+"url": "/docs/ui/charts/"
 },
 {
 "title": "Image",
@@ -836,9 +919,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Images",
 "sectionZh": "图像",
 "sectionId": "images",
-"status": "none",
+"status": "partial",
 "text": "Bitmaps and SVGs in their own colors.",
-"textZh": "以自身颜色显示的位图与 SVG。"
+"textZh": "以自身颜色显示的位图与 SVG。",
+"url": "/docs/ui/image/"
 },
 {
 "title": "Video",
@@ -848,7 +932,8 @@ window.__DOC_ENTRIES__ = [
 "sectionId": "images",
 "status": "none",
 "text": "Video files and streams with sound, played by the system's media engine.",
-"textZh": "带声音的视频文件与流，由系统媒体引擎播放。"
+"textZh": "带声音的视频文件与流，由系统媒体引擎播放。",
+"url": "/docs/ui/video/"
 },
 {
 "title": "Icon",
@@ -856,9 +941,10 @@ window.__DOC_ENTRIES__ = [
 "section": "Images",
 "sectionZh": "图像",
 "sectionId": "images",
-"status": "none",
-"text": "Built-in SVG path data exists in the crate, but the rasterizer does not draw SVG paths yet.",
-"textZh": "crate 中有内置 SVG 路径数据，但光栅化器尚未绘制 SVG 路径。"
+"status": "done",
+"text": "Built-in SVG path data, flattened and rasterized by the CPU presenter.",
+"textZh": "crate 内置 SVG 路径数据，由 CPU 呈现器展平并光栅化。",
+"url": "/docs/ui/icon/"
 },
 {
 "title": "Avatar",
@@ -866,8 +952,9 @@ window.__DOC_ENTRIES__ = [
 "section": "Images",
 "sectionZh": "图像",
 "sectionId": "images",
-"status": "none",
+"status": "done",
 "text": "A picture of a person, or their initials.",
-"textZh": "人物图片或其姓名首字母。"
+"textZh": "人物图片或其姓名首字母。",
+"url": "/docs/ui/avatar/"
 }
 ];
