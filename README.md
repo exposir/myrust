@@ -4,13 +4,12 @@
 
 # MyRust
 
-**Desktop apps in Rust, with a web frontend or a native WebView.**
+**Desktop apps in Rust, with a web frontend or a native WebView — plus an immediate-mode native UI library with 87 live demo pages.**
 
 The project site is static: [`website/index.html`](website/index.html) is the homepage, and
-[`website/docs/ui/index.html`](website/docs/ui/index.html) is the native UI documentation. Serve the `website/`
-directory directly — no build step. It is published at <https://myrust.pages.dev/> in English and Simplified
-Chinese; the language toggle in the header switches the page, remembers the choice, and accepts `?lang=zh` or
-`?lang=en` in the URL.
+[`website/docs/ui/index.html`](website/docs/ui/index.html) is the native UI documentation (also at
+**[myrust.pages.dev/docs/ui/](https://myrust.pages.dev/docs/ui/)** — each widget has a WASM-based live preview).
+Serve the `website/` directory directly — no build step.
 
 Each MyRust window loads a **web page** in the system's native WebView — WKWebView on macOS, WebKitGTK on Linux, WebView2 on Windows. Build the frontend with any web framework; it calls your Rust code through typed IPC with auto-generated TypeScript bindings.
 
@@ -28,7 +27,6 @@ Each MyRust window loads a **web page** in the system's native WebView — WKWeb
 - **Ready to extend** — workspace structure with a core library, CLI tool, and examples.
 
 ## A window with a web page, whose frontend calls Rust
-
 ```rust
 use myrust_core::app::{App, WindowConfig};
 use myrust_core::ipc::{IpcRouter, IpcType, NoRequest};
@@ -166,10 +164,59 @@ myrust/
 │           ├── dialog.rs   # File open/save + message dialogs
 │           ├── shortcut.rs # Global keyboard shortcuts
 │           └── instance.rs # Single-instance lock
+├── myrust-ui/              # Platform-agnostic native UI library (65+ widgets, WASM demos)
+│   ├── src/context.rs     # Immediate-mode Context + widget builders
+│   ├── src/native.rs      # NativeUi callback host, event routing
+│   ├── src/layout.rs      # Flexbox-style CPU layout engine
+│   ├── src/paint.rs       # DrawCommand display list, Color
+│   ├── src/present.rs     # CPU rasterizer (ab_glyph TTF, SVG paths)
+│   ├── src/markdown.rs    # Subset Markdown (headings, lists, code, tables)
+│   ├── src/icon.rs        # 11 built-in SVG path icons
+│   └── src/(30+ modules)  # Widgets: button, checkbox, radio, tabs, slider,
+│                          #   scroll, tree, table, rating, color-picker,
+│                          #   sidebar, breadcrumbs, toolbar, and more
 ├── myrust-cli/             # CLI (dev server, build)
 ├── examples/               # Dashboard plus focused example apps (see examples/README.md)
 └── frontend/               # Web frontend assets
 ```
+
+## Native UI (myrust-ui)
+
+`myrust-ui` is an **immediate-mode native UI library** with 65+ widgets — think imgui
+done right, with real TTF text, SVG paths, a CPU rasterizer, and a flexbox-style layout
+engine. Every widget is a live WASM demo at
+**[myrust.pages.dev/docs/ui/](https://myrust.pages.dev/docs/ui/)** (87 documented pages).
+
+```rust
+use myrust_ui::*;
+
+NativeUi::new(|ctx| {
+    column(ctx).width(380.0).gap(12.0).center().children(|ctx| {
+        text(ctx, "Sign in").font_size(22.0).bold().color(theme.foreground);
+        text_field(ctx, "email", &mut email);
+        text_field(ctx, "password", &mut password);
+        if button_primary(ctx, "Submit").clicked {
+            login(&email, &password);
+        }
+    });
+});
+```
+
+**Widgets:** button (flat & primary with optional icon), checkbox (with tree),
+radio group, toggle, switch, slider, range-slider, stepper, progress bar, spinner,
+badge, avatar, text field, search field, find bar, text input primitives, editable
+text, code editor, diff viewer, rich text, markdown (headings, lists, code blocks,
+tables), combobox, autocomplete, select, tabs, segmented control, menu button,
+context menu, popover, tooltip, dropdown, dialog, alert dialog, toast notification,
+sidebar, breadcrumbs, accordion, collapsible, tree/outline, list, grid view, table,
+scroll view, split view, form field, rating, date/time input, decimal/number input,
+stepper, token field, slider, range slider, color picker (with hue/SV/alpha bars
+and presets), icon, image, meter, bar/line charts, calendar, transitions, animation,
+drag & drop, reorderable lists, inspector, navigation router with back/forward
+buttons, accessibility roles.
+
+**Platform:** Linux (native, Xvfb-tested), macOS, Windows — same `NativeUi::new`
+API everywhere, compiled once.
 
 ## IPC
 
@@ -250,7 +297,7 @@ let _guard = SingleInstance::acquire("myrust-app")?;
 
 **Phase 2** — complete through Batch D. It added native menus, clipboard access, drag & drop, hot reload, window state, sessions, page APIs, appearance controls, recent documents, deep links, downloads, protocols, system/media APIs, updater foundations, package descriptions, signing interfaces, and single-instance forwarding.
 
-**Phase 3** — complete with the limitations below. The widget layer uses mygo's immediate-mode `View(callback)` shape: `NativeUi::new(|ctx| ...)`, `Context` widget constructors, inline per-frame state queries, and display-list generation. Interaction coverage includes hover regions, Tab/Shift+Tab focus traversal, Enter/Space activation, focus rings, text fields, checkboxes, sliders, and vertically scrollable clipped views. Built-in controls derive colors, spacing, and typography from `Theme`; `Theme::system()` detects light/dark appearance with a dark fallback. CPU-side scalar animation supports easing, elapsed-time progress, reduced-motion short-circuiting, and a `needs_animation_frame` signal. Each frame also emits platform-neutral accessibility metadata for labels, buttons, text fields, checkboxes, sliders, scroll views, and groups. `WindowContent::NativeUi` connects the paradigm to `App` and `WindowConfig`, and `--native-ui` runs the Dashboard demo. The CPU presenter prefers a real system TTF through `ab_glyph` and falls back to the built-in bitmap font when no supported font is found. Existing `WindowConfig::webview` usage remains supported, and the default Dashboard startup path is still HTTP/WebView only.
+**Phase 3** — complete through the final polish round described below. The widget layer uses mygo's immediate-mode `View(callback)` shape: `NativeUi::new(|ctx| ...)`, `Context` widget constructors, inline per-frame state queries, and display-list generation.
 
 ### Honest boundaries
 
@@ -267,8 +314,8 @@ let _guard = SingleInstance::acquire("myrust-app")?;
 - `SoftwareRenderer` is not a pixel rasterizer. It validates and analyzes display-list commands, transforms, scissors, and bounds only.
 - Native UI has been run under an Xvfb virtual X11 display (`DISPLAY=:77`, 1280x900): the `myrust Native Dashboard` window opened at 1024x820 with the Software backend, rendered, and accepted real mouse clicks and keyboard input; click follow-up frames now settle synchronously. Real hardware desktop sessions and macOS/Windows behavior are still unverified. XTest buttons 4/5 are not interpreted as wheel events by GDK under Xvfb, so wheel behavior remains unit-tested rather than Xvfb-verified.
 - The wgpu renderer targets a single-sample offscreen texture. It does not expose a native wgpu surface or swapchain, and its offscreen texture is not copied to the window. The `--native-ui` window presents the same display list through `CpuRasterizer` and `softbuffer`.
-- `CpuRasterizer` is a basic CPU presenter, not a full UI renderer. It prefers one discovered system TTF and falls back to fixed 8x8 bitmap glyphs if loading fails. It does not implement shaping, kerning, bidi layout, multi-font fallback, text alignment/wrapping, IME composition, SVG path parsing, image decoding, or optimized spatial hit testing.
-- `Renderer` still reports Text, SVG path, and image commands as unsupported through `RenderStats`; the separate CPU presenter draws TTF or fallback bitmap text and supported geometry but does not change those renderer statistics.
+- `CpuRasterizer` is a basic CPU presenter. It prefers one discovered system TTF and falls back to fixed 8x8 bitmap glyphs if loading fails. It supports text alignment (start/center/end) with optional max-width wrapping, bold synthesis via coverage-bitmap offset, SVG path fill and stroke, and line/stroke overlay on filled outlines. It does not implement shaping, kerning, bidi layout, multi-font fallback, IME composition, image decoding, or optimized spatial hit testing.
+- `Renderer` reports Text, SVG path, and image commands as unsupported through `RenderStats`; the separate CPU presenter (`CpuRasterizer`) draws TTF text, SVG paths, and supported geometry independently from those statistics.
 - `Theme::system()` only detects light versus dark appearance. It does not read the system accent color or high-contrast preference.
 - Animation is scalar/easing infrastructure plus button hover/pressed interpolation; content transitions, timeline orchestration, and spring physics are not implemented. Reduced motion checks `MYRUST_REDUCE_MOTION` and the existing neutral appearance layer, but native macOS and Windows reduced-motion APIs are not implemented. Animation redraw is best-effort through `request_redraw`; there is no timer-driven frame scheduler, and Linux wakeup behavior still depends on the host event loop.
 - Accessibility output is semantic data only. No AT-SPI, UIA, or NSAccessibility bridge is connected, so platform assistive technologies cannot observe the emitted nodes.
