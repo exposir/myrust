@@ -147,11 +147,33 @@ impl FontRegistry {
 }
 
 /// Returns the process-wide default system font, loading it once on first use.
+///
+/// An explicitly installed face via [`install_default_font`] takes precedence.
+/// Layout measurement and callers of [`default_font`] then share one face.
 pub fn default_font() -> Option<Arc<FontFace>> {
+    if let Some(font) = installed_default_font() {
+        return Some(font);
+    }
     static DEFAULT: OnceLock<Option<Arc<FontFace>>> = OnceLock::new();
     DEFAULT
         .get_or_init(|| FontRegistry::load_system_default().map(Arc::new))
         .clone()
+}
+
+static INSTALLED_FONT: OnceLock<Arc<FontFace>> = OnceLock::new();
+
+/// Installs a process-wide font used for layout measurement and [`default_font`].
+///
+/// This is opt-in for environments without system fonts, such as wasm. The
+/// first successful call wins; later calls are ignored. Callers that rasterize
+/// with an explicit face should install that same face so measured widths match
+/// drawn glyph advances.
+pub fn install_default_font(font: Arc<FontFace>) -> bool {
+    INSTALLED_FONT.set(font).is_ok()
+}
+
+fn installed_default_font() -> Option<Arc<FontFace>> {
+    INSTALLED_FONT.get().cloned()
 }
 
 /// `TextMeasurer` backed by one real font face.

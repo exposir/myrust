@@ -55,6 +55,20 @@ pub enum MarkdownBlock {
     UnorderedList(Vec<Vec<InlineSpan>>),
     /// Ordered list items.
     OrderedList(Vec<Vec<InlineSpan>>),
+    /// Fenced code block.
+    Code {
+        /// Optional info string (language).
+        language: Option<String>,
+        /// Raw code lines.
+        lines: Vec<String>,
+    },
+    /// Pipe table with a header row.
+    Table {
+        /// Header cells.
+        headers: Vec<String>,
+        /// Body cells.
+        rows: Vec<Vec<String>>,
+    },
 }
 
 /// Result of rendering Markdown.
@@ -72,8 +86,8 @@ pub fn markdown(context: &mut Context, id: &str, source: &str) -> MarkdownRespon
 /// Parses basic Markdown blocks.
 ///
 /// Supported blocks are headings 1..=6, paragraphs, unordered lists (`- `,
-/// `* `), and ordered lists (`1. `). Paragraph continuation lines are joined
-/// with spaces.
+/// `* `), ordered lists (`1. `), fenced code blocks, and pipe tables.
+/// Paragraph continuation lines are joined with spaces.
 pub fn parse_markdown(source: &str) -> Vec<MarkdownBlock> {
     let mut blocks = Vec::new();
     let mut paragraph = String::new();
@@ -97,8 +111,32 @@ pub fn parse_markdown(source: &str) -> Vec<MarkdownBlock> {
         }
     };
 
-    for line in source.lines() {
+    let mut fence: Option<(Option<String>, Vec<String>)> = None;
+    let lines: Vec<&str> = source.lines().collect();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
         let trimmed = line.trim();
+        index += 1;
+        if let Some((_language, code_lines)) = fence.as_mut() {
+            if trimmed.starts_with("```") {
+                let (language, lines) = fence.take().expect("open fence");
+                blocks.push(MarkdownBlock::Code { language, lines });
+            } else {
+                code_lines.push(line.to_string());
+            }
+            continue;
+        }
+        if let Some(info) = trimmed.strip_prefix("```") {
+            flush_paragraph(&mut paragraph, &mut blocks);
+            flush_lists(&mut unordered, &mut ordered, &mut blocks);
+            let language = info.trim();
+            fence = Some((
+                (!language.is_empty()).then(|| language.to_string()),
+                Vec::new(),
+            ));
+            continue;
+        }
         if trimmed.is_empty() {
             flush_paragraph(&mut paragraph, &mut blocks);
             flush_lists(&mut unordered, &mut ordered, &mut blocks);
@@ -112,6 +150,26 @@ pub fn parse_markdown(source: &str) -> Vec<MarkdownBlock> {
                 spans: parse_inline(text),
             });
             continue;
+        }
+        if index < lines.len() && table_separator(lines[index]) {
+            if let Some(headers) = split_table_row(trimmed) {
+                flush_paragraph(&mut paragraph, &mut blocks);
+                flush_lists(&mut unordered, &mut ordered, &mut blocks);
+                index += 1;
+                let mut rows = Vec::new();
+                while index < lines.len() {
+                    let row_line = lines[index].trim();
+                    if row_line.is_empty() || !row_line.contains('|') {
+                        break;
+                    }
+                    if let Some(cells) = split_table_row(row_line) {
+                        rows.push(cells);
+                    }
+                    index += 1;
+                }
+                blocks.push(MarkdownBlock::Table { headers, rows });
+                continue;
+            }
         }
         if let Some(text) = unordered_item(trimmed) {
             flush_paragraph(&mut paragraph, &mut blocks);
@@ -135,9 +193,36 @@ pub fn parse_markdown(source: &str) -> Vec<MarkdownBlock> {
         }
         paragraph.push_str(trimmed);
     }
+    if let Some((language, lines)) = fence.take() {
+        blocks.push(MarkdownBlock::Code { language, lines });
+    }
     flush_paragraph(&mut paragraph, &mut blocks);
     flush_lists(&mut unordered, &mut ordered, &mut blocks);
     blocks
+}
+
+fn split_table_row(line: &str) -> Option<Vec<String>> {
+    let trimmed = line.trim();
+    if !trimmed.contains('|') {
+        return None;
+    }
+    let inner = trimmed.strip_prefix('|').unwrap_or(trimmed);
+    let inner = inner.strip_suffix('|').unwrap_or(inner);
+    Some(inner.split('|').map(|cell| cell.trim().to_string()).collect())
+}
+
+fn table_separator(line: &str) -> bool {
+    split_table_row(line)
+        .map(|cells| {
+            !cells.is_empty()
+                && cells.iter().all(|cell| {
+                    !cell.is_empty()
+                        && cell
+                            .chars()
+                            .all(|character| character == '-' || character == ':')
+                })
+        })
+        .unwrap_or(false)
 }
 
 fn heading(line: &str) -> Option<(u8, &str)> {
@@ -277,6 +362,63 @@ mod tests {
         assert!(inline.iter().any(|span| {
             matches!(&span.style, InlineStyle::Link { target } if target == "url")
         }));
+    }
+
+    #[test]
+    fn parses_and_renders_fenced_code_blocks() {
+        let blocks = parse_markdown("Before\n\n```rust\nlet x = 1;\nlet y = 2;\n```\n\nAfter");
+        assert_eq!(blocks.len(), 3);
+        let MarkdownBlock::Code { language, lines } = &blocks[1] else {
+            panic!("code block");
+        };
+        assert_eq!(language.as_deref(), Some("rust"));
+        assert_eq!(lines, &["let x = 1;".to_string(), "let y = 2;".to_string()]);
+
+        let size = Size::new(420.0, 260.0);
+        let mut context = Context::new(size);
+        context.begin_frame(size);
+        let response = markdown(&mut context, "md-code", "```rust\nlet x = 1;\n```");
+        let frame = context.produce().unwrap();
+        assert_eq!(response.blocks, 1);
+        assert!(frame
+            .display
+            .commands
+            .iter()
+            .any(|command| matches!(command, DrawCommand::Text { text, .. } if text == "rust")));
+        assert!(frame
+            .display
+            .commands
+            .iter()
+            .any(|command| matches!(command, DrawCommand::Text { text, .. } if text == "let x = 1;")));
+    }
+
+    #[test]
+    fn parses_and_renders_pipe_tables() {
+        let blocks =
+            parse_markdown("| Block | Cost |\n| --- | --- |\n| heading | O(1) |\n| paragraph | O(n) |");
+        assert_eq!(blocks.len(), 1);
+        let MarkdownBlock::Table { headers, rows } = &blocks[0] else {
+            panic!("table");
+        };
+        assert_eq!(headers, &["Block".to_string(), "Cost".to_string()]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1], vec!["paragraph".to_string(), "O(n)".to_string()]);
+
+        let size = Size::new(420.0, 200.0);
+        let mut context = Context::new(size);
+        context.begin_frame(size);
+        let response = markdown(
+            &mut context,
+            "md-table",
+            "| Block | Cost |\n| --- | --- |\n| heading | O(1) |",
+        );
+        let frame = context.produce().unwrap();
+        assert_eq!(response.blocks, 1);
+        for label in ["Block", "Cost", "heading", "O(1)"] {
+            assert!(frame.display.commands.iter().any(
+                |command| matches!(command, DrawCommand::Text { text, .. } if text == label)
+            ));
+        }
     }
 
     #[test]

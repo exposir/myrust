@@ -9,7 +9,7 @@
 use font8x8::{UnicodeFonts, BASIC_FONTS};
 use std::sync::Arc;
 
-use super::font::{default_font, FontFace};
+use super::font::{default_font, FontFace, GlyphBitmap};
 use super::layout::Point;
 use super::paint::{Color, DisplayList, DrawCommand, GradientStop, Radius, Rect};
 use super::render::{color_to_array, intersect_rects, CommandCounts, RenderSize, TransformMatrix};
@@ -129,15 +129,39 @@ impl CpuRasterizer {
                     y,
                     text,
                     font_size,
+                    weight,
                     color,
-                    ..
+                    max_width,
+                    alignment,
                 } => {
+                    let mut draw_x = *x;
+                    // The rasterizer has no shaping or wrapping; still honor
+                    // single-line alignment inside a finite max width so nodes
+                    // that center labels draw them centered.
+                    if let Some(max_width) = *max_width {
+                        if max_width.is_finite() && max_width > 0.0 {
+                            let widest = text
+                                .split('\n')
+                                .map(|line| canvas.measure_text(line, *font_size))
+                                .fold(0.0_f32, f32::max);
+                            if widest <= max_width {
+                                draw_x += match alignment {
+                                    super::paint::TextAlignment::Center => {
+                                        (max_width - widest) / 2.0
+                                    }
+                                    super::paint::TextAlignment::End => max_width - widest,
+                                    super::paint::TextAlignment::Start => 0.0,
+                                };
+                            }
+                        }
+                    }
                     canvas.draw_text(
                         transform,
                         scissor,
-                        Point::new(*x, *y),
+                        Point::new(draw_x, *y),
                         text,
                         *font_size,
+                        *weight,
                         *color,
                     );
                 }
@@ -463,6 +487,17 @@ impl Canvas {
         );
     }
 
+    fn measure_text(&self, text: &str, font_size: f32) -> f32 {
+        let font_size = font_size.max(1.0);
+        match self.font.as_ref() {
+            Some(font) => text
+                .chars()
+                .map(|character| font.glyph_advance(character, font_size))
+                .sum(),
+            None => text.chars().count() as f32 * font_size * 0.6,
+        }
+    }
+
     fn draw_text(
         &mut self,
         transform: TransformMatrix,
@@ -470,9 +505,9 @@ impl Canvas {
         origin: Point,
         text: &str,
         font_size: f32,
+        weight: u16,
         color: Color,
-    ) {
-        let Some(font) = self.font.clone() else {
+    ) {        let Some(font) = self.font.clone() else {
             self.draw_bitmap_text(transform, scissor, origin, text, font_size, color);
             return;
         };
@@ -480,6 +515,13 @@ impl Canvas {
         let line_height = font.line_height(font_size);
         let baseline_offset = font.ascent(font_size);
         let color = color_to_array(color);
+        // Single-face rasterization has no bold face; thicken strokes by
+        // stamping the coverage bitmap a fraction of the em to the right.
+        let bold_offset = if weight >= 600 {
+            (font_size * 0.035).clamp(0.35, 1.0)
+        } else {
+            0.0
+        };
         for (line_index, line) in text.split('\n').enumerate() {
             let mut cursor_x = origin.x;
             let baseline_y = origin.y + line_index as f32 * line_height + baseline_offset;
@@ -490,42 +532,75 @@ impl Canvas {
                     continue;
                 }
                 let bitmap = font.rasterize(character, font_size);
-                for row in 0..bitmap.height {
-                    for column in 0..bitmap.width {
-                        let coverage =
-                            bitmap.coverage[(row * bitmap.width + column) as usize] as f32 / 255.0;
-                        if coverage <= 0.0 {
-                            continue;
-                        }
-                        let x = cursor_x + bitmap.bearing_x as f32 + column as f32;
-                        let y = baseline_y + bitmap.bearing_y as f32 + row as f32;
-                        let points = [
-                            Point::new(x, y),
-                            Point::new(x + 1.0, y),
-                            Point::new(x + 1.0, y + 1.0),
-                            Point::new(x, y + 1.0),
-                        ];
-                        let mut glyph_color = color;
-                        glyph_color[3] *= coverage;
-                        self.fill_triangle(
-                            transform,
-                            scissor,
-                            points[0],
-                            points[1],
-                            points[2],
-                            [glyph_color; 3],
-                        );
-                        self.fill_triangle(
-                            transform,
-                            scissor,
-                            points[0],
-                            points[2],
-                            points[3],
-                            [glyph_color; 3],
-                        );
-                    }
+                self.fill_glyph_bitmap(
+                    transform,
+                    scissor,
+                    &bitmap,
+                    cursor_x,
+                    baseline_y,
+                    0.0,
+                    color,
+                );
+                if bold_offset > 0.0 {
+                    self.fill_glyph_bitmap(
+                        transform,
+                        scissor,
+                        &bitmap,
+                        cursor_x,
+                        baseline_y,
+                        bold_offset,
+                        color,
+                    );
                 }
                 cursor_x += font.glyph_advance(character, font_size);
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fill_glyph_bitmap(
+        &mut self,
+        transform: TransformMatrix,
+        scissor: Option<Rect>,
+        bitmap: &GlyphBitmap,
+        pen_x: f32,
+        baseline_y: f32,
+        offset: f32,
+        color: [f32; 4],
+    ) {
+        for row in 0..bitmap.height {
+            for column in 0..bitmap.width {
+                let coverage =
+                    bitmap.coverage[(row * bitmap.width + column) as usize] as f32 / 255.0;
+                if coverage <= 0.0 {
+                    continue;
+                }
+                let x = pen_x + bitmap.bearing_x as f32 + column as f32 + offset;
+                let y = baseline_y + bitmap.bearing_y as f32 + row as f32;
+                let points = [
+                    Point::new(x, y),
+                    Point::new(x + 1.0, y),
+                    Point::new(x + 1.0, y + 1.0),
+                    Point::new(x, y + 1.0),
+                ];
+                let mut glyph_color = color;
+                glyph_color[3] *= coverage;
+                self.fill_triangle(
+                    transform,
+                    scissor,
+                    points[0],
+                    points[1],
+                    points[2],
+                    [glyph_color; 3],
+                );
+                self.fill_triangle(
+                    transform,
+                    scissor,
+                    points[0],
+                    points[2],
+                    points[3],
+                    [glyph_color; 3],
+                );
             }
         }
     }

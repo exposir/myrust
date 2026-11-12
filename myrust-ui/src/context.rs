@@ -623,6 +623,110 @@ impl Context {
 
     /// Creates a button and returns its click state for this frame.
     pub fn button(&mut self, label: &str) -> ButtonState {
+        self.button_styled(label, false)
+    }
+
+    /// Creates a filled primary button using the accent color.
+    pub fn button_primary(&mut self, label: &str) -> ButtonState {
+        self.button_styled(label, true)
+    }
+
+    /// Creates a button with a built-in icon before the label.
+    pub fn button_with_icon(&mut self, label: &str, icon_name: &str) -> ButtonState {
+        let theme = self.theme.clone();
+        let spacing = theme.spacing;
+        let font_size = theme.font_sizes.body;
+        let icon_size = 14.0;
+        let id = self.new_node(Style {
+            padding: Edges::symmetric(spacing.sm, spacing.md),
+            ..Style::default()
+        });
+        let text_size = estimated_text_size(label, font_size, None);
+        let content_size = Size::new(text_size.width + icon_size + 4.0, text_size.height);
+        let key = self
+            .nodes
+            .get(&id)
+            .and_then(|node| node.key.clone())
+            .unwrap_or_else(|| format!("button-{id}"));
+        let previous = self.previous_regions.get(&key).cloned();
+        let mouse_clicked = self.clicked_in_previous(&key);
+        let hovered = self.pointer_in_previous(&key);
+        let pressed = hovered && self.input.pointer_down;
+        let focused = self.focused_id.as_deref() == Some(key.as_str());
+        let clicked = mouse_clicked
+            || (focused && (self.key_pressed(Key::Enter) || self.key_pressed(Key::Space)));
+        if pressed || clicked {
+            self.focused_id = Some(key.clone());
+        }
+        let focused = self.focused_id.as_deref() == Some(key.as_str());
+        let hover_progress = self.animate(&format!("{key}:hover"), if hovered { 1.0 } else { 0.0 });
+        let pressed_progress =
+            self.animate(&format!("{key}:pressed"), if pressed { 1.0 } else { 0.0 });
+        let bounds = previous.as_ref().map(|region| region.bounds);
+        let horizontal = spacing.md;
+        let vertical = spacing.sm;
+        let hover_bg = mix_color(theme.surface, theme.accent, 0.65);
+        let pressed_bg = theme.accent;
+        let background = mix_color(
+            mix_color(theme.surface, hover_bg, hover_progress.clamp(0.0, 1.0)),
+            pressed_bg,
+            pressed_progress.clamp(0.0, 1.0),
+        );
+        let emphasis = hover_progress.max(pressed_progress);
+        let text_color = mix_color(theme.foreground, theme.on_accent, emphasis);
+        let total_w = content_size.width + horizontal * 2.0;
+        let total_h = content_size.height + vertical * 2.0;
+        let mut commands = vec![DrawCommand::RoundedRect {
+            x: 0.0,
+            y: 0.0,
+            width: total_w,
+            height: total_h,
+            radius: Radius::all(6.0),
+            color: background,
+        }];
+        // Icon
+        if let Some(icon) = Icon::builtin(icon_name) {
+            commands.push(DrawCommand::TransformPush {
+                transform: Transform {
+                    translation: Point::new(horizontal, vertical),
+                    scale: Point::new(1.0, 1.0),
+                    rotation: 0.0,
+                },
+            });
+            commands.extend(icon.to_commands_with_direction(icon_size, text_color, self.direction));
+            commands.push(DrawCommand::TransformPop);
+        }
+        // Label after icon
+        commands.push(DrawCommand::Text {
+            x: horizontal + icon_size + 4.0,
+            y: vertical,
+            text: label.to_string(),
+            font_size,
+            weight: 500,
+            color: text_color,
+            max_width: None,
+            alignment: TextAlignment::Start,
+        });
+        if focused {
+            commands.extend(focus_ring(0.0, 0.0, total_w, total_h, theme.accent));
+        }
+        let node = self.nodes.get_mut(&id).expect("button node exists");
+        node.content_size = content_size;
+        node.commands = commands;
+        self.register_interaction(id, key.clone());
+        self.register_focusable(id, key.clone());
+        self.register_access_node(id, Role::Button, label, None, focused);
+        ButtonState {
+            id: key,
+            clicked,
+            pressed,
+            focused,
+            hovered,
+            bounds,
+        }
+    }
+
+    fn button_styled(&mut self, label: &str, primary: bool) -> ButtonState {
         let theme = self.theme.clone();
         let spacing = theme.spacing;
         let font_size = theme.font_sizes.body;
@@ -660,6 +764,7 @@ impl Context {
             hover_progress,
             pressed_progress,
             focused,
+            primary,
         );
         self.register_interaction(id, key.clone());
         self.register_focusable(id, key.clone());
@@ -1168,7 +1273,10 @@ impl Context {
                             alignment: TextAlignment::Start,
                         },
                         DrawCommand::Text {
-                            x: 0.0,
+                            x: (chip_width.max(36.0)
+                                - theme.spacing.xs
+                                - measure_text_width("×", theme.font_sizes.small))
+                            .max(theme.spacing.sm),
                             y: 3.0,
                             text: "×".to_string(),
                             font_size: theme.font_sizes.small,
@@ -1178,8 +1286,8 @@ impl Context {
                             } else {
                                 theme.muted
                             },
-                            max_width: Some(chip_width.max(36.0) - 6.0),
-                            alignment: TextAlignment::End,
+                            max_width: None,
+                            alignment: TextAlignment::Start,
                         },
                     ];
                     context.register_access_node(
@@ -1612,6 +1720,135 @@ impl Context {
                         });
                     }
                 }
+                MarkdownBlock::Code { language, lines } => {
+                    let font_size = theme.font_sizes.body;
+                    let line_height = measured_text_height(font_size);
+                    let code_top = if language.is_some() { 26.0 } else { 12.0 };
+                    let height = code_top + line_height * lines.len() as f32 + 10.0;
+                    let node = self.new_node(Style {
+                        width: Some(width),
+                        height: Some(height),
+                        ..Style::default()
+                    });
+                    let mut commands = vec![DrawCommand::RoundedRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width,
+                        height,
+                        radius: Radius::all(6.0),
+                        color: mix_color(theme.surface, theme.background, 0.65),
+                    }];
+                    if let Some(language) = language {
+                        commands.push(DrawCommand::Text {
+                            x: 12.0,
+                            y: 8.0,
+                            text: language.clone(),
+                            font_size: 11.0,
+                            weight: 400,
+                            color: theme.muted,
+                            max_width: Some((width - 24.0).max(1.0)),
+                            alignment: TextAlignment::Start,
+                        });
+                    }
+                    commands.push(DrawCommand::Text {
+                        x: 12.0,
+                        y: code_top,
+                        text: lines.join("\n"),
+                        font_size,
+                        weight: 400,
+                        color: theme.foreground,
+                        max_width: Some((width - 24.0).max(1.0)),
+                        alignment: TextAlignment::Start,
+                    });
+                    self.nodes
+                        .get_mut(&node)
+                        .expect("markdown code node exists")
+                        .commands = commands;
+                }
+                MarkdownBlock::Table { headers, rows } => {
+                    let font_size = theme.font_sizes.body;
+                    let row_height = measured_text_height(font_size) + 10.0;
+                    let columns = headers
+                        .len()
+                        .max(rows.iter().map(Vec::len).max().unwrap_or(0))
+                        .max(1);
+                    let mut widths = vec![0.0_f32; columns];
+                    for (column, header) in headers.iter().enumerate() {
+                        widths[column] = widths[column].max(measure_text_width(header, font_size));
+                    }
+                    for row in rows {
+                        for (column, cell) in row.iter().enumerate().take(columns) {
+                            widths[column] = widths[column].max(measure_text_width(cell, font_size));
+                        }
+                    }
+                    for width in &mut widths {
+                        *width = (*width + 28.0).max(80.0);
+                    }
+                    let total: f32 = widths.iter().sum();
+                    let scale = if total > width { width / total } else { 1.0 };
+                    for width in &mut widths {
+                        *width *= scale;
+                    }
+                    let height = row_height * (rows.len() + 1) as f32;
+                    let node = self.new_node(Style {
+                        width: Some(width),
+                        height: Some(height),
+                        ..Style::default()
+                    });
+                    let mut commands = vec![DrawCommand::Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width,
+                        height: row_height,
+                        color: mix_color(theme.surface, theme.border, 0.3),
+                    }];
+                    let mut x = 0.0;
+                    for (column, header) in headers.iter().enumerate() {
+                        commands.push(DrawCommand::Text {
+                            x: x + 12.0,
+                            y: (row_height - measured_text_height(font_size)) / 2.0,
+                            text: header.clone(),
+                            font_size,
+                            weight: 600,
+                            color: theme.foreground,
+                            max_width: Some((widths[column] - 24.0).max(1.0)),
+                            alignment: TextAlignment::Start,
+                        });
+                        x += widths[column];
+                    }
+                    for (row_index, row) in rows.iter().enumerate() {
+                        let y = row_height * (row_index + 1) as f32;
+                        let mut x = 0.0;
+                        for (column, cell) in row.iter().enumerate().take(columns) {
+                            commands.push(DrawCommand::Text {
+                                x: x + 12.0,
+                                y: y + (row_height - measured_text_height(font_size)) / 2.0,
+                                text: cell.clone(),
+                                font_size,
+                                weight: 400,
+                                color: theme.muted,
+                                max_width: Some((widths[column] - 24.0).max(1.0)),
+                                alignment: TextAlignment::Start,
+                            });
+                            x += widths[column];
+                        }
+                    }
+                    for row_index in 0..=rows.len() {
+                        let y = row_height * row_index as f32;
+                        commands.push(DrawCommand::Line {
+                            x1: 0.0,
+                            y1: y,
+                            x2: width,
+                            y2: y,
+                            width: 1.0,
+                            color: theme.border,
+                        });
+                    }
+                    self.nodes
+                        .get_mut(&node)
+                        .expect("markdown table node exists")
+                        .commands = commands;
+                }
             }
         }
         self.pop_parent();
@@ -1628,7 +1865,7 @@ impl Context {
     }
 
     fn inline_row(&mut self, spans: &[InlineSpan], font_size: f32, heading: bool) {
-        self.row().gap(2.0).children(|context| {
+        self.row().gap(0.0).children(|context| {
             for span in spans {
                 context.inline_span_node(span, font_size, heading);
             }
@@ -2505,6 +2742,11 @@ impl Context {
         if block_clicked || (block_focused && self.key_pressed(Key::Enter)) {
             state.open = !state.open;
             if state.open {
+                let (hue, saturation, value) = rgb_to_hsv(*color);
+                state.hue = hue;
+                state.saturation = saturation;
+                state.value = value;
+                state.alpha = color.a;
                 state.hex = color.to_hex();
             }
         }
@@ -2568,12 +2810,268 @@ impl Context {
                     anchor,
                     |context| {
                         context.column().gap(theme.spacing.xs).children(|context| {
+                            let (derived_hue, derived_sat, derived_val) = rgb_to_hsv(*color);
+                            if derived_sat > 0 && derived_val > 0 {
+                                state.hue = derived_hue;
+                            }
+                            state.saturation = derived_sat;
+                            state.value = derived_val;
+                            let field_width = 220.0_f32;
+                            let field_height = 120.0_f32;
+                            let field_key = format!("{id}:field");
+                            let field_node = context.new_named_node(
+                                &field_key,
+                                Style {
+                                    width: Some(field_width),
+                                    height: Some(field_height),
+                                    ..Style::default()
+                                },
+                            );
+                            context.register_interaction(field_node, field_key.clone());
+                            if context.clicked_in_previous(&field_key) {
+                                if let Some(point) = context.local_pointer_in_previous(&field_key) {
+                                    state.saturation = ((point.x / field_width) * 100.0)
+                                        .round()
+                                        .clamp(0.0, 100.0)
+                                        as u8;
+                                    state.value = (100.0 - (point.y / field_height) * 100.0)
+                                        .round()
+                                        .clamp(0.0, 100.0)
+                                        as u8;
+                                    *color = hsv_to_color(
+                                        state.hue as f32,
+                                        state.saturation as f32 / 100.0,
+                                        state.value as f32 / 100.0,
+                                    );
+                                    color.a = state.alpha;
+                                    hex = color.to_hex();
+                                    changed = true;
+                                }
+                            }
+                            let columns = 32_usize;
+                            let rows = 20_usize;
+                            let mut field_commands = Vec::with_capacity(columns * rows + 2);
+                            for row in 0..rows {
+                                for column in 0..columns {
+                                    let saturation = column as f32 / (columns - 1) as f32;
+                                    let value = 1.0 - row as f32 / (rows - 1) as f32;
+                                    field_commands.push(DrawCommand::Rect {
+                                        x: column as f32 * field_width / columns as f32,
+                                        y: row as f32 * field_height / rows as f32,
+                                        width: field_width / columns as f32 + 0.5,
+                                        height: field_height / rows as f32 + 0.5,
+                                        color: hsv_to_color(state.hue as f32, saturation, value),
+                                    });
+                                }
+                            }
+                            let marker_x = state.saturation as f32 / 100.0 * field_width;
+                            let marker_y = (1.0 - state.value as f32 / 100.0) * field_height;
+                            field_commands.push(DrawCommand::Circle {
+                                x: marker_x,
+                                y: marker_y,
+                                radius: 6.0,
+                                color: Color::rgb(255, 255, 255),
+                            });
+                            field_commands.push(DrawCommand::Circle {
+                                x: marker_x,
+                                y: marker_y,
+                                radius: 4.0,
+                                color: *color,
+                            });
+                            context
+                                .nodes
+                                .get_mut(&field_node)
+                                .expect("color field exists")
+                                .commands = field_commands;
+
+                            let hue_width = 220.0_f32;
+                            let hue_height = 12.0_f32;
+                            let hue_key = format!("{id}:hue");
+                            let hue_node = context.new_named_node(
+                                &hue_key,
+                                Style {
+                                    width: Some(hue_width),
+                                    height: Some(hue_height),
+                                    ..Style::default()
+                                },
+                            );
+                            context.register_interaction(hue_node, hue_key.clone());
+                            if context.clicked_in_previous(&hue_key) {
+                                if let Some(point) = context.local_pointer_in_previous(&hue_key) {
+                                    state.hue = ((point.x / hue_width) * 360.0)
+                                        .round()
+                                        .clamp(0.0, 359.0)
+                                        as u16;
+                                    if state.saturation == 0 || state.value == 0 {
+                                        state.saturation = 100;
+                                        state.value = 100;
+                                    }
+                                    *color = hsv_to_color(
+                                        state.hue as f32,
+                                        state.saturation as f32 / 100.0,
+                                        state.value as f32 / 100.0,
+                                    );
+                                    color.a = state.alpha;
+                                    hex = color.to_hex();
+                                    changed = true;
+                                }
+                            }
+                            let hue_steps = 24_usize;
+                            let mut hue_commands = Vec::with_capacity(hue_steps + 2);
+                            for step in 0..hue_steps {
+                                hue_commands.push(DrawCommand::Rect {
+                                    x: step as f32 * hue_width / hue_steps as f32,
+                                    y: 0.0,
+                                    width: hue_width / hue_steps as f32 + 0.5,
+                                    height: hue_height,
+                                    color: hsv_to_color(
+                                        (step as f32 + 0.5) / hue_steps as f32 * 360.0,
+                                        1.0,
+                                        1.0,
+                                    ),
+                                });
+                            }
+                            let hue_marker = (state.hue as f32 / 360.0 * hue_width)
+                                .clamp(6.0, hue_width - 6.0);
+                            hue_commands.push(DrawCommand::Circle {
+                                x: hue_marker,
+                                y: hue_height / 2.0,
+                                radius: 6.0,
+                                color: Color::rgb(255, 255, 255),
+                            });
+                            hue_commands.push(DrawCommand::Circle {
+                                x: hue_marker,
+                                y: hue_height / 2.0,
+                                radius: 4.0,
+                                color: *color,
+                            });
+                            context
+                                .nodes
+                                .get_mut(&hue_node)
+                                .expect("hue bar exists")
+                                .commands = hue_commands;
+
+                            let alpha_width = 220.0_f32;
+                            let alpha_height = 12.0_f32;
+                            let alpha_key = format!("{id}:alpha");
+                            let alpha_node = context.new_named_node(
+                                &alpha_key,
+                                Style {
+                                    width: Some(alpha_width),
+                                    height: Some(alpha_height),
+                                    ..Style::default()
+                                },
+                            );
+                            context.register_interaction(alpha_node, alpha_key.clone());
+                            if context.clicked_in_previous(&alpha_key) {
+                                if let Some(point) = context.local_pointer_in_previous(&alpha_key) {
+                                    state.alpha = ((point.x / alpha_width) * 255.0)
+                                        .round()
+                                        .clamp(0.0, 255.0)
+                                        as u8;
+                                    color.a = state.alpha;
+                                    hex = color.to_hex();
+                                    changed = true;
+                                }
+                            }
+                            let check = 4.0_f32;
+                            let check_columns = (alpha_width / check).ceil() as usize;
+                            let check_rows = (alpha_height / check).ceil() as usize;
+                            let mut alpha_commands = Vec::with_capacity(check_columns * check_rows + 3);
+                            for row in 0..check_rows {
+                                for column in 0..check_columns {
+                                    alpha_commands.push(DrawCommand::Rect {
+                                        x: column as f32 * check,
+                                        y: row as f32 * check,
+                                        width: check + 0.5,
+                                        height: check + 0.5,
+                                        color: if (row + column) % 2 == 0 {
+                                            Color::rgb(226, 232, 240)
+                                        } else {
+                                            Color::rgb(148, 163, 184)
+                                        },
+                                    });
+                                }
+                            }
+                            let alpha_steps = 24_usize;
+                            for step in 0..alpha_steps {
+                                alpha_commands.push(DrawCommand::Rect {
+                                    x: step as f32 * alpha_width / alpha_steps as f32,
+                                    y: 0.0,
+                                    width: alpha_width / alpha_steps as f32 + 0.5,
+                                    height: alpha_height,
+                                    color: Color::rgba(
+                                        color.r,
+                                        color.g,
+                                        color.b,
+                                        (((step as f32 + 0.5) / alpha_steps as f32) * 255.0)
+                                            .round()
+                                            .clamp(0.0, 255.0)
+                                            as u8,
+                                    ),
+                                });
+                            }
+                            let alpha_marker = (state.alpha as f32 / 255.0 * alpha_width)
+                                .clamp(6.0, alpha_width - 6.0);
+                            alpha_commands.push(DrawCommand::Circle {
+                                x: alpha_marker,
+                                y: alpha_height / 2.0,
+                                radius: 6.0,
+                                color: Color::rgb(255, 255, 255),
+                            });
+                            alpha_commands.push(DrawCommand::Circle {
+                                x: alpha_marker,
+                                y: alpha_height / 2.0,
+                                radius: 4.0,
+                                color: *color,
+                            });
+                            context
+                                .nodes
+                                .get_mut(&alpha_node)
+                                .expect("alpha bar exists")
+                                .commands = alpha_commands;
+
+                            let tint_key = format!("{id}:tint");
+                            let tint_node = context.new_named_node(
+                                &tint_key,
+                                Style {
+                                    width: Some(220.0),
+                                    height: Some(34.0),
+                                    ..Style::default()
+                                },
+                            );
+                            context
+                                .nodes
+                                .get_mut(&tint_node)
+                                .expect("tint card exists")
+                                .commands = vec![
+                                DrawCommand::RoundedRect {
+                                    x: 0.0,
+                                    y: 0.0,
+                                    width: 220.0,
+                                    height: 34.0,
+                                    radius: Radius::all(8.0),
+                                    color: mix_color(theme.surface, *color, 0.18),
+                                },
+                                DrawCommand::Text {
+                                    x: 10.0,
+                                    y: 9.0,
+                                    text: "Tint on background".to_string(),
+                                    font_size: theme.font_sizes.small,
+                                    weight: 600,
+                                    color: *color,
+                                    max_width: Some(200.0),
+                                    alignment: TextAlignment::Start,
+                                },
+                            ];
+
                             let hex_id = format!("{id}:hex");
                             let field = context.text_field(&hex_id, &mut hex);
                             if field.focused && context.key_pressed(Key::Enter) {
                                 match Color::from_hex(&hex) {
                                     Ok(next) => {
                                         *color = next;
+                                        state.alpha = next.a;
                                         changed = true;
                                         valid_hex = true;
                                     }
@@ -2647,6 +3145,7 @@ impl Context {
                                         );
                                         if context.clicked_in_previous(&key) {
                                             *color = PRESET_COLORS[index];
+                                            state.alpha = color.a;
                                             hex = color.to_hex();
                                             preset = Some(index);
                                             changed = true;
@@ -3912,15 +4411,31 @@ impl Context {
                 nav(context, &next_key, ">");
             });
         let cell_width = ((width - theme.spacing.xs * 6.0) / 7.0).max(1.0);
-        self.row().gap(theme.spacing.xs).children(|context| {
-            for label in ["M", "T", "W", "T", "F", "S", "S"] {
-                context
-                    .text(label)
-                    .font_size(theme.font_sizes.small)
-                    .color(theme.muted)
-                    .max_width(cell_width);
-            }
-        });
+        let weekday_row = self.new_named_node(
+            &format!("{id}:weekdays"),
+            Style {
+                width: Some(width),
+                height: Some(18.0),
+                ..Style::default()
+            },
+        );
+        let mut weekday_commands = Vec::new();
+        for (index, label) in ["M", "T", "W", "T", "F", "S", "S"].iter().enumerate() {
+            weekday_commands.push(DrawCommand::Text {
+                x: index as f32 * (cell_width + theme.spacing.xs),
+                y: 1.0,
+                text: (*label).to_string(),
+                font_size: theme.font_sizes.small,
+                weight: 400,
+                color: theme.muted,
+                max_width: Some(cell_width),
+                alignment: TextAlignment::Center,
+            });
+        }
+        self.nodes
+            .get_mut(&weekday_row)
+            .expect("calendar weekdays exist")
+            .commands = weekday_commands;
         let leading = weekday_monday(state.year, state.month, 1) as usize;
         let days = days_in_month(state.year, state.month);
         for row in 0..6 {
@@ -4648,7 +5163,7 @@ impl Context {
         let theme = self.theme.clone();
         let width = self.current_content_width();
         *value = (*value).min(max);
-        let star_size = 22.0;
+        let star_size = 26.0;
         let gap = theme.spacing.xs;
         let height = star_size;
         let root = self.new_named_node(
@@ -4722,22 +5237,33 @@ impl Context {
                 self.focused_id = Some(id.to_string());
             }
             let selected = index < filled;
-            let mut commands = vec![DrawCommand::Text {
-                x: 2.0,
-                y: 1.0,
-                text: if selected { "★" } else { "☆" }.to_string(),
-                font_size: 18.0,
-                weight: 400,
-                color: if selected {
-                    theme.accent
-                } else if hovered {
-                    theme.foreground
-                } else {
-                    theme.muted
+            let star_color = if selected {
+                theme.accent
+            } else if hovered {
+                theme.foreground
+            } else {
+                theme.muted
+            };
+            let mut commands = vec![
+                DrawCommand::TransformPush {
+                    transform: Transform {
+                        translation: Point::new(0.0, 0.0),
+                        scale: Point::new(star_size / 24.0, star_size / 24.0),
+                        rotation: 0.0,
+                    },
                 },
-                max_width: Some(star_size),
-                alignment: TextAlignment::Center,
-            }];
+                DrawCommand::SvgPath {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 24.0,
+                    height: 24.0,
+                    path: STAR_PATH.to_string(),
+                    fill: selected.then_some(star_color),
+                    stroke: (!selected).then_some(star_color),
+                    stroke_width: 1.4,
+                },
+                DrawCommand::TransformPop,
+            ];
             if hovered {
                 commands.insert(
                     0,
@@ -5005,6 +5531,25 @@ impl Context {
 
     /// Creates a checkbox that toggles by mouse or focused Enter/Space.
     pub fn checkbox(&mut self, id: &str, checked: &mut bool) -> CheckboxState {
+        self.checkbox_impl(id, None, checked)
+    }
+
+    /// Creates a checkbox that shows a caller-supplied label next to the box.
+    pub fn checkbox_labeled(
+        &mut self,
+        id: &str,
+        label: &str,
+        checked: &mut bool,
+    ) -> CheckboxState {
+        self.checkbox_impl(id, Some(label), checked)
+    }
+
+    fn checkbox_impl(
+        &mut self,
+        id: &str,
+        label: Option<&str>,
+        checked: &mut bool,
+    ) -> CheckboxState {
         let theme = self.theme.clone();
         let font_size = theme.font_sizes.body;
         if !matches!(self.widget_states.get(id), Some(WidgetState::Checkbox)) {
@@ -5036,30 +5581,46 @@ impl Context {
         if changed {
             *checked = !*checked;
         }
-        let mut commands = vec![
-            DrawCommand::RoundedRect {
+        let mut commands = Vec::new();
+        if *checked {
+            commands.push(DrawCommand::RoundedRect {
                 x: 0.0,
                 y: (height - 18.0) / 2.0,
                 width: 18.0,
                 height: 18.0,
                 radius: Radius::all(4.0),
-                color: if *checked {
-                    theme.accent
-                } else {
-                    theme.surface
-                },
-            },
-            DrawCommand::Text {
-                x: 26.0,
-                y: (height - measured_text_height(font_size)) / 2.0,
-                text: if *checked { "checked" } else { "unchecked" }.to_string(),
-                font_size,
-                weight: 400,
-                color: theme.foreground,
-                max_width: None,
-                alignment: TextAlignment::Start,
-            },
-        ];
+                color: theme.accent,
+            });
+        } else {
+            commands.push(DrawCommand::RoundedRect {
+                x: 0.0,
+                y: (height - 18.0) / 2.0,
+                width: 18.0,
+                height: 18.0,
+                radius: Radius::all(4.0),
+                color: theme.border,
+            });
+            commands.push(DrawCommand::RoundedRect {
+                x: 1.0,
+                y: (height - 18.0) / 2.0 + 1.0,
+                width: 16.0,
+                height: 16.0,
+                radius: Radius::all(3.0),
+                color: theme.surface,
+            });
+        }
+        commands.push(DrawCommand::Text {
+            x: 26.0,
+            y: (height - measured_text_height(font_size)) / 2.0,
+            text: label
+                .map(str::to_string)
+                .unwrap_or_else(|| if *checked { "checked" } else { "unchecked" }.to_string()),
+            font_size,
+            weight: 400,
+            color: theme.foreground,
+            max_width: None,
+            alignment: TextAlignment::Start,
+        });
         if *checked {
             commands.push(DrawCommand::Line {
                 x1: 5.0,
@@ -6240,36 +6801,36 @@ impl Context {
             } else {
                 theme.muted
             };
-            let mut commands = vec![
-                DrawCommand::Circle {
-                    x: 9.0,
-                    y: row_height / 2.0,
-                    radius: 7.0,
-                    color: if selected_option {
-                        theme.accent
-                    } else {
-                        theme.border
-                    },
+            let mut commands = vec![DrawCommand::Circle {
+                x: 10.0,
+                y: row_height / 2.0,
+                radius: 8.0,
+                color: if selected_option {
+                    theme.accent
+                } else {
+                    theme.border
                 },
-                DrawCommand::Text {
-                    x: 22.0,
-                    y: (row_height - measured_text_height(font_size)) / 2.0,
-                    text: option.to_string(),
-                    font_size,
-                    weight: 400,
-                    color: text_color,
-                    max_width: Some((width - 22.0).max(1.0)),
-                    alignment: TextAlignment::Start,
+            }];
+            commands.push(DrawCommand::Circle {
+                x: 10.0,
+                y: row_height / 2.0,
+                radius: if selected_option { 4.0 } else { 6.0 },
+                color: if selected_option {
+                    theme.on_accent
+                } else {
+                    theme.surface
                 },
-            ];
-            if selected_option {
-                commands.push(DrawCommand::Circle {
-                    x: 9.0,
-                    y: row_height / 2.0,
-                    radius: 3.5,
-                    color: theme.on_accent,
-                });
-            }
+            });
+            commands.push(DrawCommand::Text {
+                x: 24.0,
+                y: (row_height - measured_text_height(font_size)) / 2.0,
+                text: option.to_string(),
+                font_size,
+                weight: 400,
+                color: text_color,
+                max_width: Some((width - 24.0).max(1.0)),
+                alignment: TextAlignment::Start,
+            });
             self.register_access_node(
                 node,
                 Role::Radio,
@@ -8182,6 +8743,7 @@ impl Context {
                 Some(if selected { "selected" } else { "unselected" }),
                 focused,
             );
+            self.push_parent(node);
             for (column_index, column) in columns.iter().enumerate() {
                 let width = column_width(column);
                 let cell_id = format!("{id}:cell:{index}:{column_index}");
@@ -8216,6 +8778,7 @@ impl Context {
                     }
                 }
             }
+            self.pop_parent();
             if focused {
                 commands.extend(focus_ring(0.0, 0.0, total_width, row_height, theme.accent));
             }
@@ -9461,6 +10024,16 @@ pub fn button(context: &mut Context, label: &str) -> ButtonState {
     context.button(label)
 }
 
+/// Creates a filled primary button.
+pub fn button_primary(context: &mut Context, label: &str) -> ButtonState {
+    context.button_primary(label)
+}
+
+/// Creates a button with a built-in icon before the label.
+pub fn button_with_icon(context: &mut Context, label: &str, icon_name: &str) -> ButtonState {
+    context.button_with_icon(label, icon_name)
+}
+
 /// Creates a flexible spacer.
 pub fn spacer(context: &mut Context) {
     context.spacer();
@@ -9474,6 +10047,16 @@ pub fn text_field(context: &mut Context, id: &str, value: &mut String) -> TextFi
 /// Creates a checkbox.
 pub fn checkbox(context: &mut Context, id: &str, checked: &mut bool) -> CheckboxState {
     context.checkbox(id, checked)
+}
+
+/// Creates a checkbox with a visible label.
+pub fn checkbox_labeled(
+    context: &mut Context,
+    id: &str,
+    label: &str,
+    checked: &mut bool,
+) -> CheckboxState {
+    context.checkbox_labeled(id, label, checked)
 }
 
 /// Creates a slider.
@@ -9498,19 +10081,36 @@ fn button_commands(
     hover_progress: f32,
     pressed_progress: f32,
     focused: bool,
+    primary: bool,
 ) -> Vec<DrawCommand> {
     let size = estimated_text_size(label, font_size, None);
     let hover_progress = hover_progress.clamp(0.0, 1.0);
     let pressed_progress = pressed_progress.clamp(0.0, 1.0);
-    let hover_background = mix_color(theme.surface, theme.accent, 0.65);
-    let pressed_background = theme.accent;
+    let hover_background = if primary {
+        mix_color(theme.accent, theme.on_accent, 0.12)
+    } else {
+        mix_color(theme.surface, theme.accent, 0.65)
+    };
+    let pressed_background = if primary {
+        mix_color(theme.accent, theme.on_accent, 0.2)
+    } else {
+        theme.accent
+    };
     let background = mix_color(
-        mix_color(theme.surface, hover_background, hover_progress),
+        mix_color(
+            if primary { theme.accent } else { theme.surface },
+            hover_background,
+            hover_progress,
+        ),
         pressed_background,
         pressed_progress,
     );
     let emphasis = hover_progress.max(pressed_progress);
-    let text_color = mix_color(theme.foreground, theme.on_accent, emphasis);
+    let text_color = if primary {
+        theme.on_accent
+    } else {
+        mix_color(theme.foreground, theme.on_accent, emphasis)
+    };
     let horizontal = theme.spacing.md;
     let vertical = theme.spacing.sm;
     let mut commands = vec![
@@ -9544,6 +10144,69 @@ fn button_commands(
     }
     commands
 }
+
+fn hsv_to_color(hue: f32, saturation: f32, value: f32) -> Color {
+    let hue = if hue.is_finite() {
+        hue.rem_euclid(360.0)
+    } else {
+        0.0
+    };
+    let saturation = if saturation.is_finite() {
+        saturation.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let value = if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let sector = hue / 60.0;
+    let chroma = value * saturation;
+    let second = chroma * (1.0 - (sector % 2.0 - 1.0).abs());
+    let (red, green, blue) = match sector as u32 {
+        0 => (chroma, second, 0.0),
+        1 => (second, chroma, 0.0),
+        2 => (0.0, chroma, second),
+        3 => (0.0, second, chroma),
+        4 => (second, 0.0, chroma),
+        _ => (chroma, 0.0, second),
+    };
+    let base = value - chroma;
+    let channel = |part: f32| ((part + base) * 255.0).round().clamp(0.0, 255.0) as u8;
+    Color::rgb(channel(red), channel(green), channel(blue))
+}
+
+fn rgb_to_hsv(color: Color) -> (u16, u8, u8) {
+    let red = f32::from(color.r) / 255.0;
+    let green = f32::from(color.g) / 255.0;
+    let blue = f32::from(color.b) / 255.0;
+    let maximum = red.max(green).max(blue);
+    let minimum = red.min(green).min(blue);
+    let delta = maximum - minimum;
+    let hue = if delta <= f32::EPSILON {
+        0.0
+    } else if maximum == red {
+        60.0 * ((green - blue) / delta).rem_euclid(6.0)
+    } else if maximum == green {
+        60.0 * ((blue - red) / delta + 2.0)
+    } else {
+        60.0 * ((red - green) / delta + 4.0)
+    };
+    let saturation = if maximum <= f32::EPSILON {
+        0.0
+    } else {
+        delta / maximum
+    };
+    (
+        (hue.rem_euclid(360.0).round() as u16) % 360,
+        (saturation * 100.0).round().clamp(0.0, 100.0) as u8,
+        (maximum * 100.0).round().clamp(0.0, 100.0) as u8,
+    )
+}
+
+/// Five-point star in a 24x24 view box, used by the rating control.
+const STAR_PATH: &str = "M12 2 L14.47 8.6 L21.51 8.91 L15.99 13.3 L17.88 20.09 L12 16.2 L6.12 20.09 L8.01 13.3 L2.49 8.91 L9.53 8.6 Z";
 
 fn mix_color(from: Color, to: Color, amount: f32) -> Color {
     let amount = if amount.is_finite() {

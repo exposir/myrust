@@ -26,6 +26,14 @@ pub struct ColorPickerState {
     pub open: bool,
     /// Hex input buffer.
     pub hex: String,
+    /// Hue in degrees, 0..359. Kept when saturation or value is zero.
+    pub hue: u16,
+    /// Saturation percentage, 0..100.
+    pub saturation: u8,
+    /// Value percentage, 0..100.
+    pub value: u8,
+    /// Alpha channel, 0..255.
+    pub alpha: u8,
 }
 
 impl Default for ColorPickerState {
@@ -33,6 +41,10 @@ impl Default for ColorPickerState {
         Self {
             open: false,
             hex: "#000000FF".to_string(),
+            hue: 0,
+            saturation: 0,
+            value: 0,
+            alpha: 255,
         }
     }
 }
@@ -154,7 +166,7 @@ mod tests {
 
     #[test]
     fn color_picker_selects_presets_and_validates_hex() {
-        let size = Size::new(300.0, 280.0);
+        let size = Size::new(360.0, 480.0);
         let mut context = Context::new(size);
         let color = Rc::new(RefCell::new(Color::rgb(255, 0, 0)));
         let state = Rc::new(RefCell::new(ColorPickerState::default()));

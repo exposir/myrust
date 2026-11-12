@@ -159,9 +159,10 @@ pub use code_editor::{
 pub use color_picker::{color_picker, ColorPickerResponse, ColorPickerState, PRESET_COLORS};
 pub use combobox::{combobox, ComboboxResponse, ComboboxState};
 pub use context::{
-    button, checkbox, column, container, grid, row, scroll_view, slider, spacer, text, text_field,
-    transform, ButtonState, CheckboxState, ColumnBuilder, ContainerBuilder, Context, FlexBuilder,
-    GridBuilder, LayoutScope, RowBuilder, ScrollState, SliderState, TextBuilder, TextFieldState,
+    button, button_primary, button_with_icon, checkbox, checkbox_labeled, column, container, grid, row, scroll_view,
+    slider, spacer, text, text_field, transform, ButtonState, CheckboxState, ColumnBuilder,
+    ContainerBuilder, Context, FlexBuilder, GridBuilder, LayoutScope, RowBuilder, ScrollState,
+    SliderState, TextBuilder, TextFieldState,
 };
 pub use controls::{
     badge, collapsible, progress, progress_indeterminate, radio_group, select, spinner, switch,
@@ -188,7 +189,9 @@ pub use floating::{
     context_menu, menu_button, popover, tooltip, tooltip_for, tooltip_with_delay,
     ContextMenuResponse, ContextMenuState, MenuButtonState, MenuState, TooltipState, TOOLTIP_DELAY,
 };
-pub use font::{default_font, FontFace, FontRegistry, GlyphBitmap, RealFontMeasurer};
+pub use font::{
+    default_font, install_default_font, FontFace, FontRegistry, GlyphBitmap, RealFontMeasurer,
+};
 pub use form::{form_field, FormFieldState};
 pub use grid_view::{grid_view, GridViewResponse, GridViewState};
 pub use icon::{icon, Icon, IconState};

@@ -63,6 +63,7 @@ impl Icon {
             Self::menu(),
             Self::settings(),
             Self::home(),
+            Self::folder(),
         ]
     }
 
@@ -184,6 +185,11 @@ impl Icon {
         Self::stroked("home", "M3 11 12 3 21 11 M5 10V21H19V10", 2.0)
     }
 
+    /// Returns a folder icon.
+    pub fn folder() -> Self {
+        Self::stroked("folder", "M3 6h6l2 2h10v12H3Z", 1.8)
+    }
+
     fn stroked(name: &str, path: &str, width: f32) -> Self {
         Self::new(
             name,
@@ -198,9 +204,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_set_contains_ten_icons_with_path_data() {
+    fn builtin_set_contains_eleven_icons_with_path_data() {
         let icons = Icon::all();
-        assert_eq!(icons.len(), 10);
+        assert_eq!(icons.len(), 11);
         assert!(icons.iter().all(|icon| !icon.paths.is_empty()));
         assert!(icons
             .iter()
