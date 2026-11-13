@@ -2636,17 +2636,17 @@ fn color_demo(
 
 fn list_demo(context: &mut Context, state: &Rc<RefCell<ListState>>, probe: &Rc<Cell<i32>>) {
     column(context).fill().center().children(|context| {
-        column(context).width(520.0).gap(6.0).children(|context| {
+        column(context).width(720.0).gap(6.0).children(|context| {
             container(context)
-                .width(520.0)
+                .width(720.0)
                 .height(224.0)
                 .draw([
                     DrawCommand::RoundedRect {
-                        x: 0.0, y: 0.0, width: 520.0, height: 224.0,
+                        x: 0.0, y: 0.0, width: 720.0, height: 224.0,
                         radius: myrust_ui::Radius::all(10.0), color: Color::rgb(63, 63, 69),
                     },
                     DrawCommand::RoundedRect {
-                        x: 1.0, y: 1.0, width: 518.0, height: 222.0,
+                        x: 1.0, y: 1.0, width: 718.0, height: 222.0,
                         radius: myrust_ui::Radius::all(9.0), color: Color::rgb(39, 39, 42),
                     },
                 ])
@@ -2669,7 +2669,7 @@ fn list_demo(context: &mut Context, state: &Rc<RefCell<ListState>>, probe: &Rc<C
             text(context, "7 files · Restore or delete")
                 .font_size(11.0)
                 .color(Color::rgb(161, 161, 169));
-            row(context).width(520.0).gap(8.0).children(|context| {
+            row(context).width(720.0).gap(8.0).children(|context| {
                 if button(context, "Restore").clicked {
                     probe.set(98);
                 }
@@ -2751,12 +2751,12 @@ fn tree_demo(
             let height = nodes.len() as f32 * 26.0 + 20.0;
             let mut captured = None;
             container(context)
-                .width(560.0)
+                .width(720.0)
                 .padding(10.0)
                 .draw([DrawCommand::Rect {
                     x: 0.0,
                     y: 0.0,
-                    width: 560.0,
+                    width: 720.0,
                     height,
                     color: Color::rgb(39, 39, 42),
                 }])
@@ -3069,8 +3069,8 @@ fn form_demo(context: &mut Context, value: &Rc<RefCell<String>>, probe: &Rc<Cell
 }
 
 fn sidebar_demo(context: &mut Context, selected: &Rc<RefCell<String>>, probe: &Rc<Cell<i32>>) {
-    stack(context, 620.0, 10.0, |context| {
-        row(context).width(620.0).height(210.0).gap(0.0).children(|context| {
+    stack(context, 720.0, 10.0, |context| {
+        row(context).width(720.0).height(210.0).gap(0.0).children(|context| {
             container(context)
                 .width(220.0)
                 .height(210.0)
@@ -3079,7 +3079,7 @@ fn sidebar_demo(context: &mut Context, selected: &Rc<RefCell<String>>, probe: &R
                     y: 0.0,
                     width: 220.0,
                     height: 210.0,
-                    color: Color::rgb(24, 24, 27),
+                    color: Color::rgb(31, 31, 35),
                 }])
                 .children(|context| {
                 let workspace = [
@@ -3102,13 +3102,13 @@ fn sidebar_demo(context: &mut Context, selected: &Rc<RefCell<String>>, probe: &R
                 }
             });
             container(context)
-                .width(400.0)
+                .width(500.0)
                 .height(210.0)
                 .padding(16.0)
                 .draw([DrawCommand::RoundedRect {
                     x: 0.0,
                     y: 0.0,
-                    width: 400.0,
+                    width: 500.0,
                     height: 210.0,
                     radius: myrust_ui::Radius::all(8.0),
                     color: Color::rgb(39, 39, 42),
