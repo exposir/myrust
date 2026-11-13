@@ -215,6 +215,9 @@ pub struct Context {
     requested_animation: bool,
     last_frame_stats: FrameStats,
     direction: Direction,
+    embedded_overlay: bool,
+    widgets_disabled: bool,
+    disabled_theme_backup: Option<Theme>,
 }
 
 impl Context {
@@ -258,6 +261,9 @@ impl Context {
             requested_animation: false,
             last_frame_stats: FrameStats::default(),
             direction: Direction::Ltr,
+            embedded_overlay: false,
+            widgets_disabled: false,
+            disabled_theme_backup: None,
         }
     }
 
@@ -338,6 +344,25 @@ impl Context {
     /// Returns the active theme.
     pub fn theme(&self) -> &Theme {
         &self.theme
+    }
+
+    /// Disables pointer/keyboard response and lowers widget contrast until
+    /// the matching `false` call.
+    pub fn set_widgets_disabled(&mut self, disabled: bool) {
+        if disabled {
+            if self.disabled_theme_backup.is_none() {
+                self.disabled_theme_backup = Some(self.theme.clone());
+            }
+            self.theme.foreground = self.theme.muted;
+            self.theme.accent = mix_color(self.theme.surface, self.theme.border, 0.55);
+            self.theme.on_accent = self.theme.muted;
+            self.widgets_disabled = true;
+        } else if self.widgets_disabled {
+            if let Some(backup) = self.disabled_theme_backup.take() {
+                self.theme = backup;
+            }
+            self.widgets_disabled = false;
+        }
     }
 
     pub(crate) fn set_theme(&mut self, theme: Theme) {
@@ -632,16 +657,27 @@ impl Context {
     }
 
     /// Creates a button with a built-in icon before the label.
+    /// Creates a secondary button with a built-in icon.
     pub fn button_with_icon(&mut self, label: &str, icon_name: &str) -> ButtonState {
+        self.button_icon_impl(label, icon_name, false)
+    }
+
+    /// Creates a primary button with a built-in icon.
+    pub fn button_primary_with_icon(&mut self, label: &str, icon_name: &str) -> ButtonState {
+        self.button_icon_impl(label, icon_name, true)
+    }
+
+    fn button_icon_impl(&mut self, label: &str, icon_name: &str, primary: bool) -> ButtonState {
         let theme = self.theme.clone();
         let spacing = theme.spacing;
         let font_size = theme.font_sizes.body;
         let icon_size = 14.0;
+        let text_size = estimated_text_size(label, font_size, None);
+        let vertical = ((28.0 - text_size.height) / 2.0).max(0.0);
         let id = self.new_node(Style {
-            padding: Edges::symmetric(spacing.sm, spacing.md),
+            padding: Edges::symmetric(vertical, spacing.md),
             ..Style::default()
         });
-        let text_size = estimated_text_size(label, font_size, None);
         let content_size = Size::new(text_size.width + icon_size + 4.0, text_size.height);
         let key = self
             .nodes
@@ -664,16 +700,32 @@ impl Context {
             self.animate(&format!("{key}:pressed"), if pressed { 1.0 } else { 0.0 });
         let bounds = previous.as_ref().map(|region| region.bounds);
         let horizontal = spacing.md;
-        let vertical = spacing.sm;
-        let hover_bg = mix_color(theme.surface, theme.accent, 0.65);
-        let pressed_bg = theme.accent;
+        let hover_bg = if primary {
+            mix_color(mix_color(theme.accent, Color::WHITE, 0.12), Color::WHITE, 0.08)
+        } else {
+            mix_color(theme.surface, theme.accent, 0.65)
+        };
+        let pressed_bg = if primary {
+            mix_color(theme.accent, Color::WHITE, 0.22)
+        } else {
+            theme.accent
+        };
+        let base_bg = if primary {
+            mix_color(theme.accent, Color::WHITE, 0.12)
+        } else {
+            theme.surface
+        };
         let background = mix_color(
-            mix_color(theme.surface, hover_bg, hover_progress.clamp(0.0, 1.0)),
+            mix_color(base_bg, hover_bg, hover_progress.clamp(0.0, 1.0)),
             pressed_bg,
             pressed_progress.clamp(0.0, 1.0),
         );
         let emphasis = hover_progress.max(pressed_progress);
-        let text_color = mix_color(theme.foreground, theme.on_accent, emphasis);
+        let text_color = if primary {
+            theme.on_accent
+        } else {
+            mix_color(theme.foreground, theme.on_accent, emphasis)
+        };
         let total_w = content_size.width + horizontal * 2.0;
         let total_h = content_size.height + vertical * 2.0;
         let mut commands = vec![DrawCommand::RoundedRect {
@@ -726,12 +778,95 @@ impl Context {
         }
     }
 
+    /// Creates a 36×36 icon-only button.
+    pub fn icon_button(&mut self, icon_name: &str) -> ButtonState {
+        let theme = self.theme.clone();
+        let width = 36.0;
+        let height = 36.0;
+        let id = self.new_node(Style {
+            width: Some(width),
+            height: Some(height),
+            ..Style::default()
+        });
+        let key = self
+            .nodes
+            .get(&id)
+            .and_then(|node| node.key.clone())
+            .unwrap_or_else(|| format!("icon-button-{id}"));
+        let previous = self.previous_regions.get(&key).cloned();
+        let mouse_clicked = self.clicked_in_previous(&key);
+        let hovered = self.pointer_in_previous(&key);
+        let pressed = hovered && self.input.pointer_down;
+        let focused = self.focused_id.as_deref() == Some(key.as_str());
+        let clicked = mouse_clicked
+            || (focused && (self.key_pressed(Key::Enter) || self.key_pressed(Key::Space)));
+        if pressed || clicked {
+            self.focused_id = Some(key.clone());
+        }
+        let focused = self.focused_id.as_deref() == Some(key.as_str());
+        let hover_progress = self.animate(&format!("{key}:hover"), if hovered { 1.0 } else { 0.0 });
+        let background = mix_color(theme.surface, mix_color(theme.surface, theme.foreground, 0.12), hover_progress);
+        let border = if focused {
+            theme.accent
+        } else if hovered {
+            mix_color(theme.border, theme.accent, 0.35)
+        } else {
+            theme.border
+        };
+        let mut commands = vec![
+            DrawCommand::RoundedRect {
+                x: 0.0,
+                y: 0.0,
+                width,
+                height,
+                radius: Radius::all(6.0),
+                color: border,
+            },
+            DrawCommand::RoundedRect {
+                x: 1.0,
+                y: 1.0,
+                width: width - 2.0,
+                height: height - 2.0,
+                radius: Radius::all(5.0),
+                color: background,
+            },
+        ];
+        if let Some(icon) = Icon::builtin(icon_name) {
+            commands.push(DrawCommand::TransformPush {
+                transform: Transform {
+                    translation: Point::new(11.0, 11.0),
+                    scale: Point::new(1.0, 1.0),
+                    rotation: 0.0,
+                },
+            });
+            commands.extend(icon.to_commands_with_direction(14.0, theme.muted, self.direction));
+            commands.push(DrawCommand::TransformPop);
+        }
+        if focused {
+            commands.extend(focus_ring(0.0, 0.0, width, height, theme.accent));
+        }
+        self.nodes.get_mut(&id).expect("icon button exists").commands = commands;
+        self.register_interaction(id, key.clone());
+        self.register_focusable(id, key.clone());
+        self.register_access_node(id, Role::Button, icon_name, None, focused);
+        ButtonState {
+            id: key,
+            clicked,
+            pressed,
+            focused,
+            hovered,
+            bounds: previous.map(|region| region.bounds),
+        }
+    }
+
     fn button_styled(&mut self, label: &str, primary: bool) -> ButtonState {
         let theme = self.theme.clone();
         let spacing = theme.spacing;
         let font_size = theme.font_sizes.body;
+        let content_height = measured_text_height(font_size);
+        let vertical = ((28.0 - content_height) / 2.0).max(0.0);
         let id = self.new_node(Style {
-            padding: super::layout::Edges::symmetric(spacing.sm, spacing.md),
+            padding: super::layout::Edges::symmetric(vertical, spacing.md),
             ..Style::default()
         });
         let content_size = estimated_text_size(label, font_size, None);
@@ -840,7 +975,13 @@ impl Context {
 
     /// Creates a text field backed by a caller-owned string.
     pub fn text_field(&mut self, id: &str, value: &mut String) -> TextFieldState {
-        self.text_field_impl(id, value, None)
+        self.text_field_impl(id, value, None, false)
+    }
+
+    /// Creates a single-line field that renders a bullet for each typed
+    /// character while keeping the caller's real string intact.
+    pub fn text_field_password(&mut self, id: &str, value: &mut String) -> TextFieldState {
+        self.text_field_impl(id, value, None, true)
     }
 
     fn text_field_impl(
@@ -848,16 +989,21 @@ impl Context {
         id: &str,
         value: &mut String,
         filter: Option<&dyn Fn(&str) -> String>,
+        mask: bool,
     ) -> TextFieldState {
         let theme = self.theme.clone();
-        let font_size = theme.font_sizes.body;
-        let vertical = theme.spacing.sm;
+        let font_size = 15.5;
+        let measured = measured_text_height(font_size);
+        // MyGo's single-line control grid uses a 44px field. Center the text
+        // when the real font line height is shorter than that target.
+        let height = (measured + theme.spacing.sm * 2.0).max(44.0);
+        let vertical = (height - measured) / 2.0;
         let horizontal = theme.spacing.sm;
         self.widget_state_text_field(id);
         let width = self.current_content_width();
         let style = Style {
             width: Some(width),
-            height: Some(measured_text_height(font_size) + vertical * 2.0),
+            height: Some(height),
             padding: super::layout::Edges::symmetric(vertical, horizontal),
             ..Style::default()
         };
@@ -971,7 +1117,17 @@ impl Context {
                 cursor -= 1;
             }
         }
-        let cursor_x = horizontal + measure_text_width(&value[..cursor], font_size);
+        let display: String = if mask {
+            value.chars().map(|_| '•').collect()
+        } else {
+            value.clone()
+        };
+        let display_cursor_prefix: String = if mask {
+            value[..cursor].chars().map(|_| '•').collect()
+        } else {
+            value[..cursor].to_string()
+        };
+        let cursor_x = horizontal + measure_text_width(&display_cursor_prefix, font_size);
         let cursor_y = vertical;
         self.widget_states.insert(
             id.to_string(),
@@ -990,18 +1146,37 @@ impl Context {
         } else {
             theme.border
         };
-        let mut commands = vec![DrawCommand::RoundedRect {
-            x: 0.0,
-            y: 0.0,
-            width,
-            height,
-            radius: Radius::all(6.0),
-            color: theme.surface,
-        }];
+        let mut commands = vec![
+            DrawCommand::Rect {
+                x: 0.0,
+                y: 0.0,
+                width,
+                height,
+                color: border,
+            },
+            DrawCommand::RoundedRect {
+                x: 1.0,
+                y: 1.0,
+                width: (width - 2.0).max(1.0),
+                height: (height - 2.0).max(1.0),
+                radius: Radius::all(5.0),
+                color: theme.surface,
+            },
+        ];
         if focused {
             if let Some((start, end)) = selection {
-                let selection_x = horizontal + measure_text_width(&value[..start], font_size);
-                let selection_width = measure_text_width(&value[start..end], font_size);
+                let selection_prefix: String = if mask {
+                    value[..start].chars().map(|_| '•').collect()
+                } else {
+                    value[..start].to_string()
+                };
+                let selection_text: String = if mask {
+                    value[start..end].chars().map(|_| '•').collect()
+                } else {
+                    value[start..end].to_string()
+                };
+                let selection_x = horizontal + measure_text_width(&selection_prefix, font_size);
+                let selection_width = measure_text_width(&selection_text, font_size);
                 commands.push(DrawCommand::Rect {
                     x: selection_x,
                     y: vertical - 1.0,
@@ -1014,17 +1189,18 @@ impl Context {
         commands.push(DrawCommand::Text {
             x: horizontal,
             y: vertical,
-            text: value.clone(),
+            text: display.clone(),
             font_size,
             weight: 400,
             color: theme.foreground,
             max_width: Some((width - horizontal * 2.0).max(1.0)),
             alignment: TextAlignment::Start,
         });
-        commands.extend(focus_ring(0.0, 0.0, width, height, border));
         if focused {
-            let prefix = &value[..cursor];
-            let cursor_x = horizontal + measure_text_width(prefix, font_size);
+            commands.extend(focus_ring(0.0, 0.0, width, height, border));
+        }
+        if focused {
+            let cursor_x = horizontal + measure_text_width(&display_cursor_prefix, font_size);
             commands.push(DrawCommand::Line {
                 x1: cursor_x,
                 y1: vertical,
@@ -1038,12 +1214,259 @@ impl Context {
             node_id,
             Role::TextField,
             "text field",
-            Some(value.as_str()),
+            Some(display.as_str()),
             focused,
         );
         self.nodes
             .get_mut(&node_id)
             .expect("text field node exists")
+            .commands = commands;
+        TextFieldState {
+            changed,
+            cursor,
+            focused,
+            hovered,
+        }
+    }
+
+    /// Creates a multiline text area backed by a caller-owned string.
+    ///
+    /// Enter inserts a newline, Backspace/Delete cross line boundaries,
+    /// ArrowUp/ArrowDown preserve the column where possible, Home/End operate
+    /// on the current line, and the visible window follows the cursor.
+    pub fn text_area(
+        &mut self,
+        id: &str,
+        value: &mut String,
+        visible_lines: usize,
+    ) -> TextFieldState {
+        let theme = self.theme.clone();
+        let font_size = 15.5;
+        let line_height = measured_text_height(font_size);
+        let visible = visible_lines.max(1);
+        let vertical = theme.spacing.sm;
+        let horizontal = theme.spacing.sm;
+        let height = (line_height * visible as f32 + vertical * 2.0).max(88.0);
+        let width = self.current_content_width();
+        self.widget_state_text_field(id);
+        let node_id = self.new_named_node(
+            id,
+            Style {
+                width: Some(width),
+                height: Some(height),
+                padding: super::layout::Edges::symmetric(vertical, horizontal),
+                ..Style::default()
+            },
+        );
+        self.register_interaction(node_id, id.to_string());
+        self.register_focusable(node_id, id.to_string());
+        let hovered = self.pointer_in_previous(id);
+        let pressed = hovered && self.input.pointer_down;
+        if pressed {
+            self.focused_id = Some(id.to_string());
+        }
+        let focused = self.focused_id.as_deref() == Some(id);
+        let mut changed = false;
+        let (mut cursor, mut anchor) = match self.widget_states.get(id) {
+            Some(WidgetState::TextField { cursor, anchor, .. }) => (*cursor, *anchor),
+            _ => (0, None),
+        };
+        cursor = cursor.min(value.len());
+        while !value.is_char_boundary(cursor) {
+            cursor -= 1;
+        }
+        if let Some(mut anchor_value) = anchor {
+            anchor_value = anchor_value.min(value.len());
+            while !value.is_char_boundary(anchor_value) {
+                anchor_value = anchor_value.saturating_sub(1);
+            }
+            anchor = Some(anchor_value);
+        }
+        let mut selection = anchor
+            .filter(|anchor| *anchor != cursor)
+            .map(|anchor| (anchor.min(cursor), anchor.max(cursor)));
+        if focused {
+            let text = self.input.text.clone();
+            if !text.is_empty() {
+                if let Some((start, end)) = selection {
+                    value.replace_range(start..end, &text);
+                    cursor = start + text.len();
+                } else {
+                    value.insert_str(cursor, &text);
+                    cursor += text.len();
+                }
+                anchor = None;
+                selection = None;
+                changed = true;
+            }
+            for key in self.input.keys.clone() {
+                match key {
+                    Key::Enter => {
+                        if let Some((start, end)) = selection {
+                            value.replace_range(start..end, "\n");
+                            cursor = start + 1;
+                        } else {
+                            value.insert(cursor, '\n');
+                            cursor += 1;
+                        }
+                        anchor = None;
+                        selection = None;
+                        changed = true;
+                    }
+                    Key::Backspace => {
+                        if let Some((start, end)) = selection {
+                            value.replace_range(start..end, "");
+                            cursor = start;
+                            changed = true;
+                        } else if let Some(previous) = previous_char_boundary(value, cursor) {
+                            value.replace_range(previous..cursor, "");
+                            cursor = previous;
+                            changed = true;
+                        }
+                        anchor = None;
+                        selection = None;
+                    }
+                    Key::Delete => {
+                        if let Some((start, end)) = selection {
+                            value.replace_range(start..end, "");
+                            cursor = start;
+                            changed = true;
+                        } else if let Some(next) = next_char_boundary(value, cursor) {
+                            value.replace_range(cursor..next, "");
+                            changed = true;
+                        }
+                        anchor = None;
+                        selection = None;
+                    }
+                    Key::ArrowLeft => {
+                        if let Some(previous) = previous_char_boundary(value, cursor) {
+                            cursor = previous;
+                        }
+                        anchor = None;
+                        selection = None;
+                    }
+                    Key::ArrowRight => {
+                        if let Some(next) = next_char_boundary(value, cursor) {
+                            cursor = next;
+                        }
+                        anchor = None;
+                        selection = None;
+                    }
+                    Key::ArrowUp | Key::ArrowDown => {
+                        let spans = line_spans(value);
+                        let current = line_index(&spans, cursor);
+                        let (start, _end) = spans[current];
+                        let column = value[start..cursor].chars().count();
+                        let target = if matches!(key, Key::ArrowUp) {
+                            current.checked_sub(1)
+                        } else if current + 1 < spans.len() {
+                            Some(current + 1)
+                        } else {
+                            None
+                        };
+                        if let Some(target) = target {
+                            let (target_start, target_end) = spans[target];
+                            cursor = byte_at_column(value, target_start, target_end, column);
+                        }
+                        anchor = None;
+                        selection = None;
+                    }
+                    Key::Home => {
+                        let spans = line_spans(value);
+                        cursor = spans[line_index(&spans, cursor)].0;
+                        anchor = None;
+                        selection = None;
+                    }
+                    Key::End => {
+                        let spans = line_spans(value);
+                        cursor = spans[line_index(&spans, cursor)].1;
+                        anchor = None;
+                        selection = None;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let spans = line_spans(value);
+        let current_line = line_index(&spans, cursor);
+        let start_line = if spans.len() > visible {
+            (current_line + 1).saturating_sub(visible)
+        } else {
+            0
+        };
+        let (line_start, _) = spans[current_line];
+        let cursor_x = horizontal + measure_text_width(&value[line_start..cursor], font_size);
+        let cursor_y = vertical + (current_line - start_line) as f32 * line_height;
+        self.widget_states.insert(
+            id.to_string(),
+            WidgetState::TextField {
+                cursor,
+                anchor,
+                cursor_x,
+                cursor_y,
+            },
+        );
+        let border = if focused {
+            theme.accent
+        } else if hovered {
+            mix_color(theme.border, theme.accent, 0.35)
+        } else {
+            theme.border
+        };
+        let mut commands = vec![
+            DrawCommand::Rect {
+                x: 0.0,
+                y: 0.0,
+                width,
+                height,
+                color: border,
+            },
+            DrawCommand::RoundedRect {
+                x: 1.0,
+                y: 1.0,
+                width: (width - 2.0).max(1.0),
+                height: (height - 2.0).max(1.0),
+                radius: Radius::all(5.0),
+                color: theme.surface,
+            },
+        ];
+        let line_count = spans.len();
+        for line in start_line..line_count.min(start_line + visible) {
+            let (start, end) = spans[line];
+            commands.push(DrawCommand::Text {
+                x: horizontal,
+                y: vertical + (line - start_line) as f32 * line_height,
+                text: value[start..end].to_string(),
+                font_size,
+                weight: 400,
+                color: theme.foreground,
+                max_width: Some((width - horizontal * 2.0).max(1.0)),
+                alignment: TextAlignment::Start,
+            });
+        }
+        if focused {
+            commands.extend(focus_ring(0.0, 0.0, width, height, border));
+        }
+        if focused {
+            commands.push(DrawCommand::Line {
+                x1: cursor_x,
+                y1: cursor_y,
+                x2: cursor_x,
+                y2: cursor_y + line_height,
+                width: 1.0,
+                color: theme.accent,
+            });
+        }
+        self.register_access_node(
+            node_id,
+            Role::TextField,
+            "text area",
+            Some(value.as_str()),
+            focused,
+        );
+        self.nodes
+            .get_mut(&node_id)
+            .expect("text area node exists")
             .commands = commands;
         TextFieldState {
             changed,
@@ -1129,7 +1552,7 @@ impl Context {
             }
         }
         if state.editing {
-            let field = self.text_field_impl(&input_id, &mut state.buffer, None);
+            let field = self.text_field_impl(&input_id, &mut state.buffer, None, false);
             if state.was_focused && !field.focused {
                 let next = state.buffer.trim().to_string();
                 state.editing = false;
@@ -1305,7 +1728,7 @@ impl Context {
                 }
             });
         }
-        let field = self.text_field_impl(&input_id, input, None);
+        let field = self.text_field_impl(&input_id, input, None, false);
         self.pop_parent();
         let mut added = false;
         if field.focused {
@@ -1391,7 +1814,7 @@ impl Context {
                 self.focused_id = Some(input_id.clone());
             }
         }
-        let field = self.text_field_impl(&input_id, text, None);
+        let field = self.text_field_impl(&input_id, text, None, false);
         if field.changed {
             state.selected = None;
             state.dismissed = None;
@@ -1515,7 +1938,7 @@ impl Context {
                 }
             }
         }
-        let field = self.text_field_impl(&input_id, query, None);
+        let field = self.text_field_impl(&input_id, query, None, false);
         if field.changed {
             state.selected = None;
             if state.open {
@@ -1735,7 +2158,7 @@ impl Context {
                         y: 0.0,
                         width,
                         height,
-                        radius: Radius::all(6.0),
+                        radius: Radius::all(8.0),
                         color: mix_color(theme.surface, theme.background, 0.65),
                     }];
                     if let Some(language) = language {
@@ -1795,13 +2218,23 @@ impl Context {
                         height: Some(height),
                         ..Style::default()
                     });
-                    let mut commands = vec![DrawCommand::Rect {
-                        x: 0.0,
-                        y: 0.0,
-                        width,
-                        height: row_height,
-                        color: mix_color(theme.surface, theme.border, 0.3),
-                    }];
+                    let mut commands = vec![
+                        DrawCommand::RoundedRect {
+                            x: 0.0,
+                            y: 0.0,
+                            width,
+                            height,
+                            radius: Radius::all(8.0),
+                            color: theme.surface,
+                        },
+                        DrawCommand::Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width,
+                            height: row_height,
+                            color: mix_color(theme.surface, theme.border, 0.3),
+                        },
+                    ];
                     let mut x = 0.0;
                     for (column, header) in headers.iter().enumerate() {
                         commands.push(DrawCommand::Text {
@@ -2795,7 +3228,10 @@ impl Context {
             Some(color.to_hex().as_str()),
             block_focused,
         );
-        let anchor = self.previous_regions.get(id).map(|region| region.bounds);
+        let anchor = self.previous_regions.get(id).map(|region| {
+            let bounds = region.bounds;
+            Rect::new(bounds.x, bounds.y, 254.0, bounds.height)
+        });
         let mut changed = false;
         let mut preset = None;
         let mut valid_hex = true;
@@ -2804,20 +3240,22 @@ impl Context {
                 let mut overlay_state = OverlayState::new(true);
                 let mut hex = state.hex.clone();
                 let mut dismiss = false;
+                let popup_field_width = 238.0_f32;
+                self.embedded_overlay = true;
                 let response = self.overlay(
                     &format!("{id}:popup"),
                     &mut overlay_state,
                     anchor,
                     |context| {
-                        context.column().gap(theme.spacing.xs).children(|context| {
+                        context.column().width(popup_field_width).gap(0.0).children(|context| {
                             let (derived_hue, derived_sat, derived_val) = rgb_to_hsv(*color);
                             if derived_sat > 0 && derived_val > 0 {
                                 state.hue = derived_hue;
                             }
                             state.saturation = derived_sat;
                             state.value = derived_val;
-                            let field_width = 220.0_f32;
-                            let field_height = 120.0_f32;
+                            let field_width = popup_field_width;
+                            let field_height = 198.0_f32;
                             let field_key = format!("{id}:field");
                             let field_node = context.new_named_node(
                                 &field_key,
@@ -2884,7 +3322,7 @@ impl Context {
                                 .expect("color field exists")
                                 .commands = field_commands;
 
-                            let hue_width = 220.0_f32;
+                            let hue_width = popup_field_width;
                             let hue_height = 12.0_f32;
                             let hue_key = format!("{id}:hue");
                             let hue_node = context.new_named_node(
@@ -2951,7 +3389,7 @@ impl Context {
                                 .expect("hue bar exists")
                                 .commands = hue_commands;
 
-                            let alpha_width = 220.0_f32;
+                            let alpha_width = popup_field_width;
                             let alpha_height = 12.0_f32;
                             let alpha_key = format!("{id}:alpha");
                             let alpha_node = context.new_named_node(
@@ -3030,40 +3468,6 @@ impl Context {
                                 .get_mut(&alpha_node)
                                 .expect("alpha bar exists")
                                 .commands = alpha_commands;
-
-                            let tint_key = format!("{id}:tint");
-                            let tint_node = context.new_named_node(
-                                &tint_key,
-                                Style {
-                                    width: Some(220.0),
-                                    height: Some(34.0),
-                                    ..Style::default()
-                                },
-                            );
-                            context
-                                .nodes
-                                .get_mut(&tint_node)
-                                .expect("tint card exists")
-                                .commands = vec![
-                                DrawCommand::RoundedRect {
-                                    x: 0.0,
-                                    y: 0.0,
-                                    width: 220.0,
-                                    height: 34.0,
-                                    radius: Radius::all(8.0),
-                                    color: mix_color(theme.surface, *color, 0.18),
-                                },
-                                DrawCommand::Text {
-                                    x: 10.0,
-                                    y: 9.0,
-                                    text: "Tint on background".to_string(),
-                                    font_size: theme.font_sizes.small,
-                                    weight: 600,
-                                    color: *color,
-                                    max_width: Some(200.0),
-                                    alignment: TextAlignment::Start,
-                                },
-                            ];
 
                             let hex_id = format!("{id}:hex");
                             let field = context.text_field(&hex_id, &mut hex);
@@ -3199,7 +3603,7 @@ impl Context {
         let mut field_hovered = false;
         self.container().width(input_width).children(|context| {
             let filter = |raw: &str| filter_time_text(raw);
-            let field = context.text_field_impl(&input_id, text, Some(&filter));
+            let field = context.text_field_impl(&input_id, text, Some(&filter), false);
             field_changed = field.changed;
             field_focused = field.focused;
             field_hovered = field.hovered;
@@ -4403,7 +4807,11 @@ impl Context {
                 };
                 nav(context, &previous_key, "<");
                 context
-                    .text(&format!("{:04}-{:02}", state.year, state.month))
+                    .text(&format!(
+                        "{} {}",
+                        month_name(state.month),
+                        state.year
+                    ))
                     .font_size(theme.font_sizes.body)
                     .weight(600)
                     .color(theme.foreground)
@@ -4425,7 +4833,7 @@ impl Context {
                 x: index as f32 * (cell_width + theme.spacing.xs),
                 y: 1.0,
                 text: (*label).to_string(),
-                font_size: theme.font_sizes.small,
+                font_size: 13.0,
                 weight: 400,
                 color: theme.muted,
                 max_width: Some(cell_width),
@@ -5494,7 +5902,7 @@ impl Context {
             }
         }
         let filter = move |raw: &str| filter_numeric_text(raw, allow_negative, decimals);
-        let field = self.text_field_impl(id, text, Some(&filter));
+        let field = self.text_field_impl(id, text, Some(&filter), false);
         let value = if text.is_empty() {
             None
         } else {
@@ -5518,7 +5926,7 @@ impl Context {
         let decimals = options.decimals.min(18);
         let allow_negative = options.allow_negative;
         let filter = move |raw: &str| filter_numeric_text(raw, allow_negative, decimals);
-        let field = self.text_field_impl(id, text, Some(&filter));
+        let field = self.text_field_impl(id, text, Some(&filter), false);
         let units = parse_decimal_units(text, decimals);
         DecimalInputState {
             changed: field.changed,
@@ -5531,7 +5939,7 @@ impl Context {
 
     /// Creates a checkbox that toggles by mouse or focused Enter/Space.
     pub fn checkbox(&mut self, id: &str, checked: &mut bool) -> CheckboxState {
-        self.checkbox_impl(id, None, checked)
+        self.checkbox_impl(id, None, checked, false)
     }
 
     /// Creates a checkbox that shows a caller-supplied label next to the box.
@@ -5541,7 +5949,20 @@ impl Context {
         label: &str,
         checked: &mut bool,
     ) -> CheckboxState {
-        self.checkbox_impl(id, Some(label), checked)
+        self.checkbox_impl(id, Some(label), checked, false)
+    }
+
+    /// Creates a checkbox rendered in the mixed/indeterminate state. A click
+    /// resolves it to checked; the caller should stop passing `indeterminate`
+    /// on the next frame.
+    pub fn checkbox_indeterminate(
+        &mut self,
+        id: &str,
+        label: &str,
+        checked: &mut bool,
+        indeterminate: bool,
+    ) -> CheckboxState {
+        self.checkbox_impl(id, Some(label), checked, indeterminate)
     }
 
     fn checkbox_impl(
@@ -5549,6 +5970,7 @@ impl Context {
         id: &str,
         label: Option<&str>,
         checked: &mut bool,
+        indeterminate: bool,
     ) -> CheckboxState {
         let theme = self.theme.clone();
         let font_size = theme.font_sizes.body;
@@ -5558,6 +5980,7 @@ impl Context {
         }
         let height = measured_text_height(font_size).max(22.0);
         let width = self.current_content_width();
+        let box_size = 16.0;
         let node_id = self.new_named_node(
             id,
             Style {
@@ -5579,32 +6002,36 @@ impl Context {
             focused && (self.key_pressed(Key::Enter) || self.key_pressed(Key::Space));
         let changed = mouse_clicked || keyboard_clicked;
         if changed {
-            *checked = !*checked;
+            if indeterminate {
+                *checked = true;
+            } else {
+                *checked = !*checked;
+            }
         }
         let mut commands = Vec::new();
-        if *checked {
+        if *checked || indeterminate {
             commands.push(DrawCommand::RoundedRect {
                 x: 0.0,
-                y: (height - 18.0) / 2.0,
-                width: 18.0,
-                height: 18.0,
+                y: (height - box_size) / 2.0,
+                width: box_size,
+                height: box_size,
                 radius: Radius::all(4.0),
                 color: theme.accent,
             });
         } else {
             commands.push(DrawCommand::RoundedRect {
                 x: 0.0,
-                y: (height - 18.0) / 2.0,
-                width: 18.0,
-                height: 18.0,
+                y: (height - box_size) / 2.0,
+                width: box_size,
+                height: box_size,
                 radius: Radius::all(4.0),
                 color: theme.border,
             });
             commands.push(DrawCommand::RoundedRect {
                 x: 1.0,
-                y: (height - 18.0) / 2.0 + 1.0,
-                width: 16.0,
-                height: 16.0,
+                y: (height - box_size) / 2.0 + 1.0,
+                width: box_size - 2.0,
+                height: box_size - 2.0,
                 radius: Radius::all(3.0),
                 color: theme.surface,
             });
@@ -5621,20 +6048,29 @@ impl Context {
             max_width: None,
             alignment: TextAlignment::Start,
         });
-        if *checked {
+        if indeterminate {
+            commands.push(DrawCommand::RoundedRect {
+                x: 4.0,
+                y: height / 2.0 - 1.0,
+                width: 8.0,
+                height: 2.0,
+                radius: Radius::all(1.0),
+                color: theme.on_accent,
+            });
+        } else if *checked {
             commands.push(DrawCommand::Line {
-                x1: 5.0,
+                x1: 4.0,
                 y1: height / 2.0,
-                x2: 8.0,
-                y2: height / 2.0 + 3.0,
+                x2: 7.0,
+                y2: height / 2.0 + 2.5,
                 width: 2.0,
                 color: theme.on_accent,
             });
             commands.push(DrawCommand::Line {
-                x1: 8.0,
-                y1: height / 2.0 + 3.0,
-                x2: 14.0,
-                y2: height / 2.0 - 4.0,
+                x1: 7.0,
+                y1: height / 2.0 + 2.5,
+                x2: 12.0,
+                y2: height / 2.0 - 3.0,
                 width: 2.0,
                 color: theme.on_accent,
             });
@@ -5646,7 +6082,13 @@ impl Context {
             node_id,
             Role::CheckBox,
             "checkbox",
-            Some(if *checked { "checked" } else { "unchecked" }),
+            Some(if indeterminate {
+                "mixed"
+            } else if *checked {
+                "checked"
+            } else {
+                "unchecked"
+            }),
             focused,
         );
         self.nodes
@@ -5734,33 +6176,35 @@ impl Context {
         } else {
             0.0
         };
-        let knob_x = fraction * (width - 16.0) + 8.0;
+        let knob_x = fraction * (width - 20.0) + 10.0;
         let mut commands = vec![
             DrawCommand::RoundedRect {
                 x: 0.0,
-                y: height / 2.0 - 3.0,
+                y: height / 2.0 - 2.5,
                 width,
-                height: 6.0,
-                radius: Radius::all(3.0),
+                height: 5.0,
+                radius: Radius::all(2.5),
                 color: theme.border,
             },
             DrawCommand::RoundedRect {
                 x: 0.0,
-                y: height / 2.0 - 3.0,
+                y: height / 2.0 - 2.5,
                 width: knob_x,
-                height: 6.0,
-                radius: Radius::all(3.0),
+                height: 5.0,
+                radius: Radius::all(2.5),
                 color: theme.accent,
             },
             DrawCommand::Circle {
                 x: knob_x,
                 y: height / 2.0,
-                radius: 8.0,
-                color: if focused || dragging {
-                    mix_color(theme.accent, theme.foreground, 0.35)
-                } else {
-                    theme.accent
-                },
+                radius: 10.0,
+                color: if focused || dragging { theme.accent } else { theme.border },
+            },
+            DrawCommand::Circle {
+                x: knob_x,
+                y: height / 2.0,
+                radius: 9.0,
+                color: Color::rgb(244, 244, 245),
             },
         ];
         if focused {
@@ -6416,7 +6860,7 @@ impl Context {
     }
 
     fn key_pressed(&self, key: Key) -> bool {
-        self.input.keys.contains(&key)
+        !self.widgets_disabled && self.input.keys.contains(&key)
     }
 
     /// Whether a widget on `layer` may observe pointer input this frame.
@@ -6432,6 +6876,9 @@ impl Context {
     }
 
     fn pointer_in_previous(&self, id: &str) -> bool {
+        if self.widgets_disabled {
+            return false;
+        }
         if !self.pointer_available(self.current_layer) {
             return false;
         }
@@ -6447,6 +6894,9 @@ impl Context {
     }
 
     fn clicked_in_previous(&self, id: &str) -> bool {
+        if self.widgets_disabled {
+            return false;
+        }
         if !self.pointer_available(self.current_layer) {
             return false;
         }
@@ -6560,7 +7010,7 @@ impl Context {
         self.current_layer = layer;
         let width = anchor
             .width
-            .max(220.0)
+            .max(220.0 + theme.spacing.sm * 2.0)
             .min(self.available_size.width.max(220.0));
         let x = anchor
             .x
@@ -6599,32 +7049,59 @@ impl Context {
             offset: 0.0,
             viewport_height: height,
         });
-        node.commands = vec![
-            DrawCommand::RoundedRect {
-                x: 2.0,
-                y: 4.0,
-                width,
-                height,
-                radius: Radius::all(10.0),
-                color: Color::rgba(0, 0, 0, 96),
-            },
-            DrawCommand::RoundedRect {
+        node.commands = if self.embedded_overlay {
+            vec![DrawCommand::RoundedRect {
                 x: 0.0,
                 y: 0.0,
                 width,
                 height,
-                radius: Radius::all(8.0),
-                color: theme.border,
-            },
-            DrawCommand::RoundedRect {
-                x: 1.0,
-                y: 1.0,
-                width: (width - 2.0).max(1.0),
-                height: (height - 2.0).max(1.0),
-                radius: Radius::all(7.0),
+                radius: Radius::all(10.0),
                 color: theme.surface,
-            },
-        ];
+            }]
+        } else {
+            vec![
+                DrawCommand::RoundedRect {
+                    x: -2.0,
+                    y: 8.0,
+                    width: width + 4.0,
+                    height: height + 4.0,
+                    radius: Radius::all(12.0),
+                    color: Color::rgba(0, 0, 0, 18),
+                },
+                DrawCommand::RoundedRect {
+                    x: 0.0,
+                    y: 4.0,
+                    width,
+                    height,
+                    radius: Radius::all(10.0),
+                    color: Color::rgba(0, 0, 0, 32),
+                },
+                DrawCommand::RoundedRect {
+                    x: 1.0,
+                    y: 2.0,
+                    width: (width - 2.0).max(1.0),
+                    height,
+                    radius: Radius::all(9.0),
+                    color: Color::rgba(0, 0, 0, 40),
+                },
+                DrawCommand::RoundedRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width,
+                    height,
+                    radius: Radius::all(8.0),
+                    color: theme.border,
+                },
+                DrawCommand::RoundedRect {
+                    x: 1.0,
+                    y: 1.0,
+                    width: (width - 2.0).max(1.0),
+                    height: (height - 2.0).max(1.0),
+                    radius: Radius::all(7.0),
+                    color: theme.surface,
+                },
+            ]
+        };
         self.register_access_node(node_id, Role::Popup, id, None, false);
         self.frame_overlays.push((node_id, id.to_string(), layer));
         if opening {
@@ -6659,7 +7136,7 @@ impl Context {
     /// Creates an on/off switch controlled by click or focused Enter/Space.
     pub fn switch(&mut self, id: &str, checked: &mut bool) -> SwitchState {
         let theme = self.theme.clone();
-        let width = 42.0;
+        let width = 40.0;
         let height = 24.0;
         let node_id = self.new_named_node(
             id,
@@ -6693,20 +7170,20 @@ impl Context {
         } else {
             mix_color(theme.foreground, theme.muted, 0.3)
         };
-        let center_x = 11.0 + progress * 20.0;
+        let center_x = 12.0 + progress * 16.0;
         let mut commands = vec![
             DrawCommand::RoundedRect {
-                x: 1.0,
-                y: 1.0,
-                width: 40.0,
-                height: 22.0,
-                radius: Radius::all(11.0),
+                x: 0.0,
+                y: 0.0,
+                width: width,
+                height: height,
+                radius: Radius::all(height / 2.0),
                 color: track,
             },
             DrawCommand::Circle {
                 x: center_x,
                 y: height / 2.0,
-                radius: 8.0,
+                radius: 10.0,
                 color: knob,
             },
         ];
@@ -7213,9 +7690,9 @@ impl Context {
             if selected_tab {
                 commands.push(DrawCommand::Rect {
                     x: 0.0,
-                    y: height - 2.0,
+                    y: height - 3.0,
                     width: tab_width,
-                    height: 2.0,
+                    height: 3.0,
                     color: theme.accent,
                 });
             }
@@ -7277,7 +7754,7 @@ impl Context {
     pub fn progress(&mut self, id: &str, value: f32, max: f32) -> ProgressState {
         let theme = self.theme.clone();
         let width = self.current_content_width();
-        let height = 8.0;
+        let height = 5.0;
         let max = if max.is_finite() && max > 0.0 {
             max
         } else {
@@ -7302,7 +7779,7 @@ impl Context {
             y: 0.0,
             width,
             height,
-            radius: Radius::all(4.0),
+            radius: Radius::all(2.5),
             color: theme.border,
         }];
         if fraction > 0.0 {
@@ -7311,7 +7788,7 @@ impl Context {
                 y: 0.0,
                 width: (width * fraction).max(2.0),
                 height,
-                radius: Radius::all(4.0),
+                radius: Radius::all(2.5),
                 color: theme.accent,
             });
         }
@@ -7337,7 +7814,7 @@ impl Context {
     pub fn progress_indeterminate(&mut self, id: &str) -> ProgressState {
         let theme = self.theme.clone();
         let width = self.current_content_width();
-        let height = 8.0;
+        let height = 5.0;
         let phase = if self.reduce_motion {
             0.0
         } else {
@@ -7380,7 +7857,7 @@ impl Context {
                 y: 0.0,
                 width: segment,
                 height,
-                radius: Radius::all(4.0),
+                radius: Radius::all(2.5),
                 color: theme.accent,
             },
         ];
@@ -7903,6 +8380,14 @@ impl Context {
                 .expect("tooltip node exists")
                 .commands = vec![
                 DrawCommand::RoundedRect {
+                    x: -1.0,
+                    y: 3.0,
+                    width: width + 2.0,
+                    height: height + 2.0,
+                    radius: Radius::all(8.0),
+                    color: Color::rgba(0, 0, 0, 24),
+                },
+                DrawCommand::RoundedRect {
                     x: 0.0,
                     y: 0.0,
                     width,
@@ -8030,12 +8515,20 @@ impl Context {
             node.style.height = Some(height);
             node.commands = vec![
                 DrawCommand::RoundedRect {
-                    x: 2.0,
+                    x: -2.0,
+                    y: 7.0,
+                    width: width + 4.0,
+                    height: height + 4.0,
+                    radius: Radius::all(11.0),
+                    color: Color::rgba(0, 0, 0, 18),
+                },
+                DrawCommand::RoundedRect {
+                    x: 0.0,
                     y: 3.0,
                     width,
                     height,
                     radius: Radius::all(9.0),
-                    color: Color::rgba(0, 0, 0, 72),
+                    color: Color::rgba(0, 0, 0, 32),
                 },
                 DrawCommand::RoundedRect {
                     x: 0.0,
@@ -8343,7 +8836,7 @@ impl Context {
     ) -> TreeResponse {
         let theme = self.theme.clone();
         let width = self.current_content_width();
-        let row_height = measured_text_height(theme.font_sizes.body) + theme.spacing.xs * 2.0;
+        let row_height = 27.0_f32;
         let total_height = nodes.len() as f32 * row_height;
         let root = self.new_named_node(
             id,
@@ -8496,9 +8989,9 @@ impl Context {
                     y: 0.0,
                     width: row_width,
                     height: row_height,
-                    radius: Radius::all(3.0),
+                    radius: Radius::all(6.0),
                     color: if selected {
-                        mix_color(theme.surface, theme.accent, 0.18)
+                        theme.accent
                     } else {
                         mix_color(theme.surface, theme.foreground, 0.06)
                     },
@@ -8511,7 +9004,7 @@ impl Context {
                 font_size: theme.font_sizes.body,
                 weight: if selected { 600 } else { 400 },
                 color: if selected {
-                    theme.accent
+                    theme.on_accent
                 } else if hovered {
                     theme.foreground
                 } else {
@@ -8550,7 +9043,9 @@ impl Context {
         rows: &[TableRow<'_>],
     ) -> TableResponse {
         let theme = self.theme.clone();
-        let header_height = measured_text_height(theme.font_sizes.body) + theme.spacing.xs * 2.0;
+        // MyGo's compact table grid uses a 31px row; keep the text baseline
+        // from the spacing token but give the row its own minimum height.
+        let header_height = (measured_text_height(theme.font_sizes.body) + theme.spacing.xs * 2.0).max(31.0);
         let row_height = header_height;
         let column_width = |column: &TableColumn<'_>| {
             if column.width.is_finite() && column.width > 0.0 {
@@ -8600,15 +9095,35 @@ impl Context {
         let changed = state.selected_id != previous_selected;
         let selected_id = state.selected_id.clone();
 
+        let total_height = header_height + rows.len() as f32 * row_height;
         let root = self.new_named_node(
             id,
             Style {
                 width: Some(total_width),
+                height: Some(total_height),
                 flex_direction: FlexDirection::Column,
                 gap: 0.0,
                 ..Style::default()
             },
         );
+        self.nodes.get_mut(&root).expect("table root exists").commands = vec![
+            DrawCommand::RoundedRect {
+                x: 0.0,
+                y: 0.0,
+                width: total_width,
+                height: total_height,
+                radius: Radius::all(10.0),
+                color: theme.border,
+            },
+            DrawCommand::RoundedRect {
+                x: 1.0,
+                y: 1.0,
+                width: (total_width - 2.0).max(1.0),
+                height: (total_height - 2.0).max(1.0),
+                radius: Radius::all(9.0),
+                color: theme.surface,
+            },
+        ];
         self.push_parent(root);
         let header = self.new_named_node(
             &format!("{id}:header"),
@@ -8727,9 +9242,9 @@ impl Context {
                     y: 0.0,
                     width: total_width,
                     height: row_height,
-                    radius: Radius::all(3.0),
+                    radius: Radius::all(6.0),
                     color: if selected {
-                        mix_color(theme.surface, theme.accent, 0.18)
+                        theme.accent
                     } else {
                         mix_color(theme.surface, theme.foreground, 0.06)
                     },
@@ -8756,27 +9271,51 @@ impl Context {
                     },
                 );
                 let text = row.cells.get(column_index).copied().unwrap_or("");
+                let icon_name = (column_index == 0).then_some(row.icon).flatten();
+                let icon_shift = if icon_name.is_some() { 18.0 } else { 0.0 };
                 self.update_text(
                     cell,
                     text,
                     theme.font_sizes.body,
                     400,
                     if selected {
-                        theme.foreground
+                        theme.on_accent
                     } else {
                         theme.muted
                     },
-                    Some((width - theme.spacing.sm * 2.0).max(1.0)),
+                    Some((width - theme.spacing.sm * 2.0 - icon_shift).max(1.0)),
                     TextAlignment::Start,
                 );
+                if let Some(icon_name) = icon_name {
+                    let icon_color = if selected { theme.on_accent } else { theme.muted };
+                    if let Some(icon) = Icon::builtin(icon_name) {
+                        let icon_commands = vec![
+                            DrawCommand::TransformPush {
+                                transform: Transform {
+                                    translation: Point::new(theme.spacing.sm, (row_height - 14.0) / 2.0),
+                                    scale: Point::new(1.0, 1.0),
+                                    rotation: 0.0,
+                                },
+                            },
+                        ];
+                        let mut icon = icon.to_commands_with_direction(14.0, icon_color, self.direction);
+                        let mut all = icon_commands;
+                        all.append(&mut icon);
+                        all.push(DrawCommand::TransformPop);
+                        if let Some(cell) = self.nodes.get_mut(&cell) {
+                            cell.commands.splice(0..0, all);
+                        }
+                    }
+                }
                 if let Some(cell) = self.nodes.get_mut(&cell) {
                     for command in &mut cell.commands {
                         if let DrawCommand::Text { x, y, .. } = command {
-                            *x = theme.spacing.sm;
+                            *x = theme.spacing.sm + icon_shift;
                             *y = theme.spacing.xs;
                         }
                     }
                 }
+                
             }
             self.pop_parent();
             if focused {
@@ -8890,30 +9429,61 @@ impl Context {
                         y: 0.0,
                         width,
                         height,
-                        radius: Radius::all(3.0),
+                        radius: Radius::all(6.0),
                         color: if selected {
-                            mix_color(theme.surface, theme.accent, 0.18)
+                            theme.accent
                         } else {
                             mix_color(theme.surface, theme.foreground, 0.06)
                         },
                     });
                 }
+                let mut text_x = theme.spacing.sm;
+                if let Some(name) = row.icon {
+                    if let Some(icon) = Icon::builtin(name) {
+                        let icon_color = if selected { theme.on_accent } else { theme.muted };
+                        commands.push(DrawCommand::TransformPush {
+                            transform: Transform {
+                                translation: Point::new(theme.spacing.sm, (height - 14.0) / 2.0),
+                                scale: Point::new(1.0, 1.0),
+                                rotation: 0.0,
+                            },
+                        });
+                        commands.extend(icon.to_commands_with_direction(14.0, icon_color, context.direction));
+                        commands.push(DrawCommand::TransformPop);
+                        text_x = theme.spacing.sm + 14.0 + theme.spacing.sm;
+                    }
+                }
+                let detail_width = row.detail.map(|detail| {
+                    measure_text_width(detail, theme.font_sizes.small)
+                }).unwrap_or(0.0);
                 commands.push(DrawCommand::Text {
-                    x: theme.spacing.sm,
+                    x: text_x,
                     y: theme.spacing.xs,
                     text: row.label.to_string(),
                     font_size: theme.font_sizes.body,
                     weight: if selected { 600 } else { 400 },
                     color: if selected {
-                        theme.accent
+                        theme.on_accent
                     } else if hovered {
                         theme.foreground
                     } else {
                         theme.muted
                     },
-                    max_width: Some((width - theme.spacing.sm * 2.0).max(1.0)),
+                    max_width: Some((width - text_x - theme.spacing.sm - detail_width - theme.spacing.sm - 10.0).max(1.0)),
                     alignment: TextAlignment::Start,
                 });
+                if let Some(detail) = row.detail {
+                    commands.push(DrawCommand::Text {
+                        x: width - theme.spacing.sm - 10.0 - detail_width,
+                        y: theme.spacing.xs,
+                        text: detail.to_string(),
+                        font_size: theme.font_sizes.small,
+                        weight: 400,
+                        color: if selected { theme.on_accent } else { theme.muted },
+                        max_width: Some(detail_width.max(1.0)),
+                        alignment: TextAlignment::Start,
+                    });
+                }
                 context.register_access_node(
                     node,
                     Role::Option,
@@ -9179,7 +9749,7 @@ impl Context {
         let theme = self.theme.clone();
         let width = self.current_content_width();
         let font_size = theme.font_sizes.body;
-        let item_height = measured_text_height(font_size) + theme.spacing.xs * 2.0;
+        let item_height = (measured_text_height(font_size) + theme.spacing.xs * 2.0).max(32.0);
         let mut selected_index: Option<usize> = None;
         let mut first_id = None;
         let mut total: usize = 0;
@@ -9275,6 +9845,11 @@ impl Context {
                     clicked_id = Some(item.id.to_string());
                 }
                 let item_selected = selected_index == Some(flat_index);
+                let item_color = if item_selected || item_hovered {
+                    theme.foreground
+                } else {
+                    theme.muted
+                };
                 let mut commands = Vec::new();
                 if item_selected || item_hovered {
                     commands.push(DrawCommand::RoundedRect {
@@ -9282,39 +9857,67 @@ impl Context {
                         y: 0.0,
                         width,
                         height: item_height,
-                        radius: Radius::all(4.0),
+                        radius: Radius::all(6.0),
                         color: if item_selected {
-                            mix_color(theme.surface, theme.accent, 0.18)
+                            mix_color(theme.surface, theme.foreground, 0.12)
                         } else {
-                            mix_color(theme.surface, theme.foreground, 0.06)
+                            mix_color(theme.surface, theme.foreground, 0.05)
                         },
                     });
                 }
-                if item_selected {
-                    commands.push(DrawCommand::Rect {
-                        x: 0.0,
-                        y: 0.0,
-                        width: 2.0,
-                        height: item_height,
-                        color: theme.accent,
-                    });
+                let mut text_x = theme.spacing.sm;
+                if let Some(name) = item.icon {
+                    if let Some(icon) = Icon::builtin(name) {
+                        let icon_y = (item_height - 14.0) / 2.0;
+                        commands.push(DrawCommand::TransformPush {
+                            transform: Transform {
+                                translation: Point::new(theme.spacing.sm, icon_y),
+                                scale: Point::new(1.0, 1.0),
+                                rotation: 0.0,
+                            },
+                        });
+                        commands.extend(icon.to_commands_with_direction(14.0, item_color, self.direction));
+                        commands.push(DrawCommand::TransformPop);
+                        text_x = theme.spacing.sm + 14.0 + theme.spacing.sm;
+                    }
                 }
+                let badge_width = item.badge.map(|badge| {
+                    measure_text_width(badge, theme.font_sizes.small) + theme.spacing.sm
+                }).unwrap_or(0.0);
+                let text_width = (width - text_x - theme.spacing.sm - badge_width).max(1.0);
                 commands.push(DrawCommand::Text {
-                    x: theme.spacing.sm,
+                    x: text_x,
                     y: theme.spacing.xs,
                     text: item.label.to_string(),
                     font_size,
                     weight: if item_selected { 600 } else { 400 },
-                    color: if item_selected {
-                        theme.accent
-                    } else if item_hovered {
-                        theme.foreground
-                    } else {
-                        theme.muted
-                    },
-                    max_width: Some((width - theme.spacing.sm * 2.0).max(1.0)),
+                    color: item_color,
+                    max_width: Some(text_width),
                     alignment: TextAlignment::Start,
                 });
+                if let Some(badge) = item.badge {
+                    let badge_height = 16.0;
+                    let badge_x = width - badge_width - theme.spacing.sm;
+                    let badge_y = (item_height - badge_height) / 2.0;
+                    commands.push(DrawCommand::RoundedRect {
+                        x: badge_x,
+                        y: badge_y,
+                        width: badge_width,
+                        height: badge_height,
+                        radius: Radius::all(8.0),
+                        color: mix_color(theme.surface, theme.foreground, 0.12),
+                    });
+                    commands.push(DrawCommand::Text {
+                        x: badge_x,
+                        y: badge_y + 2.0,
+                        text: badge.to_string(),
+                        font_size: theme.font_sizes.small,
+                        weight: 600,
+                        color: theme.foreground,
+                        max_width: Some(badge_width),
+                        alignment: TextAlignment::Center,
+                    });
+                }
                 self.register_access_node(
                     node,
                     Role::Option,
@@ -10034,6 +10637,20 @@ pub fn button_with_icon(context: &mut Context, label: &str, icon_name: &str) -> 
     context.button_with_icon(label, icon_name)
 }
 
+/// Creates a 36×36 icon-only button.
+pub fn icon_button(context: &mut Context, icon_name: &str) -> ButtonState {
+    context.icon_button(icon_name)
+}
+
+/// Creates a primary button with a built-in icon.
+pub fn button_primary_with_icon(
+    context: &mut Context,
+    label: &str,
+    icon_name: &str,
+) -> ButtonState {
+    context.button_primary_with_icon(label, icon_name)
+}
+
 /// Creates a flexible spacer.
 pub fn spacer(context: &mut Context) {
     context.spacer();
@@ -10042,6 +10659,25 @@ pub fn spacer(context: &mut Context) {
 /// Creates a text field.
 pub fn text_field(context: &mut Context, id: &str, value: &mut String) -> TextFieldState {
     context.text_field(id, value)
+}
+
+/// Creates a single-line password field that masks the rendered characters.
+pub fn text_field_password(
+    context: &mut Context,
+    id: &str,
+    value: &mut String,
+) -> TextFieldState {
+    context.text_field_password(id, value)
+}
+
+/// Creates a multiline text area.
+pub fn text_area(
+    context: &mut Context,
+    id: &str,
+    value: &mut String,
+    visible_lines: usize,
+) -> TextFieldState {
+    context.text_area(id, value, visible_lines)
 }
 
 /// Creates a checkbox.
@@ -10057,6 +10693,17 @@ pub fn checkbox_labeled(
     checked: &mut bool,
 ) -> CheckboxState {
     context.checkbox_labeled(id, label, checked)
+}
+
+/// Creates a labeled checkbox in the mixed/indeterminate visual state.
+pub fn checkbox_indeterminate(
+    context: &mut Context,
+    id: &str,
+    label: &str,
+    checked: &mut bool,
+    indeterminate: bool,
+) -> CheckboxState {
+    context.checkbox_indeterminate(id, label, checked, indeterminate)
 }
 
 /// Creates a slider.
@@ -10087,18 +10734,18 @@ fn button_commands(
     let hover_progress = hover_progress.clamp(0.0, 1.0);
     let pressed_progress = pressed_progress.clamp(0.0, 1.0);
     let hover_background = if primary {
-        mix_color(theme.accent, theme.on_accent, 0.12)
+        mix_color(mix_color(theme.accent, Color::WHITE, 0.12), Color::WHITE, 0.08)
     } else {
         mix_color(theme.surface, theme.accent, 0.65)
     };
     let pressed_background = if primary {
-        mix_color(theme.accent, theme.on_accent, 0.2)
+        mix_color(theme.accent, Color::WHITE, 0.22)
     } else {
         theme.accent
     };
     let background = mix_color(
         mix_color(
-            if primary { theme.accent } else { theme.surface },
+            if primary { mix_color(theme.accent, Color::WHITE, 0.12) } else { theme.surface },
             hover_background,
             hover_progress,
         ),
@@ -10112,33 +10759,45 @@ fn button_commands(
         mix_color(theme.foreground, theme.on_accent, emphasis)
     };
     let horizontal = theme.spacing.md;
-    let vertical = theme.spacing.sm;
-    let mut commands = vec![
-        DrawCommand::RoundedRect {
+    let vertical = ((28.0 - measured_text_height(font_size)) / 2.0).max(0.0);
+    let width = size.width + horizontal * 2.0;
+    let height = size.height + vertical * 2.0;
+    let mut commands = Vec::new();
+    if !primary {
+        let border = mix_color(theme.border, theme.accent, 0.35 * hover_progress);
+        commands.push(DrawCommand::RoundedRect {
             x: 0.0,
             y: 0.0,
-            width: size.width + horizontal * 2.0,
-            height: size.height + vertical * 2.0,
+            width,
+            height,
             radius: Radius::all(6.0),
-            color: background,
-        },
-        DrawCommand::Text {
-            x: horizontal,
-            y: vertical,
-            text: label.to_string(),
-            font_size,
-            weight: 500,
-            color: text_color,
-            max_width: None,
-            alignment: TextAlignment::Start,
-        },
-    ];
+            color: border,
+        });
+    }
+    commands.push(DrawCommand::RoundedRect {
+        x: if primary { 0.0 } else { 1.0 },
+        y: if primary { 0.0 } else { 1.0 },
+        width: if primary { width } else { (width - 2.0).max(1.0) },
+        height: if primary { height } else { (height - 2.0).max(1.0) },
+        radius: Radius::all(if primary { 6.0 } else { 5.0 }),
+        color: background,
+    });
+    commands.push(DrawCommand::Text {
+        x: horizontal,
+        y: vertical,
+        text: label.to_string(),
+        font_size,
+        weight: 500,
+        color: text_color,
+        max_width: None,
+        alignment: TextAlignment::Start,
+    });
     if focused {
         commands.extend(focus_ring(
             0.0,
             0.0,
-            size.width + horizontal * 2.0,
-            size.height + vertical * 2.0,
+            width,
+            height,
             theme.accent,
         ));
     }
@@ -10297,6 +10956,35 @@ fn focus_ring(x: f32, y: f32, width: f32, height: f32, color: Color) -> [DrawCom
     ]
 }
 
+
+fn line_spans(value: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = 0;
+    for (index, byte) in value.bytes().enumerate() {
+        if byte == b'\n' {
+            spans.push((start, index));
+            start = index + 1;
+        }
+    }
+    spans.push((start, value.len()));
+    spans
+}
+
+fn line_index(spans: &[(usize, usize)], cursor: usize) -> usize {
+    spans
+        .iter()
+        .position(|(start, end)| cursor >= *start && cursor <= *end)
+        .unwrap_or(spans.len().saturating_sub(1))
+}
+
+fn byte_at_column(value: &str, start: usize, end: usize, column: usize) -> usize {
+    value[start..end]
+        .char_indices()
+        .nth(column)
+        .map(|(offset, _)| start + offset)
+        .unwrap_or(end)
+}
+
 fn previous_char_boundary(value: &str, cursor: usize) -> Option<usize> {
     if cursor == 0 {
         None
@@ -10314,6 +11002,14 @@ fn next_char_boundary(value: &str, cursor: usize) -> Option<usize> {
         .nth(1)
         .map(|(offset, _)| cursor + offset)
         .or_else(|| (cursor < value.len()).then_some(value.len()))
+}
+
+
+fn month_name(month: u32) -> &'static str {
+    [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
+    ][(month.saturating_sub(1) as usize).min(11)]
 }
 
 fn normalize_size(size: Size) -> Size {
@@ -10700,6 +11396,53 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn text_area_inserts_newlines_and_moves_between_lines() {
+        let mut context = Context::new(Size::new(300.0, 160.0));
+        let mut value = String::new();
+        context.begin_frame(Size::new(300.0, 160.0));
+        context.request_focus("area");
+        let state = context.text_area("area", &mut value, 3);
+        assert!(state.focused);
+        context.produce().unwrap();
+        context.end_frame();
+
+        for (event, expected, expected_cursor) in [
+            (UiEvent::TextInput { text: "ab".into() }, "ab", 2),
+            (UiEvent::Key { key: Key::Enter }, "ab\n", 3),
+            (UiEvent::TextInput { text: "cd".into() }, "ab\ncd", 5),
+            (UiEvent::Key { key: Key::ArrowUp }, "ab\ncd", 2),
+            (UiEvent::Key { key: Key::End }, "ab\ncd", 2),
+            (UiEvent::Key { key: Key::ArrowDown }, "ab\ncd", 5),
+        ] {
+            context.begin_frame(Size::new(300.0, 160.0));
+            context.set_input(event);
+            let state = context.text_area("area", &mut value, 3);
+            assert_eq!(value, expected);
+            assert_eq!(state.cursor, expected_cursor);
+            context.produce().unwrap();
+            context.end_frame();
+        }
+    }
+
+    #[test]
+    fn password_field_keeps_value_and_renders_bullets() {
+        let mut context = Context::new(Size::new(300.0, 120.0));
+        let mut value = "secret".to_string();
+        context.begin_frame(Size::new(300.0, 120.0));
+        context.text_field_password("password", &mut value);
+        let has_bullets = context.nodes.values().any(|node| {
+            node.commands.iter().any(|command| {
+                matches!(command, DrawCommand::Text { text, .. } if text == "••••••")
+            })
+        });
+        assert!(has_bullets);
+        assert_eq!(value, "secret");
+        context.produce().unwrap();
+        context.end_frame();
+    }
+
     #[test]
     fn checkbox_mouse_and_space_toggle_state() {
         let mut context = Context::new(Size::new(300.0, 120.0));
@@ -10934,7 +11677,7 @@ mod tests {
             .commands
             .iter()
             .find_map(|command| match command {
-                DrawCommand::RoundedRect { color, .. } => Some(*color),
+                DrawCommand::RoundedRect { x, color, .. } if *x == 1.0 => Some(*color),
                 _ => None,
             })
             .expect("button background");
@@ -11021,7 +11764,7 @@ mod tests {
             .commands
             .iter()
             .find_map(|command| match command {
-                DrawCommand::RoundedRect { color, .. } => Some(*color),
+                DrawCommand::RoundedRect { x, color, .. } if *x == 1.0 => Some(*color),
                 _ => None,
             })
             .expect("button background");

@@ -9,12 +9,28 @@ pub struct SidebarItem<'a> {
     pub id: &'a str,
     /// Visible label.
     pub label: &'a str,
+    /// Optional built-in icon name.
+    pub icon: Option<&'a str>,
+    /// Optional trailing badge text (e.g. an unread count).
+    pub badge: Option<&'a str>,
 }
 
 impl<'a> SidebarItem<'a> {
-    /// Creates a sidebar item.
+    /// Creates a sidebar item without an icon or badge.
     pub const fn new(id: &'a str, label: &'a str) -> Self {
-        Self { id, label }
+        Self { id, label, icon: None, badge: None }
+    }
+
+    /// Adds an optional built-in icon.
+    pub const fn icon(mut self, icon: &'a str) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    /// Adds an optional trailing badge.
+    pub const fn badge(mut self, badge: &'a str) -> Self {
+        self.badge = Some(badge);
+        self
     }
 }
 

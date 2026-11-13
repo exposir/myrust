@@ -35,12 +35,20 @@ pub struct TableRow<'a> {
     pub id: &'a str,
     /// Cell text, one entry per column.
     pub cells: &'a [&'a str],
+    /// Optional built-in icon shown before the first cell.
+    pub icon: Option<&'a str>,
 }
 
 impl<'a> TableRow<'a> {
-    /// Creates a table row.
+    /// Creates a table row without a leading icon.
     pub const fn new(id: &'a str, cells: &'a [&'a str]) -> Self {
-        Self { id, cells }
+        Self { id, cells, icon: None }
+    }
+
+    /// Adds an optional built-in icon before the first cell.
+    pub const fn icon(mut self, icon: &'a str) -> Self {
+        self.icon = Some(icon);
+        self
     }
 }
 

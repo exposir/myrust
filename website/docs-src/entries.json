@@ -597,7 +597,7 @@
     "anchor": "text-input",
     "detail": true,
     "preview": "text-input",
-    "height": 250
+    "height": 220
   },
   {
     "section": "text-input",
@@ -1075,7 +1075,7 @@
     "anchor": "navigation",
     "detail": true,
     "preview": "tabs",
-    "height": 300
+    "height": 160
   },
   {
     "section": "navigation",

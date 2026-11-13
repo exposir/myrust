@@ -557,6 +557,12 @@ impl TransformMatrix {
         }
     }
 
+    /// Returns the matrix as a flat array in column-major order
+    /// matching the canvas2D setTransform(a,b,c,d,e,f) parameters.
+    pub(crate) fn to_array(self) -> [f32; 6] {
+        [self.m11, self.m12, self.m21, self.m22, self.tx, self.ty]
+    }
+
     pub(crate) fn apply(self, point: Point) -> Point {
         Point::new(
             self.m11 * point.x + self.m12 * point.y + self.tx,

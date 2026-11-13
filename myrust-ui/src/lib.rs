@@ -159,8 +159,8 @@ pub use code_editor::{
 pub use color_picker::{color_picker, ColorPickerResponse, ColorPickerState, PRESET_COLORS};
 pub use combobox::{combobox, ComboboxResponse, ComboboxState};
 pub use context::{
-    button, button_primary, button_with_icon, checkbox, checkbox_labeled, column, container, grid, row, scroll_view,
-    slider, spacer, text, text_field, transform, ButtonState, CheckboxState, ColumnBuilder,
+    button, button_primary, button_primary_with_icon, button_with_icon, checkbox, checkbox_labeled, checkbox_indeterminate, column, container, grid, icon_button, row, scroll_view,
+    slider, spacer, text, text_area, text_field, text_field_password, transform, ButtonState, CheckboxState, ColumnBuilder,
     ContainerBuilder, Context, FlexBuilder, GridBuilder, LayoutScope, RowBuilder, ScrollState,
     SliderState, TextBuilder, TextFieldState,
 };
@@ -224,7 +224,7 @@ pub use paint::{
     SvgPath, TextAlignment, Transform,
 };
 pub use performance::{frame_stats_panel, FrameStats, FrameStatsResponse};
-pub use present::{CpuFrame, CpuRasterizer, RasterError};
+pub use present::{CpuFrame, CpuRasterizer, RasterError, TextRenderCommand};
 pub use range_slider::{range_slider, RangeKnob, RangeSliderResponse, RangeSliderState};
 pub use rating::{rating, RatingState};
 pub use render::{

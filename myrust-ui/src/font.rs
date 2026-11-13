@@ -41,28 +41,40 @@ pub struct FontFace {
 }
 
 impl FontFace {
+    /// Converts a CSS `font-size` (an em size) into the pixel-height scale
+    /// expected by `ab_glyph`. CSS sizes are em sizes, while `PxScale` is the
+    /// font's ascent-to-descent height; without this conversion a 14px font
+    /// measures and rasterizes about 23% smaller than canvas2D.
+    fn px_scale(&self, size: f32) -> PxScale {
+        let size = normalize_size(size);
+        let units = self.font.units_per_em().unwrap_or(size);
+        let height = self.font.height_unscaled();
+        if units > 0.0 && height > 0.0 {
+            PxScale::from(size * height / units)
+        } else {
+            PxScale::from(size)
+        }
+    }
+
     /// Returns the horizontal advance for a character at the supplied size.
     pub fn glyph_advance(&self, character: char, size: f32) -> f32 {
         if !self.has_glyph(character) {
             return 0.0;
         }
-        let size = normalize_size(size);
-        let scaled = self.font.as_scaled(PxScale::from(size));
+        let scaled = self.font.as_scaled(self.px_scale(size));
         scaled.h_advance(scaled.glyph_id(character))
     }
 
     /// Returns the recommended line height at the supplied size.
     pub fn line_height(&self, size: f32) -> f32 {
+        let scaled = self.font.as_scaled(self.px_scale(size));
         let size = normalize_size(size);
-        let scaled = self.font.as_scaled(PxScale::from(size));
         (scaled.ascent() - scaled.descent() + scaled.line_gap()).max(size)
     }
 
     /// Returns the ascent above the baseline at the supplied size.
     pub fn ascent(&self, size: f32) -> f32 {
-        self.font
-            .as_scaled(PxScale::from(normalize_size(size)))
-            .ascent()
+        self.font.as_scaled(self.px_scale(size)).ascent()
     }
 
     /// Returns whether the font contains a non-notdef glyph for a character.
@@ -81,7 +93,7 @@ impl FontFace {
             return empty_bitmap();
         }
         let size = normalize_size(size);
-        let scale = PxScale::from(size);
+        let scale = self.px_scale(size);
         let scaled = self.font.as_scaled(scale);
         let glyph = scaled
             .glyph_id(character)

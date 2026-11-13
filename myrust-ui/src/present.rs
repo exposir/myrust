@@ -11,9 +11,34 @@ use std::sync::Arc;
 
 use super::font::{default_font, FontFace, GlyphBitmap};
 use super::layout::Point;
-use super::paint::{Color, DisplayList, DrawCommand, GradientStop, Radius, Rect};
+use super::paint::{Color, DisplayList, DrawCommand, GradientStop, Radius, Rect, TextAlignment};
 use super::render::{color_to_array, intersect_rects, CommandCounts, RenderSize, TransformMatrix};
 use super::svg::{parse_svg_path, SvgContour};
+
+/// A collected text command for browser-native canvas2D rendering.
+#[derive(Debug, Clone)]
+pub struct TextRenderCommand {
+    /// The x coordinate (adjusted for alignment within max_width).
+    pub x: f32,
+    /// The y coordinate (top of this line).
+    pub y: f32,
+    /// The text to render.
+    pub text: String,
+    /// Font size.
+    pub font_size: f32,
+    /// Font weight (400 normal, 700 bold).
+    pub weight: u16,
+    /// Text color.
+    pub color: Color,
+    /// Maximum width for alignment, or None.
+    pub max_width: Option<f32>,
+    /// Text alignment.
+    pub alignment: TextAlignment,
+    /// Accumulated 2D affine matrix [m11, m12, m21, m22, tx, ty].
+    pub transform: [f32; 6],
+    /// Raster-space clip rectangle `[x, y, width, height]`, if any.
+    pub clip: Option<[f32; 4]>,
+}
 
 /// Error produced while rasterizing a display list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -85,6 +110,27 @@ impl CpuRasterizer {
         background: Color,
         font: Option<Arc<FontFace>>,
     ) -> Result<CpuFrame, RasterError> {
+        Self::rasterize_inner(display_list, size, background, font, false).map(|(frame, _)| frame)
+    }
+
+    /// Like [`rasterize_with_font`] but skips text drawing and returns collected
+    /// text commands for browser-native canvas2D rendering.
+    pub fn rasterize_with_font_collect_text(
+        display_list: &DisplayList,
+        size: RenderSize,
+        background: Color,
+        font: Option<Arc<FontFace>>,
+    ) -> Result<(CpuFrame, Vec<TextRenderCommand>), RasterError> {
+        Self::rasterize_inner(display_list, size, background, font, true)
+    }
+
+    fn rasterize_inner(
+        display_list: &DisplayList,
+        size: RenderSize,
+        background: Color,
+        font: Option<Arc<FontFace>>,
+        collect_text: bool,
+    ) -> Result<(CpuFrame, Vec<TextRenderCommand>), RasterError> {
         if size.is_empty() {
             return Err(RasterError::InvalidSize {
                 width: size.width,
@@ -92,6 +138,7 @@ impl CpuRasterizer {
             });
         }
         let mut canvas = Canvas::new(size, background, font);
+        canvas.collect_text_only = collect_text;
         let mut transform = TransformMatrix::IDENTITY;
         let mut transform_stack = Vec::new();
         let mut scissor = None;
@@ -155,15 +202,35 @@ impl CpuRasterizer {
                             }
                         }
                     }
-                    canvas.draw_text(
-                        transform,
-                        scissor,
-                        Point::new(draw_x, *y),
-                        text,
-                        *font_size,
-                        *weight,
-                        *color,
-                    );
+                    if collect_text {
+                        let line_height = canvas.line_height(*font_size);
+                        for (index, line) in text.split('\n').enumerate() {
+                            canvas.text_commands.push(TextRenderCommand {
+                                x: draw_x,
+                                y: *y + index as f32 * line_height,
+                                text: line.to_string(),
+                                font_size: *font_size,
+                                weight: *weight,
+                                color: *color,
+                                max_width: *max_width,
+                                alignment: *alignment,
+                                transform: transform.to_array(),
+                                clip: scissor.map(|rect| {
+                                    [rect.x, rect.y, rect.width, rect.height]
+                                }),
+                            });
+                        }
+                    } else {
+                        canvas.draw_text(
+                            transform,
+                            scissor,
+                            Point::new(draw_x, *y),
+                            text,
+                            *font_size,
+                            *weight,
+                            *color,
+                        );
+                    }
                 }
                 DrawCommand::SvgPath {
                     path,
@@ -258,15 +325,19 @@ impl CpuRasterizer {
             }
         }
 
+        let text_commands = std::mem::take(&mut canvas.text_commands);
         let unsupported_commands = canvas.command_counts.image;
-        Ok(CpuFrame {
-            width: size.width,
-            height: size.height,
-            pixels: canvas.pixels,
-            command_counts: canvas.command_counts,
-            unsupported_commands,
-            unsupported_glyphs: canvas.unsupported_glyphs,
-        })
+        Ok((
+            CpuFrame {
+                width: size.width,
+                height: size.height,
+                pixels: canvas.pixels,
+                command_counts: canvas.command_counts,
+                unsupported_commands,
+                unsupported_glyphs: canvas.unsupported_glyphs,
+            },
+            text_commands,
+        ))
     }
 }
 
@@ -277,6 +348,8 @@ struct Canvas {
     command_counts: CommandCounts,
     unsupported_glyphs: usize,
     font: Option<Arc<FontFace>>,
+    text_commands: Vec<TextRenderCommand>,
+    collect_text_only: bool,
 }
 
 impl Canvas {
@@ -289,6 +362,8 @@ impl Canvas {
             command_counts: CommandCounts::default(),
             unsupported_glyphs: 0,
             font,
+            text_commands: Vec::new(),
+            collect_text_only: false,
         }
     }
 
@@ -299,19 +374,158 @@ impl Canvas {
         rect: Rect,
         color: Color,
     ) {
-        let points = [
-            Point::new(rect.x, rect.y),
-            Point::new(rect.right(), rect.y),
-            Point::new(rect.right(), rect.bottom()),
-            Point::new(rect.x, rect.bottom()),
+        let corners = [
+            transform.apply(Point::new(rect.x, rect.y)),
+            transform.apply(Point::new(rect.right(), rect.y)),
+            transform.apply(Point::new(rect.right(), rect.bottom())),
+            transform.apply(Point::new(rect.x, rect.bottom())),
         ];
+        if (corners[0].y - corners[1].y).abs() < 0.001
+            && (corners[1].x - corners[2].x).abs() < 0.001
+            && (corners[2].y - corners[3].y).abs() < 0.001
+            && (corners[3].x - corners[0].x).abs() < 0.001
+        {
+            let left = corners.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+            let top = corners.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+            let right = corners.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
+            let bottom = corners.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
+            self.fill_axis_aligned_rect(scissor, Rect::new(left, top, right - left, bottom - top), color);
+            return;
+        }
         let color = color_to_array(color);
         self.fill_triangle(
-            transform, scissor, points[0], points[1], points[2], [color; 3],
+            transform, scissor, corners[0], corners[1], corners[2], [color; 3],
         );
         self.fill_triangle(
-            transform, scissor, points[0], points[2], points[3], [color; 3],
+            transform, scissor, corners[0], corners[2], corners[3], [color; 3],
         );
+    }
+
+    fn fill_axis_aligned_rect(&mut self, scissor: Option<Rect>, rect: Rect, color: Color) {
+        if rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+        let color = color_to_array(color);
+        let mut min_x = rect.x.floor().max(0.0) as u32;
+        let mut min_y = rect.y.floor().max(0.0) as u32;
+        let mut max_x = rect.right().ceil().min(self.width as f32) as u32;
+        let mut max_y = rect.bottom().ceil().min(self.height as f32) as u32;
+        if let Some(clip) = scissor {
+            min_x = min_x.max(clip.x.max(0.0).floor() as u32);
+            min_y = min_y.max(clip.y.max(0.0).floor() as u32);
+            max_x = max_x.min(clip.right().ceil().clamp(0.0, self.width as f32) as u32);
+            max_y = max_y.min(clip.bottom().ceil().clamp(0.0, self.height as f32) as u32);
+        }
+        if min_x >= max_x || min_y >= max_y {
+            return;
+        }
+        for y in min_y..max_y {
+            for x in min_x..max_x {
+                let overlap_x = (rect.right().min(x as f32 + 1.0) - rect.x.max(x as f32)).max(0.0);
+                let overlap_y = (rect.bottom().min(y as f32 + 1.0) - rect.y.max(y as f32)).max(0.0);
+                let coverage = overlap_x * overlap_y;
+                if coverage > 0.0 {
+                    let mut blended = color;
+                    blended[3] *= coverage;
+                    self.blend(x, y, blended);
+                }
+            }
+        }
+    }
+
+    fn fill_axis_aligned_rounded_rect(
+        &mut self,
+        scissor: Option<Rect>,
+        rect: Rect,
+        radii: [f32; 4],
+        color: Color,
+        transform: TransformMatrix,
+    ) {
+        if rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+        let corners = [
+            transform.apply(Point::new(rect.x, rect.y)),
+            transform.apply(Point::new(rect.right(), rect.y)),
+            transform.apply(Point::new(rect.right(), rect.bottom())),
+            transform.apply(Point::new(rect.x, rect.bottom())),
+        ];
+        let left = corners.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+        let top = corners.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+        let right = corners.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
+        let bottom = corners.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
+        let mut min_x = left.floor().max(0.0) as u32;
+        let mut min_y = top.floor().max(0.0) as u32;
+        let mut max_x = right.ceil().min(self.width as f32) as u32;
+        let mut max_y = bottom.ceil().min(self.height as f32) as u32;
+        if let Some(clip) = scissor {
+            min_x = min_x.max(clip.x.max(0.0).floor() as u32);
+            min_y = min_y.max(clip.y.max(0.0).floor() as u32);
+            max_x = max_x.min(clip.right().ceil().clamp(0.0, self.width as f32) as u32);
+            max_y = max_y.min(clip.bottom().ceil().clamp(0.0, self.height as f32) as u32);
+        }
+        if min_x >= max_x || min_y >= max_y {
+            return;
+        }
+        let color = color_to_array(color);
+        let matrix = transform.to_array();
+        let inv_x = if matrix[0].abs() > f32::EPSILON { 1.0 / matrix[0] } else { 0.0 };
+        let inv_y = if matrix[3].abs() > f32::EPSILON { 1.0 / matrix[3] } else { 0.0 };
+        // Elliptical corners only need four coverage levels to look smooth;
+        // 4x4 would spend 4x the samples across the whole panel.
+        const SAMPLE: u32 = 2;
+        for y in min_y..max_y {
+            for x in min_x..max_x {
+                let px0 = (x as f32 - matrix[4]) * inv_x;
+                let px1 = (x as f32 + 1.0 - matrix[4]) * inv_x;
+                let py0 = (y as f32 - matrix[5]) * inv_y;
+                let py1 = (y as f32 + 1.0 - matrix[5]) * inv_y;
+                let lx0 = px0.min(px1);
+                let lx1 = px0.max(px1);
+                let ly0 = py0.min(py1);
+                let ly1 = py0.max(py1);
+                let pixel_w = (lx1 - lx0).abs().max(0.0001);
+                let pixel_h = (ly1 - ly0).abs().max(0.0001);
+                let in_corner = (lx1 <= rect.x + radii[0] + pixel_w
+                    && ly1 <= rect.y + radii[0] + pixel_h)
+                    || (lx0 >= rect.right() - radii[1] - pixel_w
+                        && ly1 <= rect.y + radii[1] + pixel_h)
+                    || (lx0 >= rect.right() - radii[2] - pixel_w
+                        && ly0 >= rect.bottom() - radii[2] - pixel_h)
+                    || (lx1 <= rect.x + radii[3] + pixel_w
+                        && ly0 >= rect.bottom() - radii[3] - pixel_h);
+                if in_corner {
+                    let mut covered = 0_u32;
+                    for sy in 0..SAMPLE {
+                        for sx in 0..SAMPLE {
+                            let sx_local = lx0
+                                + (sx as f32 + 0.5) / SAMPLE as f32 * pixel_w;
+                            let sy_local = ly0
+                                + (sy as f32 + 0.5) / SAMPLE as f32 * pixel_h;
+                            if inside_rounded_rect(rect, radii, sx_local, sy_local) {
+                                covered += 1;
+                            }
+                        }
+                    }
+                    if covered > 0 {
+                        let mut blended = color;
+                        blended[3] *= covered as f32 / 4.0;
+                        self.blend(x, y, blended);
+                    }
+                } else {
+                    let overlap_x =
+                        (lx1.min(rect.right()) - lx0.max(rect.x)).max(0.0);
+                    let overlap_y =
+                        (ly1.min(rect.bottom()) - ly0.max(rect.y)).max(0.0);
+                    let coverage = (overlap_x * overlap_y) / (pixel_w * pixel_h);
+                    if coverage > 0.0 {
+                        let mut blended = color;
+                        blended[3] *= coverage.min(1.0);
+                        self.blend(x, y, blended);
+                    }
+                }
+            }
+        }
     }
 
     fn fill_rounded_rect(
@@ -330,6 +544,13 @@ impl Canvas {
         let tr = radius.top_right.clamp(0.0, maximum);
         let br = radius.bottom_right.clamp(0.0, maximum);
         let bl = radius.bottom_left.clamp(0.0, maximum);
+        let matrix = transform.to_array();
+        if matrix[1].abs() < 0.0001 && matrix[2].abs() < 0.0001 {
+            self.fill_axis_aligned_rounded_rect(
+                scissor, rect, [tl, tr, br, bl], color, transform,
+            );
+            return;
+        }
         let mut points = Vec::with_capacity(28);
         add_arc(
             &mut points,
@@ -431,12 +652,38 @@ impl Canvas {
             Point::new(end.x - normal.x, end.y - normal.y),
             Point::new(start.x - normal.x, start.y - normal.y),
         ];
+        let transformed = [
+            transform.apply(points[0]),
+            transform.apply(points[1]),
+            transform.apply(points[2]),
+            transform.apply(points[3]),
+        ];
+        let axis_aligned = ((transformed[0].x - transformed[1].x).abs() < 0.001
+            && (transformed[1].y - transformed[2].y).abs() < 0.001
+            && (transformed[2].x - transformed[3].x).abs() < 0.001
+            && (transformed[3].y - transformed[0].y).abs() < 0.001)
+            || ((transformed[0].y - transformed[1].y).abs() < 0.001
+                && (transformed[1].x - transformed[2].x).abs() < 0.001
+                && (transformed[2].y - transformed[3].y).abs() < 0.001
+                && (transformed[3].x - transformed[0].x).abs() < 0.001);
+        if axis_aligned {
+            let left = transformed.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+            let top = transformed.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+            let right = transformed.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
+            let bottom = transformed.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
+            self.fill_axis_aligned_rect(
+                scissor,
+                Rect::new(left, top, right - left, bottom - top),
+                color,
+            );
+            return;
+        }
         let color = color_to_array(color);
         self.fill_triangle(
-            transform, scissor, points[0], points[1], points[2], [color; 3],
+            transform, scissor, transformed[0], transformed[1], transformed[2], [color; 3],
         );
         self.fill_triangle(
-            transform, scissor, points[0], points[2], points[3], [color; 3],
+            transform, scissor, transformed[0], transformed[2], transformed[3], [color; 3],
         );
     }
 
@@ -469,6 +716,51 @@ impl Canvas {
                 gradient_offset(start, end, normalized),
             ))
         });
+        let matrix = transform.to_array();
+        if matrix[1].abs() < 0.0001 && matrix[2].abs() < 0.0001 {
+            let left = corners[0].0.x.min(corners[2].0.x);
+            let top = corners[0].0.y.min(corners[2].0.y);
+            let right = corners[0].0.x.max(corners[2].0.x);
+            let bottom = corners[0].0.y.max(corners[2].0.y);
+            let width = (right - left).max(1.0);
+            let height = (bottom - top).max(1.0);
+            let mut min_x = left.floor().max(0.0) as u32;
+            let mut min_y = top.floor().max(0.0) as u32;
+            let mut max_x = right.ceil().min(self.width as f32) as u32;
+            let mut max_y = bottom.ceil().min(self.height as f32) as u32;
+            if let Some(clip) = scissor {
+                min_x = min_x.max(clip.x.max(0.0).floor() as u32);
+                min_y = min_y.max(clip.y.max(0.0).floor() as u32);
+                max_x = max_x.min(clip.right().ceil().clamp(0.0, self.width as f32) as u32);
+                max_y = max_y.min(clip.bottom().ceil().clamp(0.0, self.height as f32) as u32);
+            }
+            for y in min_y..max_y {
+                let v = (y as f32 + 0.5 - top) / height;
+                for x in min_x..max_x {
+                    let u = (x as f32 + 0.5 - left) / width;
+                    let top_color = [
+                        colors[0][0] + (colors[1][0] - colors[0][0]) * u,
+                        colors[0][1] + (colors[1][1] - colors[0][1]) * u,
+                        colors[0][2] + (colors[1][2] - colors[0][2]) * u,
+                        colors[0][3] + (colors[1][3] - colors[0][3]) * u,
+                    ];
+                    let bottom_color = [
+                        colors[3][0] + (colors[2][0] - colors[3][0]) * u,
+                        colors[3][1] + (colors[2][1] - colors[3][1]) * u,
+                        colors[3][2] + (colors[2][2] - colors[3][2]) * u,
+                        colors[3][3] + (colors[2][3] - colors[3][3]) * u,
+                    ];
+                    let color = [
+                        top_color[0] + (bottom_color[0] - top_color[0]) * v,
+                        top_color[1] + (bottom_color[1] - top_color[1]) * v,
+                        top_color[2] + (bottom_color[2] - top_color[2]) * v,
+                        top_color[3] + (bottom_color[3] - top_color[3]) * v,
+                    ];
+                    self.blend(x, y, color);
+                }
+            }
+            return;
+        }
         self.fill_triangle(
             transform,
             scissor,
@@ -495,6 +787,13 @@ impl Canvas {
                 .map(|character| font.glyph_advance(character, font_size))
                 .sum(),
             None => text.chars().count() as f32 * font_size * 0.6,
+        }
+    }
+
+    fn line_height(&self, font_size: f32) -> f32 {
+        match self.font.as_ref() {
+            Some(font) => font.line_height(font_size),
+            None => font_size * 1.25,
         }
     }
 
@@ -686,6 +985,16 @@ impl Canvas {
         }
 
         let inverse_area = 1.0 / area.abs();
+        // Half-pixel extents of the edge function gradients. A pixel is fully
+        // covered when all three signed edge values exceed these margins; only
+        // boundary pixels need the 4x4 coverage samples.
+        let margins = [
+            (b.x - c.x).abs() + (b.y - c.y).abs(),
+            (c.x - a.x).abs() + (c.y - a.y).abs(),
+            (a.x - b.x).abs() + (a.y - b.y).abs(),
+        ];
+        const SAMPLE: u32 = 4;
+        const SAMPLE_COUNT: u32 = SAMPLE * SAMPLE;
         for y in min_y..max_y {
             for x in min_x..max_x {
                 let point = Point::new(x as f32 + 0.5, y as f32 + 0.5);
@@ -694,12 +1003,15 @@ impl Canvas {
                     edge(c, a, point) * sign,
                     edge(a, b, point) * sign,
                 ];
-                if weights.iter().all(|weight| *weight >= -0.0001) {
-                    let normalized = [
-                        weights[0] * inverse_area,
-                        weights[1] * inverse_area,
-                        weights[2] * inverse_area,
-                    ];
+                let normalized = [
+                    weights[0] * inverse_area,
+                    weights[1] * inverse_area,
+                    weights[2] * inverse_area,
+                ];
+                let fully_covered = weights[0] >= margins[0] * 0.5
+                    && weights[1] >= margins[1] * 0.5
+                    && weights[2] >= margins[2] * 0.5;
+                if fully_covered {
                     let color = [
                         colors[0][0] * normalized[0]
                             + colors[1][0] * normalized[1]
@@ -715,11 +1027,57 @@ impl Canvas {
                             + colors[2][3] * normalized[2],
                     ];
                     self.blend(x, y, color);
+                    continue;
+                }
+
+                let mut covered = 0_u32;
+                let mut accumulated = [0.0_f32; 4];
+                for sy in 0..SAMPLE {
+                    for sx in 0..SAMPLE {
+                        let sample = Point::new(
+                            x as f32 + (sx as f32 + 0.5) / SAMPLE as f32,
+                            y as f32 + (sy as f32 + 0.5) / SAMPLE as f32,
+                        );
+                        let sample_weights = [
+                            edge(b, c, sample) * sign,
+                            edge(c, a, sample) * sign,
+                            edge(a, b, sample) * sign,
+                        ];
+                        if sample_weights.iter().all(|weight| *weight >= -0.0001) {
+                            covered += 1;
+                            let sample_norm = [
+                                sample_weights[0] * inverse_area,
+                                sample_weights[1] * inverse_area,
+                                sample_weights[2] * inverse_area,
+                            ];
+                            for channel in 0..3 {
+                                accumulated[channel] += colors[0][channel] * sample_norm[0]
+                                    + colors[1][channel] * sample_norm[1]
+                                    + colors[2][channel] * sample_norm[2];
+                            }
+                            accumulated[3] += colors[0][3] * sample_norm[0]
+                                + colors[1][3] * sample_norm[1]
+                                + colors[2][3] * sample_norm[2];
+                        }
+                    }
+                }
+                if covered > 0 {
+                    let coverage = covered as f32 / SAMPLE_COUNT as f32;
+                    let divisor = covered as f32;
+                    self.blend(
+                        x,
+                        y,
+                        [
+                            accumulated[0] / divisor,
+                            accumulated[1] / divisor,
+                            accumulated[2] / divisor,
+                            (accumulated[3] / divisor) * coverage,
+                        ],
+                    );
                 }
             }
         }
     }
-
     fn fill_contours(
         &mut self,
         transform: TransformMatrix,
@@ -852,12 +1210,43 @@ impl Canvas {
 }
 
 fn add_arc(points: &mut Vec<Point>, center: Point, radius: f32, start: f32, end: f32) {
-    for segment in 0..=6 {
-        let angle = start + (end - start) * segment as f32 / 6.0;
+    // Use enough segments that a large radius does not become a visible
+    // polyline; small controls keep the original six-segment floor.
+    let span = (end - start).abs();
+    let segments = ((radius * span / 4.0).ceil() as usize).clamp(6, 128);
+    for segment in 0..=segments {
+        let angle = start + (end - start) * segment as f32 / segments as f32;
         points.push(Point::new(
             center.x + radius * angle.cos(),
             center.y + radius * angle.sin(),
         ));
+    }
+}
+
+
+fn inside_rounded_rect(rect: Rect, radii: [f32; 4], x: f32, y: f32) -> bool {
+    if x < rect.x || x > rect.right() || y < rect.y || y > rect.bottom() {
+        return false;
+    }
+    let (tl, tr, br, bl) = (radii[0], radii[1], radii[2], radii[3]);
+    if x < rect.x + tl && y < rect.y + tl {
+        let dx = x - (rect.x + tl);
+        let dy = y - (rect.y + tl);
+        dx * dx + dy * dy <= tl * tl
+    } else if x > rect.right() - tr && y < rect.y + tr {
+        let dx = x - (rect.right() - tr);
+        let dy = y - (rect.y + tr);
+        dx * dx + dy * dy <= tr * tr
+    } else if x > rect.right() - br && y > rect.bottom() - br {
+        let dx = x - (rect.right() - br);
+        let dy = y - (rect.bottom() - br);
+        dx * dx + dy * dy <= br * br
+    } else if x < rect.x + bl && y > rect.bottom() - bl {
+        let dx = x - (rect.x + bl);
+        let dy = y - (rect.bottom() - bl);
+        dx * dx + dy * dy <= bl * bl
+    } else {
+        true
     }
 }
 

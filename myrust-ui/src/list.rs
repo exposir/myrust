@@ -15,6 +15,10 @@ pub struct ListRow<'a> {
     pub label: &'a str,
     /// Explicit row height, or `None` for the list default.
     pub height: Option<f32>,
+    /// Optional built-in icon before the label.
+    pub icon: Option<&'a str>,
+    /// Optional right-aligned metadata text.
+    pub detail: Option<&'a str>,
 }
 
 impl<'a> ListRow<'a> {
@@ -24,12 +28,26 @@ impl<'a> ListRow<'a> {
             id,
             label,
             height: None,
+            icon: None,
+            detail: None,
         }
     }
 
     /// Sets an explicit row height.
     pub const fn with_height(mut self, height: f32) -> Self {
         self.height = Some(height);
+        self
+    }
+
+    /// Adds an optional built-in icon before the label.
+    pub const fn icon(mut self, icon: &'a str) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    /// Adds optional right-aligned metadata.
+    pub const fn detail(mut self, detail: &'a str) -> Self {
+        self.detail = Some(detail);
         self
     }
 }

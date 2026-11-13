@@ -104,13 +104,13 @@ impl Theme {
     /// Built-in dark theme matching the existing native Dashboard.
     pub fn dark() -> Self {
         Self {
-            background: Color::rgb(10, 13, 20),
-            surface: Color::rgb(17, 24, 39),
-            foreground: Color::rgb(241, 245, 249),
-            muted: Color::rgb(142, 158, 178),
+            background: Color::rgb(24, 24, 27),
+            surface: Color::rgb(39, 39, 42),
+            foreground: Color::rgb(244, 244, 245),
+            muted: Color::rgb(161, 161, 169),
             accent: Color::rgb(34, 211, 238),
             on_accent: Color::rgb(11, 13, 18),
-            border: Color::rgb(51, 65, 85),
+            border: Color::rgb(63, 63, 69),
             spacing: Spacing::default(),
             font_family: "DejaVu Sans".to_string(),
             font_sizes: FontSizes::default(),

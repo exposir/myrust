@@ -1,30 +1,30 @@
 //! Raw C-ABI wasm entry points for `/docs-demo`.
 //!
 //! The JavaScript host supplies `env.myrust_now_ms` and reads the RGBA buffer
-//! through `demo_buffer_ptr`/`demo_render`. No wasm-bindgen or JS glue is used.
+//! through `demo_command_ptr`/`demo_command_len` and `demo_render`. No wasm-bindgen or JS glue is used.
 
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
-    sync::{Arc, OnceLock},
+    sync::{Arc, OnceLock, atomic::{AtomicBool, Ordering}},
 };
 
 use myrust_ui::{
-    accordion, alert_dialog, autocomplete, back_forward_buttons, breadcrumbs, button, button_primary, button_with_icon, calendar,
-    checkbox, checkbox_labeled, code_editor, collapsible, color_picker, combobox, column, container, context_menu,    date_input, decimal_input, dialog, diff_viewer, drag_source, drop_target, editable_text,
+    accordion, alert_dialog, autocomplete, back_forward_buttons, breadcrumbs, button, icon_button, button_primary_with_icon, button_with_icon, calendar,
+    checkbox, checkbox_labeled, checkbox_indeterminate, code_editor, collapsible, color_picker, combobox, column, container, context_menu,    date_input, decimal_input, dialog, diff_viewer, drag_source, drop_target, editable_text,
     find_bar, form_field, format_date, format_number, frame_stats_panel, grid, grid_view, inspector,
     link, list, menu_button, number_input, outline, overlay, popover, radio_group, range_slider,
     rating, rich_text, row, router, scroll_view, search_field, segmented, select, sidebar, slider,
-    spinner, split_view, stepper, switch, tabs, table, text, text_field, time_input, toasts,
+    spinner, split_view, stepper, switch, tabs, table, text, text_area, text_field, text_field_password, time_input, toasts,
     token_field, toggle, toolbar, tooltip_for, transition, tree, avatar, badge, bar_chart, icon,
-    image, line_chart, meter, progress, Animation, AccordionMode, AccordionSection,
+    image, line_chart, meter, progress, progress_indeterminate, Animation, AccordionMode, AccordionSection,
     AccordionState, AutocompleteState, AvatarShape, BreadcrumbItem, CalendarState,
     CodeEditorState, ColorPickerState, ComboboxState, ContextMenuState, DateInputState, DateStyle,
-    DecimalInputOptions, DialogAction, DiffViewerState, Direction, Color, Context, CpuRasterizer,
-    DisplayList, DragState, DrawCommand, Duration, Easing, EditableTextState, FontFace,
+    DecimalInputOptions, DialogAction, DiffViewerState, Direction, Color, Context,
+    DragState, DrawCommand, Duration, Easing, EditableTextState, FontFace,
     GridViewState, ImageData, InspectorItem, InspectorTree, ListRow, ListState, Locale, MenuState,
     NativeUi,
-    NumberInputOptions, OverlayState, Page, PaintSummary, RangeSliderState, RenderSize, Role,
+    NumberInputOptions, OverlayState, Page, PaintSummary, RangeSliderState, Role,
     RouterState, SidebarItem, SidebarSection, Size, SplitOrientation, SplitViewState, TableColumn,
     TableRow, TableState, Theme, ToastQueue, ToggleGroup, ToolbarItem, ToolbarState,
     Transform, TransitionState, TreeState, TreeNode,
@@ -32,7 +32,7 @@ use myrust_ui::{
 
 thread_local! {
     static APP: RefCell<Option<DemoApp>> = const { RefCell::new(None) };
-    static OUTPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static COMMAND_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
 static FONT: OnceLock<Option<Arc<FontFace>>> = OnceLock::new();
@@ -41,7 +41,7 @@ fn stack<F: FnOnce(&mut Context)>(context: &mut Context, width: f32, gap: f32, c
     column(context).fill().center().children(|context| {
         column(context)
             .width(width)
-            .gap(gap)
+            .gap(gap.max(20.0))
             .center()
             .children(children);
     });
@@ -81,9 +81,14 @@ impl DemoApp {
                 })
             }
             1 => {
+                let copied = Rc::new(Cell::new(false));
+                let mode = Rc::new(Cell::new(2_usize));
                 let view_frame = Rc::clone(&frame);
+                let view_copied = Rc::clone(&copied);
+                let view_mode = Rc::clone(&mode);
+                let view_probe = Rc::clone(&probe);
                 NativeUi::new(move |context| {
-                    markdown_demo(context, &view_frame);
+                    markdown_demo(context, &view_frame, &view_copied, &view_mode, &view_probe);
                 })
             }
             2 => {
@@ -330,18 +335,22 @@ impl DemoApp {
             }
             31 => {
                 let values = Rc::new(RefCell::new([true, false, true, true, false, true]));
+                let indeterminate = Rc::new(Cell::new(true));
                 let view_values = Rc::clone(&values);
+                let view_indeterminate = Rc::clone(&indeterminate);
                 let view_probe = Rc::clone(&probe);
                 NativeUi::new(move |context| {
-                    checkbox_demo(context, &view_values, &view_probe);
+                    checkbox_demo(context, &view_values, &view_indeterminate, &view_probe);
                 })
             }
             32 => {
-                let value = Rc::new(Cell::new(false));
-                let view_value = Rc::clone(&value);
+                let wifi = Rc::new(Cell::new(true));
+                let bluetooth = Rc::new(Cell::new(false));
+                let view_wifi = Rc::clone(&wifi);
+                let view_bluetooth = Rc::clone(&bluetooth);
                 let view_probe = Rc::clone(&probe);
                 NativeUi::new(move |context| {
-                    switch_demo(context, &view_value, &view_probe);
+                    switch_demo(context, &view_wifi, &view_bluetooth, &view_probe);
                 })
             }
             33 => {
@@ -363,11 +372,13 @@ impl DemoApp {
                 })
             }
             35 => {
-                let value = Rc::new(Cell::new(0.0_f32));
-                let view_value = Rc::clone(&value);
+                let volume = Rc::new(Cell::new(35.0_f32));
+                let quality = Rc::new(Cell::new(75.0_f32));
+                let view_volume = Rc::clone(&volume);
+                let view_quality = Rc::clone(&quality);
                 let view_probe = Rc::clone(&probe);
                 NativeUi::new(move |context| {
-                    slider_demo(context, &view_value, &view_probe);
+                    slider_demo(context, &view_volume, &view_quality, &view_probe);
                 })
             }
             36 => {
@@ -395,10 +406,16 @@ impl DemoApp {
                 })
             }
             39 => {
-                let value = Rc::new(RefCell::new("Hello, MyRust".to_string()));
+                let value = Rc::new(RefCell::new("Ada Lovelace".to_string()));
+                let password = Rc::new(RefCell::new("hunter2".to_string()));
+                let notes = Rc::new(RefCell::new("Line one\nLine two".to_string()));
                 let view_value = Rc::clone(&value);
+                let view_password = Rc::clone(&password);
+                let view_notes = Rc::clone(&notes);
                 let view_probe = Rc::clone(&probe);
-                NativeUi::new(move |context| text_input_demo(context, &view_value, &view_probe))
+                NativeUi::new(move |context| {
+                    text_input_demo(context, &view_value, &view_password, &view_notes, &view_probe)
+                })
             }
             40 => {
                 let value = Rc::new(RefCell::new("hello".to_string()));
@@ -604,9 +621,15 @@ impl DemoApp {
                     open: vec!["one".to_string()],
                     mode: AccordionMode::Single,
                 }));
+                let value = Rc::new(RefCell::new("Ada's Mac".to_string()));
+                let notify = Rc::new(Cell::new(true));
                 let view_state = Rc::clone(&state);
+                let view_value = Rc::clone(&value);
+                let view_notify = Rc::clone(&notify);
                 let view_probe = Rc::clone(&probe);
-                NativeUi::new(move |context| accordion_demo(context, &view_state, &view_probe))
+                NativeUi::new(move |context| {
+                    accordion_demo(context, &view_state, &view_value, &view_notify, &view_probe)
+                })
             }
             66 => {
                 let value = Rc::new(RefCell::new(String::new()));
@@ -737,70 +760,31 @@ fn tabs_demo(
     selected: &Rc<RefCell<usize>>,
     notify: &Rc<Cell<bool>>,
     sounds: &Rc<Cell<bool>>,
-    frame: &Rc<Cell<u64>>,
+    _frame: &Rc<Cell<u64>>,
     probe: &Rc<Cell<i32>>,
 ) {
-    let tick = frame.get();
-    frame.set(tick.wrapping_add(1));
-    column(context)
-        .fill()
-        .padding(18.0)
-        .gap(14.0)
-        .children(|context| {
-            myrust_ui::row(context).gap(8.0).children(|context| {
-                text(context, "Tabs")
-                    .font_size(22.0)
-                    .bold()
-                    .color(Color::rgb(241, 245, 249));
-                let radius = 3.0 + (tick % 3) as f32;
-                container(context)
-                    .size(10.0, 10.0)
-                    .draw([DrawCommand::Circle {
-                        x: 5.0,
-                        y: 5.0,
-                        radius,
-                        color: Color::rgb(34, 211, 238),
-                    }]);
-            });
-            text(
-                context,
-                "Click a tab to focus it, then use Left/Right. The selected index is caller-owned.",
-            )
-            .font_size(12.0)
-            .color(Color::rgb(148, 163, 184));
-            let mut item = selected.borrow_mut();
-            let state = tabs(
-                context,
-                "docs-demo-tabs",
-                &mut item,
-                &["General", "Appearance", "Advanced"],
-            );
-            let body = match *item {
-                0 => "General settings live here.",
-                1 => "Appearance: theme, density, and contrast.",
-                _ => "Advanced: diagnostics and developer tools.",
-            };
-            text(context, body)
-                .font_size(15.0)
-                .color(Color::rgb(226, 232, 240));
-            if *item == 0 {
-                let mut checked = notify.get();
-                if checkbox_labeled(context, "docs-demo-tab-notify", "Show notifications", &mut checked).changed {
-                    notify.set(checked);
-                }
-                let mut checked = sounds.get();
-                if checkbox_labeled(context, "docs-demo-tab-sounds", "Play sounds", &mut checked).changed {
-                    sounds.set(checked);
-                }
+    context.set_widgets_disabled(DEMO_DISABLED.load(Ordering::Relaxed));
+    column(context).fill().padding(16.0).gap(8.0).children(|context| {
+        let mut item = selected.borrow_mut();
+        let state = tabs(
+            context,
+            "docs-demo-tabs",
+            &mut item,
+            &["General", "Appearance", "Advanced"],
+        );
+        if *item == 0 {
+            let mut checked = notify.get();
+            if checkbox_labeled(context, "docs-demo-tab-notify", "Show notifications", &mut checked).changed {
+                notify.set(checked);
             }
-            text(context, &format!("selected = {}", state.selected))
-                .font_size(12.0)
-                .color(Color::rgb(34, 211, 238));
-            probe.set(state.selected as i32);
-
-        });
+            let mut checked = sounds.get();
+            if checkbox_labeled(context, "docs-demo-tab-sounds", "Play sounds", &mut checked).changed {
+                sounds.set(checked);
+            }
+        }
+        probe.set(state.selected as i32);
+    });
 }
-
 
 fn views_demo(context: &mut Context, counter: &Rc<Cell<i32>>, probe: &Rc<Cell<i32>>) {
     let value = counter.get();
@@ -989,6 +973,18 @@ fn drag_demo(
         });
 }
 
+static DEMO_DISABLED: AtomicBool = AtomicBool::new(false);
+
+#[no_mangle]
+pub extern "C" fn demo_set_disabled(disabled: u32) {
+    DEMO_DISABLED.store(disabled != 0, Ordering::Relaxed);
+}
+
+#[no_mangle]
+pub extern "C" fn demo_get_disabled() -> u32 {
+    DEMO_DISABLED.load(Ordering::Relaxed) as u32
+}
+
 const MARKDOWN: &str = r#"# MyRust Markdown
 
 A small, predictable Markdown renderer for native UI.
@@ -1022,31 +1018,56 @@ The Markdown root is a Group labelled by its stable id.
 Each inline span is a Label whose value is plain, bold, italic, code or link.
 "#;
 
-fn markdown_demo(context: &mut Context, frame: &Rc<Cell<u64>>) {
+fn markdown_demo(
+    context: &mut Context,
+    frame: &Rc<Cell<u64>>,
+    copied: &Rc<Cell<bool>>,
+    mode: &Rc<Cell<usize>>,
+    probe: &Rc<Cell<i32>>,
+) {
     let tick = frame.get();
     frame.set(tick.wrapping_add(1));
-    let height = (context.available_size().height - 24.0).max(80.0);
-    column(context)
-        .fill()
-        .padding(16.0)
-        .gap(8.0)
-        .children(|context| {
-            scroll_view(context, "docs-demo-markdown", height, |context| {
-                context.markdown("docs-demo-markdown-body", MARKDOWN);
+    let lines: Vec<&str> = MARKDOWN.lines().collect();
+    let mut selected = mode.get();
+    let reveal = ((tick as usize)
+        .saturating_mul([1_usize, 2, 8, 12][selected.min(3)]))
+    .max(1)
+    .min(lines.len());
+    if reveal < lines.len() {
+        context.request_animation_frame();
+    }
+    let body = lines[..reveal].join("\n");
+    let height = (context.available_size().height - 88.0).max(80.0);
+    column(context).fill().padding(16.0).gap(8.0).children(|context| {
+        row(context).gap(8.0).children(|context| {
+            if button(context, "Stream it").clicked {
+                frame.set(0);
+                copied.set(false);
+                probe.set(1);
+            }
+            container(context).width(280.0).children(|context| {
+                let response = segmented(context, "docs-demo-md-mode", &mut selected, &["Word", "Sentence", "Line", "Paragraph"]);
+                if response.changed {
+                    mode.set(selected);
+                    frame.set(0);
+                    probe.set(selected as i32 + 2);
+                }
             });
-            text(context, "MyRust native Markdown demo")
-                .font_size(11.0)
-                .color(Color::rgb(100, 116, 139));
-            let radius = 2.0 + (tick % 2) as f32;
-            container(context)
-                .size(8.0, 8.0)
-                .draw([DrawCommand::Circle {
-                    x: 4.0,
-                    y: 4.0,
-                    radius,
-                    color: Color::rgb(34, 211, 238),
-                }]);
+            text(context, if reveal == lines.len() { "Markdown · complete" } else { "Markdown · streaming" })
+                .font_size(12.0)
+                .color(Color::rgb(161, 161, 169));
+            if button(context, if copied.get() { "Copied!" } else { "Copy" }).clicked {
+                copied.set(true);
+                probe.set(10);
+            }
         });
+        scroll_view(context, "docs-demo-markdown", height, |context| {
+            context.markdown("docs-demo-markdown-body", &body);
+        });
+        text(context, "MyRust native Markdown demo · line-by-line stream")
+            .font_size(11.0)
+            .color(Color::rgb(161, 161, 169));
+    });
 }
 
 fn font() -> Option<Arc<FontFace>> {
@@ -1061,6 +1082,205 @@ fn font() -> Option<Arc<FontFace>> {
     .clone()
 }
 
+#[derive(Clone, Copy)]
+struct CommandMatrix {
+    m11: f32,
+    m12: f32,
+    m21: f32,
+    m22: f32,
+    tx: f32,
+    ty: f32,
+}
+
+impl CommandMatrix {
+    fn scale(value: f32) -> Self {
+        Self { m11: value, m12: 0.0, m21: 0.0, m22: value, tx: 0.0, ty: 0.0 }
+    }
+
+    fn from_transform(transform: Transform) -> Self {
+        let cos = transform.rotation.cos();
+        let sin = transform.rotation.sin();
+        Self {
+            m11: cos * transform.scale.x,
+            m12: -sin * transform.scale.y,
+            m21: sin * transform.scale.x,
+            m22: cos * transform.scale.y,
+            tx: transform.translation.x,
+            ty: transform.translation.y,
+        }
+    }
+
+    fn then(self, child: Self) -> Self {
+        Self {
+            m11: self.m11 * child.m11 + self.m12 * child.m21,
+            m12: self.m11 * child.m12 + self.m12 * child.m22,
+            m21: self.m21 * child.m11 + self.m22 * child.m21,
+            m22: self.m21 * child.m12 + self.m22 * child.m22,
+            tx: self.m11 * child.tx + self.m12 * child.ty + self.tx,
+            ty: self.m21 * child.tx + self.m22 * child.ty + self.ty,
+        }
+    }
+
+    fn point(self, x: f32, y: f32) -> (f32, f32) {
+        (self.m11 * x + self.m12 * y + self.tx, self.m21 * x + self.m22 * y + self.ty)
+    }
+
+    fn rect_aabb(self, x: f32, y: f32, width: f32, height: f32) -> [f32; 4] {
+        let points = [
+            self.point(x, y),
+            self.point(x + width, y),
+            self.point(x + width, y + height),
+            self.point(x, y + height),
+        ];
+        let left = points.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
+        let top = points.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
+        let right = points.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
+        let bottom = points.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
+        [left, top, right - left, bottom - top]
+    }
+}
+
+fn push_color(buffer: &mut Vec<u8>, color: Color) {
+    buffer.extend_from_slice(&[color.r, color.g, color.b, color.a]);
+}
+
+fn text_width(font: Option<&FontFace>, text: &str, font_size: f32) -> f32 {
+    let font_size = font_size.max(1.0);
+    match font {
+        Some(font) => text
+            .chars()
+            .map(|character| font.glyph_advance(character, font_size))
+            .sum(),
+        None => text.chars().count() as f32 * font_size * 0.6,
+    }
+}
+
+fn text_line_height(font: Option<&FontFace>, font_size: f32) -> f32 {
+    match font {
+        Some(font) => font.line_height(font_size),
+        None => font_size * 1.25,
+    }
+}
+
+fn serialize_commands(commands: &[DrawCommand], dpr: f32, font: Option<&FontFace>) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    let mut transform = CommandMatrix::scale(dpr);
+    let mut transform_stack: Vec<CommandMatrix> = Vec::new();
+    for command in commands {
+        match command {
+            DrawCommand::TransformPush { transform: local } => {
+                transform_stack.push(transform);
+                let local = CommandMatrix::from_transform(*local);
+                transform = transform.then(local);
+                buffer.push(9);
+                for value in [local.m11, local.m12, local.m21, local.m22, local.tx, local.ty] {
+                    buffer.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            DrawCommand::TransformPop => {
+                if transform_stack.pop().is_some() {
+                    buffer.push(10);
+                }
+            }
+            DrawCommand::ScissorPush { rect } => {
+                let [x, y, width, height] = transform.rect_aabb(rect.x, rect.y, rect.width, rect.height);
+                buffer.push(7);
+                for value in [x, y, width, height] {
+                    buffer.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            DrawCommand::ScissorPop => buffer.push(8),
+            DrawCommand::Rect { x, y, width, height, color } => {
+                buffer.push(0);
+                for value in [*x, *y, *width, *height] { buffer.extend_from_slice(&value.to_le_bytes()); }
+                push_color(&mut buffer, *color);
+            }
+            DrawCommand::RoundedRect { x, y, width, height, radius, color } => {
+                buffer.push(1);
+                for value in [*x, *y, *width, *height, radius.top_left, radius.top_right, radius.bottom_right, radius.bottom_left] {
+                    buffer.extend_from_slice(&value.to_le_bytes());
+                }
+                push_color(&mut buffer, *color);
+            }
+            DrawCommand::Circle { x, y, radius, color } => {
+                buffer.push(2);
+                for value in [*x, *y, *radius] { buffer.extend_from_slice(&value.to_le_bytes()); }
+                push_color(&mut buffer, *color);
+            }
+            DrawCommand::Line { x1, y1, x2, y2, width, color } => {
+                buffer.push(3);
+                for value in [*x1, *y1, *x2, *y2, *width] { buffer.extend_from_slice(&value.to_le_bytes()); }
+                push_color(&mut buffer, *color);
+            }
+            DrawCommand::Text { x, y, text, font_size, weight, color, max_width, alignment } => {
+                let mut draw_x = *x;
+                if let Some(max_width) = *max_width {
+                    if max_width.is_finite() && max_width > 0.0 {
+                        let widest = text
+                            .split('\n')
+                            .map(|line| text_width(font, line, *font_size))
+                            .fold(0.0_f32, f32::max);
+                        if widest <= max_width {
+                            draw_x += match alignment {
+                                myrust_ui::TextAlignment::Center => (max_width - widest) / 2.0,
+                                myrust_ui::TextAlignment::End => max_width - widest,
+                                myrust_ui::TextAlignment::Start => 0.0,
+                            };
+                        }
+                    }
+                }
+                let line_height = text_line_height(font, *font_size);
+                for (index, line) in text.split('\n').enumerate() {
+                    buffer.push(4);
+                    for value in [draw_x, *y + index as f32 * line_height, *font_size] {
+                        buffer.extend_from_slice(&value.to_le_bytes());
+                    }
+                    buffer.extend_from_slice(&weight.to_le_bytes());
+                    push_color(&mut buffer, *color);
+                    buffer.extend_from_slice(&max_width.unwrap_or(f32::NAN).to_le_bytes());
+                    buffer.push(match alignment {
+                        myrust_ui::TextAlignment::Start => 0,
+                        myrust_ui::TextAlignment::Center => 1,
+                        myrust_ui::TextAlignment::End => 2,
+                    });
+                    let bytes = line.as_bytes();
+                    buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    buffer.extend_from_slice(bytes);
+                }
+            }
+            DrawCommand::SvgPath { x, y, width, height, path, fill, stroke, stroke_width } => {
+                buffer.push(5);
+                for value in [*x, *y, *width, *height] { buffer.extend_from_slice(&value.to_le_bytes()); }
+                match fill {
+                    Some(color) => { buffer.push(1); push_color(&mut buffer, *color); }
+                    None => buffer.push(0),
+                }
+                match stroke {
+                    Some(color) => { buffer.push(1); push_color(&mut buffer, *color); }
+                    None => buffer.push(0),
+                }
+                buffer.extend_from_slice(&stroke_width.to_le_bytes());
+                let bytes = path.as_bytes();
+                buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                buffer.extend_from_slice(bytes);
+            }
+            DrawCommand::LinearGradient { x, y, width, height, start, end, stops } => {
+                buffer.push(6);
+                for value in [*x, *y, *width, *height, start.x, start.y, end.x, end.y] {
+                    buffer.extend_from_slice(&value.to_le_bytes());
+                }
+                buffer.extend_from_slice(&(stops.len() as u16).to_le_bytes());
+                for stop in stops {
+                    buffer.extend_from_slice(&stop.offset.to_le_bytes());
+                    push_color(&mut buffer, stop.color);
+                }
+            }
+            DrawCommand::Image { .. } => {}
+        }
+    }
+    buffer
+}
+
 #[no_mangle]
 pub extern "C" fn demo_render(slug: u32, width: f32, height: f32, dpr: f32) -> u32 {
     if !width.is_finite() || !height.is_finite() || width < 1.0 || height < 1.0 {
@@ -1068,62 +1288,38 @@ pub extern "C" fn demo_render(slug: u32, width: f32, height: f32, dpr: f32) -> u
     }
     let dpr = if dpr.is_finite() { dpr.clamp(1.0, 3.0) } else { 1.0 };
     let ui_font = font();
-    let pixel_width = (width * dpr).round().max(1.0) as u32;
-    let pixel_height = (height * dpr).round().max(1.0) as u32;
-    let mut rgba = Vec::new();
     let rendered = APP.with(|cell| {
         let mut app = cell.borrow_mut();
         if app.as_ref().map(|app| app.slug) != Some(slug) {
             *app = Some(DemoApp::new(slug));
         }
-        let Some(app) = app.as_mut() else {
-            return false;
-        };
+        let Some(app) = app.as_mut() else { return false; };
         let frame = match app.ui.render(Size::new(width, height)) {
             Ok(frame) => frame,
             Err(_) => return false,
         };
-        let mut display = DisplayList::from_commands(frame.display.commands);
-        display.commands.insert(
-            0,
-            DrawCommand::TransformPush {
-                transform: Transform {
-                    translation: myrust_ui::Point::new(0.0, 0.0),
-                    scale: myrust_ui::Point::new(dpr, dpr),
-                    rotation: 0.0,
-                },
-            },
-        );
-        display.commands.push(DrawCommand::TransformPop);
-        let raster = match CpuRasterizer::rasterize_with_font(
-            &display,
-            RenderSize::new(pixel_width, pixel_height),
-            Theme::dark().background,
-            ui_font,
-        ) {
-            Ok(frame) => frame,
-            Err(_) => return false,
-        };
-        rgba.reserve(raster.pixels.len() * 4);
-        for pixel in raster.pixels {
-            rgba.push(((pixel >> 16) & 0xff) as u8);
-            rgba.push(((pixel >> 8) & 0xff) as u8);
-            rgba.push((pixel & 0xff) as u8);
-            rgba.push(255);
-        }
+        let bytes = serialize_commands(&frame.display.commands, dpr, ui_font.as_deref());
+        COMMAND_BUFFER.with(|buffer| *buffer.borrow_mut() = bytes);
         true
     });
     if !rendered {
-        OUTPUT.with(|output| output.borrow_mut().clear());
+        COMMAND_BUFFER.with(|buffer| buffer.borrow_mut().clear());
         return 0;
     }
-    OUTPUT.with(|output| {
-        let mut output = output.borrow_mut();
-        *output = rgba;
-        output.len() as u32
-    })
+    1
 }
 
+/// Returns a pointer to the serialized canvas2D command buffer.
+#[no_mangle]
+pub extern "C" fn demo_command_ptr() -> *const u8 {
+    COMMAND_BUFFER.with(|buffer| buffer.borrow().as_ptr())
+}
+
+/// Returns the byte length of the serialized canvas2D command buffer.
+#[no_mangle]
+pub extern "C" fn demo_command_len() -> u32 {
+    COMMAND_BUFFER.with(|buffer| buffer.borrow().len() as u32)
+}
 
 fn home_page(context: &mut Context) {
     text(context, "Home page").font_size(16.0).color(Color::rgb(226, 232, 240));
@@ -1269,7 +1465,7 @@ fn transitions_demo(
                     width: 180.0,
                     height: 60.0,
                     radius: myrust_ui::Radius::all(10.0),
-                    color: Color::rgb(15, 23, 42),
+                    color: Color::rgb(24, 24, 27),
                 },
                 DrawCommand::RoundedRect {
                     x: frame.bounds.x,
@@ -1351,7 +1547,7 @@ fn transforms_demo(context: &mut Context, rotated: &Rc<Cell<bool>>, probe: &Rc<C
                         text(context, if is_rotated { "Back" } else { "Front" })
                             .font_size(18.0)
                             .bold()
-                            .color(Color::rgb(241, 245, 249));
+                            .color(Color::rgb(244, 244, 245));
                     });
             },
         );
@@ -1592,13 +1788,14 @@ fn performance_demo(context: &mut Context, stress: &Rc<Cell<bool>>, probe: &Rc<C
 
 
 fn button_demo(context: &mut Context, count: &Rc<Cell<i32>>, probe: &Rc<Cell<i32>>) {
-    stack(context, 360.0, 10.0, |context| {
+    context.set_widgets_disabled(DEMO_DISABLED.load(Ordering::Relaxed));
+    stack(context, 360.0, 16.0, |context| {
         row(context).gap(8.0).children(|context| {
             if button(context, "Cancel").clicked {
                 count.set(0);
                 probe.set(0);
             }
-            if button_primary(context, "Save").clicked {
+            if button_primary_with_icon(context, "Save", "check").clicked {
                 count.set(count.get() + 1);
                 probe.set(count.get());
             }
@@ -1776,13 +1973,11 @@ fn toolbar_demo(context: &mut Context, selected: &Rc<Cell<i32>>, probe: &Rc<Cell
 fn checkbox_demo(
     context: &mut Context,
     values: &Rc<RefCell<[bool; 6]>>,
+    indeterminate: &Rc<Cell<bool>>,
     probe: &Rc<Cell<i32>>,
 ) {
-    stack(context, 340.0, 10.0, |context| {
-        text(context, "Checkbox")
-            .font_size(20.0)
-            .bold()
-            .color(Color::rgb(241, 245, 249));
+    context.set_widgets_disabled(DEMO_DISABLED.load(Ordering::Relaxed));
+    stack(context, 340.0, 6.0, |context| {
         let mut values = values.borrow_mut();
         for (index, label) in [
             "Sync across devices",
@@ -1800,11 +1995,22 @@ fn checkbox_demo(
             let mut changed = false;
             if index >= 3 {
                 row(context).gap(0.0).children(|context| {
-                    container(context).size(20.0, 1.0);
-                    container(context).width(320.0).children(|context| {
+                    container(context).size(24.0, 1.0);
+                    container(context).width(316.0).children(|context| {
                         changed = checkbox_labeled(context, &id, label, &mut checked).changed;
                     });
                 });
+            } else if index == 2 {
+                changed = checkbox_indeterminate(
+                    context,
+                    &id,
+                    label,
+                    &mut checked,
+                    indeterminate.get(),
+                ).changed;
+                if changed {
+                    indeterminate.set(false);
+                }
             } else {
                 changed = checkbox_labeled(context, &id, label, &mut checked).changed;
             }
@@ -1814,25 +2020,52 @@ fn checkbox_demo(
             }
         }
         let count = values.iter().filter(|checked| **checked).count();
-        text(
-            context,
-            &format!("{count} of 6 checked · each box is caller-owned"),
-        )
-        .font_size(12.0)
-        .color(Color::rgb(148, 163, 184));
+        text(context, &format!("{count} of 6 checked · each box is caller-owned"))
+            .font_size(11.0)
+            .color(Color::rgb(161, 161, 169));
     });
 }
 
-fn switch_demo(context: &mut Context, value: &Rc<Cell<bool>>, probe: &Rc<Cell<i32>>) {
-    stack(context, 240.0, 10.0, |context| {
-        let mut on = value.get();
-        if switch(context, "docs-demo-switch", &mut on).changed {
-            value.set(on);
-            probe.set(if on { 1 } else { 0 });
-        }
-        text(context, if value.get() { "on" } else { "off" })
-            .font_size(12.0)
-            .color(Color::rgb(148, 163, 184));
+fn switch_demo(
+    context: &mut Context,
+    wifi: &Rc<Cell<bool>>,
+    bluetooth: &Rc<Cell<bool>>,
+    probe: &Rc<Cell<i32>>,
+) {
+    context.set_widgets_disabled(DEMO_DISABLED.load(Ordering::Relaxed));
+    column(context).fill().center().children(|context| {
+        column(context).width(280.0).gap(8.0).children(|context| {
+            row(context).gap(8.0).children(|context| {
+                container(context).width(220.0).children(|context| {
+                    text(context, "Wi-Fi").font_size(13.0).color(Color::rgb(244, 244, 245));
+                });
+                let mut on = wifi.get();
+                if switch(context, "docs-demo-switch", &mut on).changed {
+                    wifi.set(on);
+                    probe.set(if on { 1 } else { 0 });
+                }
+            });
+            row(context).gap(8.0).children(|context| {
+                container(context).width(220.0).children(|context| {
+                    text(context, "Bluetooth").font_size(13.0).color(Color::rgb(244, 244, 245));
+                });
+                let mut on = bluetooth.get();
+                if switch(context, "docs-demo-switch-bluetooth", &mut on).changed {
+                    bluetooth.set(on);
+                    probe.set(if on { 3 } else { 2 });
+                }
+            });
+            text(
+                context,
+                &format!(
+                    "Wi-Fi {}, Bluetooth {}",
+                    if wifi.get() { "on" } else { "off" },
+                    if bluetooth.get() { "on" } else { "off" }
+                ),
+            )
+            .font_size(11.0)
+            .color(Color::rgb(161, 161, 169));
+        });
     });
 }
 
@@ -1885,34 +2118,80 @@ fn radio_demo(
 }
 
 fn select_demo(context: &mut Context, selected: &Rc<Cell<i32>>, probe: &Rc<Cell<i32>>) {
-    stack(context, 280.0, 10.0, |context| {
-        let mut value = selected.get().max(0) as usize;
-        let response = select(context, "docs-demo-select", &mut value, &["One", "Two", "Three"]);
-        if response.open {
-            probe.set(10);
-        }
-        if response.changed {
-            selected.set(value as i32);
-            probe.set(value as i32 + 1);
-        }
-        text(context, &format!("selected = {}", value))
-            .font_size(12.0)
-            .color(Color::rgb(148, 163, 184));
+    column(context).fill().center().children(|context| {
+        column(context).width(140.0).gap(4.0).children(|context| {
+            text(context, "Plan").font_size(13.0).color(Color::rgb(244, 244, 245));
+            let mut value = selected.get().max(0) as usize;
+            let response = select(
+                context,
+                "docs-demo-select",
+                &mut value,
+                &["Basic", "Pro", "Enterprise"],
+            );
+            if response.open {
+                probe.set(10);
+            }
+            if response.changed {
+                selected.set(value as i32);
+                probe.set(value as i32 + 1);
+            }
+            let (name, price) = match value {
+                0 => ("Basic", "$4 a month"),
+                1 => ("Pro", "$12 a month"),
+                _ => ("Enterprise", "$29 a month"),
+            };
+            text(context, &format!("{name}: {price}"))
+                .font_size(11.0)
+                .color(Color::rgb(161, 161, 169));
+        });
     });
 }
 
-fn slider_demo(context: &mut Context, value: &Rc<Cell<f32>>, probe: &Rc<Cell<i32>>) {
+fn slider_demo(
+    context: &mut Context,
+    volume: &Rc<Cell<f32>>,
+    quality: &Rc<Cell<f32>>,
+    probe: &Rc<Cell<i32>>,
+) {
+    context.set_widgets_disabled(DEMO_DISABLED.load(Ordering::Relaxed));
     column(context).fill().center().children(|context| {
-        column(context).width(320.0).gap(8.0).children(|context| {
-            let mut current = value.get();
-            let response = slider(context, "docs-demo-slider", &mut current, 0.0, 100.0);
-            if response.changed {
-                value.set(current);
-                probe.set(current.round() as i32);
-            }
-            text(context, &format!("value {:.0}", current))
-                .font_size(12.0)
-                .color(Color::rgb(34, 211, 238));
+        column(context).width(340.0).gap(5.0).children(|context| {
+            column(context).width(340.0).gap(0.0).children(|context| {
+                text(context, &format!("Volume: {:.0}", volume.get()))
+                    .font_size(13.0)
+                    .color(Color::rgb(161, 161, 169));
+                let mut current = volume.get();
+                let state = slider(context, "docs-demo-slider", &mut current, 0.0, 100.0);
+                if state.changed {
+                    volume.set(current);
+                    probe.set((volume.get() + quality.get()) as i32);
+                }
+                let ticks = [0.0_f32, 48.0, 97.0, 145.0, 194.0, 242.0, 291.0, 340.0];
+                container(context).size(340.0, 6.0).draw(
+                    ticks.iter().map(|x| DrawCommand::Line {
+                        x1: *x, y1: 0.0, x2: *x, y2: 4.0, width: 1.0,
+                        color: Color::rgb(63, 63, 69),
+                    }).collect::<Vec<_>>(),
+                );
+            });
+            column(context).width(340.0).gap(0.0).children(|context| {
+                text(context, &format!("Quality: {:.0}%", quality.get()))
+                    .font_size(13.0)
+                    .color(Color::rgb(161, 161, 169));
+                let mut current = quality.get();
+                let state = slider(context, "docs-demo-slider-quality", &mut current, 0.0, 100.0);
+                if state.changed {
+                    quality.set(current);
+                    probe.set((volume.get() + quality.get()) as i32);
+                }
+                let ticks = [0.0_f32, 48.0, 97.0, 145.0, 194.0, 242.0, 291.0, 340.0];
+                container(context).size(340.0, 6.0).draw(
+                    ticks.iter().map(|x| DrawCommand::Line {
+                        x1: *x, y1: 0.0, x2: *x, y2: 4.0, width: 1.0,
+                        color: Color::rgb(63, 63, 69),
+                    }).collect::<Vec<_>>(),
+                );
+            });
         });
     });
 }
@@ -1961,17 +2240,34 @@ fn rating_demo(context: &mut Context, value: &Rc<Cell<u32>>, probe: &Rc<Cell<i32
 }
 
 
-fn text_input_demo(context: &mut Context, value: &Rc<RefCell<String>>, probe: &Rc<Cell<i32>>) {
-    stack(context, 360.0, 8.0, |context| {
-        text(context, "Text input").font_size(20.0).bold().color(Color::rgb(241, 245, 249));
-        let mut text_value = value.borrow_mut();
-        let field = text_field(context, "docs-demo-text", &mut text_value);
-        if field.changed {
-            probe.set(text_value.len() as i32);
-        }
-        text(context, &format!("{} characters", text_value.len()))
-            .font_size(12.0)
-            .color(Color::rgb(148, 163, 184));
+fn text_input_demo(
+    context: &mut Context,
+    value: &Rc<RefCell<String>>,
+    password: &Rc<RefCell<String>>,
+    notes: &Rc<RefCell<String>>,
+    probe: &Rc<Cell<i32>>,
+) {
+    column(context).fill().center().children(|context| {
+        column(context).width(320.0).gap(5.0).children(|context| {
+            let mut name = value.borrow_mut();
+            if text_field(context, "docs-demo-text-name", &mut name).changed {
+                probe.set(name.len() as i32);
+            }
+            let mut secret = password.borrow_mut();
+            if text_field_password(context, "docs-demo-text-password", &mut secret).changed {
+                probe.set(secret.len() as i32);
+            }
+            let mut note = notes.borrow_mut();
+            if text_area(context, "docs-demo-text-notes", &mut note, 3).changed {
+                probe.set(note.lines().count() as i32);
+            }
+            text(
+                context,
+                "Enter inserts a line in Notes · password is masked",
+            )
+            .font_size(11.0)
+            .color(Color::rgb(161, 161, 169));
+        });
     });
 }
 
@@ -2044,7 +2340,7 @@ fn search_demo(context: &mut Context, value: &Rc<RefCell<String>>, probe: &Rc<Ce
                                 .color(Color::rgb(34, 211, 238));
                             text(context, path)
                                 .font_size(12.0)
-                                .color(Color::rgb(148, 163, 184));
+                                .color(Color::rgb(161, 161, 169));
                         });
                     }
                 });
@@ -2221,6 +2517,13 @@ fn diff_demo(context: &mut Context, state: &Rc<RefCell<DiffViewerState>>, probe:
     });
 }
 
+fn month_name(month: u32) -> &'static str {
+    [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
+    ][(month.saturating_sub(1) as usize).min(11)]
+}
+
 fn calendar_demo(context: &mut Context, state: &Rc<RefCell<CalendarState>>, probe: &Rc<Cell<i32>>) {
     column(context).fill().center().children(|context| {
         column(context).width(320.0).gap(8.0).children(|context| {
@@ -2232,9 +2535,9 @@ fn calendar_demo(context: &mut Context, state: &Rc<RefCell<CalendarState>>, prob
             let selected = state.selected.unwrap_or(1);
             text(
                 context,
-                &format!("Selected {:04}-{:02}-{:02}", state.year, state.month, selected),
+                &format!("Selected {} {}, {}", month_name(state.month), selected, state.year),
             )
-            .font_size(12.0)
+            .font_size(13.0)
             .color(Color::rgb(148, 163, 184));
         });
     });
@@ -2282,74 +2585,119 @@ fn color_demo(
     state: &Rc<RefCell<ColorPickerState>>,
     probe: &Rc<Cell<i32>>,
 ) {
-    column(context).fill().padding(16.0).children(|context| {
-        column(context).width(360.0).gap(8.0).center().children(|context| {
-            text(context, "Color picker")
-                .font_size(20.0)
-                .bold()
-                .color(Color::rgb(241, 245, 249));
-            let mut color = color.borrow_mut();
-            let mut state = state.borrow_mut();
-            text(
-                context,
-                &format!("{} · saturation/value, hue and alpha bars, presets", color.to_hex()),
-            )
-            .font_size(12.0)
-            .color(Color::rgb(148, 163, 184));
-            let response = color_picker(context, "docs-demo-color", &mut color, &mut state);
-            if response.open {
-                probe.set(10);
-            }
-            if let Some(index) = response.preset {
-                probe.set(index as i32 + 1);
-            }
+    column(context).fill().center().children(|context| {
+        row(context).width(520.0).height(420.0).gap(16.0).children(|context| {
+            column(context).width(252.0).height(414.0).gap(8.0).children(|context| {
+                let mut color = color.borrow_mut();
+                let mut state = state.borrow_mut();
+                let response = color_picker(context, "docs-demo-color", &mut color, &mut state);
+                if response.open {
+                    probe.set(10);
+                }
+                if let Some(index) = response.preset {
+                    probe.set(index as i32 + 1);
+                }
+            });
+            let color = *color.borrow();
+            container(context)
+                .width(240.0)
+                .height(180.0)
+                .padding(16.0)
+                .draw([
+                    DrawCommand::RoundedRect {
+                        x: 0.0, y: 0.0, width: 240.0, height: 180.0,
+                        radius: myrust_ui::Radius::all(8.0), color: Color::rgb(63, 63, 69),
+                    },
+                    DrawCommand::RoundedRect {
+                        x: 1.0, y: 1.0, width: 238.0, height: 178.0,
+                        radius: myrust_ui::Radius::all(7.0), color: Color::rgb(39, 39, 42),
+                    },
+                    DrawCommand::RoundedRect {
+                        x: 16.0, y: 48.0, width: 208.0, height: 68.0,
+                        radius: myrust_ui::Radius::all(6.0),
+                        color: Color::rgba(color.r, color.g, color.b, 56),
+                    },
+                ])
+                .children(|context| {
+                    column(context).width(208.0).gap(4.0).children(|context| {
+                        text(context, "Tint").font_size(13.0).color(Color::rgb(244, 244, 245));
+                        text(context, "Hello").font_size(20.0).bold().color(color);
+                        text(context, "Tint on background")
+                            .font_size(13.0)
+                            .color(Color::rgb(161, 161, 169));
+                        text(context, &color.to_hex())
+                            .font_size(13.0)
+                            .color(Color::rgb(161, 161, 169));
+                    });
+                });
         });
     });
 }
 
 fn list_demo(context: &mut Context, state: &Rc<RefCell<ListState>>, probe: &Rc<Cell<i32>>) {
-    column(context).fill().center().gap(6.0).children(|context| {
+    column(context).fill().center().children(|context| {
         column(context).width(520.0).gap(6.0).children(|context| {
-            let rows = [
-                ListRow::new("r0", "Inbox"),
-                ListRow::new("r1", "Today"),
-                ListRow::new("r2", "Design review"),
-                ListRow::new("r3", "Release notes"),
-                ListRow::new("r4", "API reference"),
-                ListRow::new("r5", "Changelog"),
-                ListRow::new("r6", "Screenshots"),
-                ListRow::new("r7", "Archive"),
-                ListRow::new("r8", "Trash"),
-                ListRow::new("r9", "Settings"),
-            ];
-            let mut state = state.borrow_mut();
-            let response = list(context, "docs-demo-list", &mut state, &rows, 30.0, 240.0);
-            if let Some(id) = response.clicked_id {
-                probe.set(id.trim_start_matches('r').parse().unwrap_or(0) + 1);
-            }
-            text(context, "Virtualized list; scroll to reach more rows.")
-                .font_size(12.0)
-                .color(Color::rgb(148, 163, 184));
+            container(context)
+                .width(520.0)
+                .height(224.0)
+                .draw([
+                    DrawCommand::RoundedRect {
+                        x: 0.0, y: 0.0, width: 520.0, height: 224.0,
+                        radius: myrust_ui::Radius::all(10.0), color: Color::rgb(63, 63, 69),
+                    },
+                    DrawCommand::RoundedRect {
+                        x: 1.0, y: 1.0, width: 518.0, height: 222.0,
+                        radius: myrust_ui::Radius::all(9.0), color: Color::rgb(39, 39, 42),
+                    },
+                ])
+                .children(|context| {
+                    let rows = [
+                        ListRow::new("r0", "Annual Report.pdf").icon("folder").detail("170 KB"),
+                        ListRow::new("r1", "Beach.jpg").icon("folder").detail("1.1 MB"),
+                        ListRow::new("r2", "Budget 2026.xlsx").icon("folder").detail("22 KB"),
+                        ListRow::new("r3", "Cover Letter.docx").icon("folder").detail("959 KB"),
+                        ListRow::new("r4", "Design Review.key").icon("folder").detail("810 KB"),
+                        ListRow::new("r5", "Expenses.csv").icon("folder").detail("662 KB"),
+                        ListRow::new("r6", "Family.jpg").icon("folder").detail("514 KB"),
+                    ];
+                    let mut state = state.borrow_mut();
+                    let response = list(context, "docs-demo-list", &mut state, &rows, 28.0, 196.0);
+                    if let Some(id) = response.clicked_id {
+                        probe.set(id.trim_start_matches('r').parse().unwrap_or(0) + 1);
+                    }
+                });
+            text(context, "7 files · Restore or delete")
+                .font_size(11.0)
+                .color(Color::rgb(161, 161, 169));
+            row(context).width(520.0).gap(8.0).children(|context| {
+                if button(context, "Restore").clicked {
+                    probe.set(98);
+                }
+                if button(context, "Delete").clicked {
+                    probe.set(99);
+                }
+            });
         });
     });
 }
 
 fn table_demo(context: &mut Context, state: &Rc<RefCell<TableState>>, probe: &Rc<Cell<i32>>) {
+    context.set_widgets_disabled(DEMO_DISABLED.load(Ordering::Relaxed));
     column(context).fill().center().children(|context| {
-        column(context).width(640.0).gap(6.0).children(|context| {
+        column(context).width(720.0).gap(6.0).children(|context| {
             let columns = [
-                TableColumn::new("Name", 300.0),
-                TableColumn::new("Kind", 220.0),
-                TableColumn::new("Size", 120.0),
+                TableColumn::new("Name", 340.0),
+                TableColumn::new("Kind", 240.0),
+                TableColumn::new("Size", 140.0),
             ];
             let rows = [
-                TableRow::new("annual", &["Annual Report.pdf", "PDF document", "170 KB"]),
-                TableRow::new("beach", &["Beach.jpg", "JPEG image", "1.1 MB"]),
-                TableRow::new("budget", &["Budget 2026.xlsx", "Spreadsheet", "22 KB"]),
-                TableRow::new("cover", &["Cover Letter.docx", "Word document", "959 KB"]),
-                TableRow::new("design", &["Design Review.key", "Keynote", "810 KB"]),
-                TableRow::new("expenses", &["Expenses.csv", "CSV text", "662 KB"]),
-                TableRow::new("notes", &["Meeting Notes.md", "Markdown", "12 KB"]),
+                TableRow::new("annual", &["Annual Report.pdf", "PDF document", "170 KB"]).icon("folder"),
+                TableRow::new("beach", &["Beach.jpg", "JPEG image", "1.1 MB"]).icon("folder"),
+                TableRow::new("budget", &["Budget 2026.xlsx", "Spreadsheet", "22 KB"]).icon("folder"),
+                TableRow::new("cover", &["Cover Letter.docx", "Word document", "959 KB"]).icon("folder"),
+                TableRow::new("design", &["Design Review.key", "Keynote", "810 KB"]).icon("folder"),
+                TableRow::new("expenses", &["Expenses.csv", "CSV text", "662 KB"]).icon("folder"),
+                TableRow::new("notes", &["Meeting Notes.md", "Markdown", "12 KB"]).icon("folder"),
             ];
             let mut state = state.borrow_mut();
             let response = table(context, "docs-demo-table", &mut state, &columns, &rows);
@@ -2410,7 +2758,7 @@ fn tree_demo(
                     y: 0.0,
                     width: 560.0,
                     height,
-                    color: Color::rgb(17, 24, 39),
+                    color: Color::rgb(39, 39, 42),
                 }])
                 .children(|context| {
                     captured = Some(tree(
@@ -2466,10 +2814,10 @@ fn grid_view_demo(context: &mut Context, state: &Rc<RefCell<GridViewState>>, pro
                         text(context, &format!("Item {index}"))
                             .font_size(13.0)
                             .bold()
-                            .color(Color::rgb(241, 245, 249));
+                            .color(Color::rgb(244, 244, 245));
                         text(context, "grid cell")
                             .font_size(11.0)
-                            .color(Color::rgb(148, 163, 184));
+                            .color(Color::rgb(161, 161, 169));
                     });
             },
         );
@@ -2543,7 +2891,7 @@ fn grid_demo(context: &mut Context, columns: &Rc<Cell<usize>>, probe: &Rc<Cell<i
                             .color(Color::rgb(226, 232, 240));
                         text(context, "widget")
                             .font_size(10.0)
-                            .color(Color::rgb(148, 163, 184));
+                            .color(Color::rgb(161, 161, 169));
                     });
             }
         });
@@ -2576,17 +2924,17 @@ fn split_demo(context: &mut Context, state: &Rc<RefCell<SplitViewState>>, probe:
                                 y: 0.0,
                                 width: 620.0,
                                 height: 180.0,
-                                color: Color::rgb(15, 23, 42),
+                                color: Color::rgb(24, 24, 27),
                             }])
                             .children(|context| {
                                 column(context).fill().padding(14.0).gap(4.0).children(|context| {
                                     text(context, "Navigation")
                                         .font_size(13.0)
                                         .bold()
-                                        .color(Color::rgb(241, 245, 249));
+                                        .color(Color::rgb(244, 244, 245));
                                     text(context, "Overview\nProjects\nActivity")
                                         .font_size(12.0)
-                                        .color(Color::rgb(148, 163, 184));
+                                        .color(Color::rgb(161, 161, 169));
                                 });
                             });
                     },
@@ -2598,17 +2946,17 @@ fn split_demo(context: &mut Context, state: &Rc<RefCell<SplitViewState>>, probe:
                                 y: 0.0,
                                 width: 620.0,
                                 height: 180.0,
-                                color: Color::rgb(17, 24, 39),
+                                color: Color::rgb(39, 39, 42),
                             }])
                             .children(|context| {
                                 column(context).fill().padding(14.0).gap(4.0).children(|context| {
                                     text(context, "Content")
                                         .font_size(13.0)
                                         .bold()
-                                        .color(Color::rgb(241, 245, 249));
+                                        .color(Color::rgb(244, 244, 245));
                                     text(context, "The divider between panes is draggable.")
                                         .font_size(12.0)
-                                        .color(Color::rgb(148, 163, 184));
+                                        .color(Color::rgb(161, 161, 169));
                                 });
                             });
                     },
@@ -2641,18 +2989,56 @@ fn collapsible_demo(context: &mut Context, open: &Rc<Cell<bool>>, probe: &Rc<Cel
     });
 }
 
-fn accordion_demo(context: &mut Context, state: &Rc<RefCell<AccordionState>>, probe: &Rc<Cell<i32>>) {
-    stack(context, 520.0, 8.0, |context| {
-        let sections = [
-            AccordionSection::new("one", "Getting started", "Create a NativeUi and rebuild it every frame."),
-            AccordionSection::new("two", "Layout", "Rows, columns, and grids share one flex engine."),
-            AccordionSection::new("three", "Input", "Pointer and keyboard events are delivered as values."),
-        ];
-        let mut state = state.borrow_mut();
-        let response = accordion(context, "docs-demo-accordion", &mut state, &sections);
-        if response.changed {
-            probe.set(state.open.len() as i32 + 1);
-        }
+fn accordion_demo(
+    context: &mut Context,
+    state: &Rc<RefCell<AccordionState>>,
+    value: &Rc<RefCell<String>>,
+    notify: &Rc<Cell<bool>>,
+    probe: &Rc<Cell<i32>>,
+) {
+    column(context).fill().center().children(|context| {
+        column(context).width(420.0).gap(8.0).children(|context| {
+            let mut state = state.borrow_mut();
+            let mut changed = false;
+            let mut open = state.open.iter().any(|id| id == "one");
+            let header = "General";
+            let response = accordion(
+                context,
+                "docs-demo-accordion",
+                &mut state,
+                &[AccordionSection::new("one", header, "Device name")],
+            );
+            changed |= response.changed;
+            if state.open.iter().any(|id| id == "one") {
+                open = true;
+            }
+            if open {
+                let mut name = value.borrow_mut();
+                if text_field(context, "docs-demo-accordion-name", &mut name).changed {
+                    probe.set(name.len() as i32);
+                }
+                let mut checked = notify.get();
+                if checkbox_labeled(
+                    context,
+                    "docs-demo-accordion-sync",
+                    "Sync settings",
+                    &mut checked,
+                )
+                .changed
+                {
+                    notify.set(checked);
+                }
+            }
+            let rest = [
+                AccordionSection::new("two", "Privacy", "Local-only data."),
+                AccordionSection::new("three", "Advanced", "Diagnostics."),
+            ];
+            let response = accordion(context, "docs-demo-accordion-rest", &mut state, &rest);
+            changed |= response.changed;
+            if changed {
+                probe.set(state.open.len() as i32 + 1);
+            }
+        });
     });
 }
 
@@ -2693,17 +3079,17 @@ fn sidebar_demo(context: &mut Context, selected: &Rc<RefCell<String>>, probe: &R
                     y: 0.0,
                     width: 220.0,
                     height: 210.0,
-                    color: Color::rgb(15, 23, 42),
+                    color: Color::rgb(24, 24, 27),
                 }])
                 .children(|context| {
                 let workspace = [
-                    SidebarItem::new("a", "Overview"),
-                    SidebarItem::new("b", "Projects"),
-                    SidebarItem::new("c", "Activity"),
+                    SidebarItem::new("a", "Overview").icon("home"),
+                    SidebarItem::new("b", "Projects").icon("folder").badge("3"),
+                    SidebarItem::new("c", "Activity").icon("search"),
                 ];
                 let settings = [
-                    SidebarItem::new("d", "Preferences"),
-                    SidebarItem::new("e", "Members"),
+                    SidebarItem::new("d", "Preferences").icon("settings"),
+                    SidebarItem::new("e", "Members").icon("home"),
                 ];
                 let sections = [
                     SidebarSection::new("Workspace", &workspace),
@@ -2725,17 +3111,17 @@ fn sidebar_demo(context: &mut Context, selected: &Rc<RefCell<String>>, probe: &R
                     width: 400.0,
                     height: 210.0,
                     radius: myrust_ui::Radius::all(8.0),
-                    color: Color::rgb(17, 24, 39),
+                    color: Color::rgb(39, 39, 42),
                 }])
                 .children(|context| {
                     column(context).gap(8.0).children(|context| {
                         text(context, "Projects")
                             .font_size(16.0)
                             .bold()
-                            .color(Color::rgb(241, 245, 249));
+                            .color(Color::rgb(244, 244, 245));
                         text(context, "3 active projects")
                             .font_size(12.0)
-                            .color(Color::rgb(148, 163, 184));
+                            .color(Color::rgb(161, 161, 169));
                         if button(context, "Mark all as read").clicked {
                             probe.set(99);
                         }
@@ -2904,15 +3290,16 @@ fn tooltip_demo(context: &mut Context, seen: &Rc<Cell<bool>>, probe: &Rc<Cell<i3
         let mut triggers = Vec::new();
         row(context).gap(8.0).children(|context| {
             for (index, (label, tip)) in [
-                ("Share", "Share this page"),
-                ("Save", "Save to reading list"),
-                ("Settings", "Open settings"),
-                ("Print", "Print this page"),
+                ("", "Share this page"),
+                ("", "Save to reading list"),
+                ("", "Open settings"),
+                ("", "Print this page"),
             ]
             .iter()
             .enumerate()
             {
-                let trigger = button(context, label);
+                let _ = label;
+                let trigger = icon_button(context, ["folder", "check", "settings", "search"][index]);
                 if let Some(bounds) = trigger.bounds {
                     triggers.push((
                         format!("docs-demo-tooltip-{index}"),
@@ -2961,16 +3348,25 @@ fn toast_demo(context: &mut Context, queue: &Rc<RefCell<ToastQueue>>, probe: &Rc
 }
 
 fn progress_demo(context: &mut Context, value: &Rc<Cell<f32>>, probe: &Rc<Cell<i32>>) {
-    stack(context, 340.0, 10.0, |context| {
-        if button(context, "Advance").clicked {
-            let next = (value.get() + 25.0).min(100.0);
-            value.set(next);
-            probe.set(next as i32);
-        }
-        progress(context, "docs-demo-progress", value.get(), 100.0);
-        text(context, &format!("{:.0}%", value.get()))
-            .font_size(12.0)
-            .color(Color::rgb(148, 163, 184));
+    column(context).fill().center().children(|context| {
+        column(context).width(340.0).gap(6.0).children(|context| {
+            text(context, &format!("Uploaded {} of 5 files", (value.get() / 20.0) as i32 + 1))
+                .font_size(14.0)
+                .color(Color::rgb(244, 244, 245));
+            progress(context, "docs-demo-progress", value.get(), 100.0);
+            text(context, "Connecting to the server...")
+                .font_size(11.0)
+                .color(Color::rgb(161, 161, 169));
+            progress_indeterminate(context, "docs-demo-progress-connecting");
+            if button(context, "Advance").clicked {
+                let next = (value.get() + 25.0).min(100.0);
+                value.set(next);
+                probe.set(next as i32);
+            }
+            text(context, &format!("{:.0}% · caller-owned progress state", value.get()))
+                .font_size(11.0)
+                .color(Color::rgb(161, 161, 169));
+        });
     });
 }
 
@@ -3150,10 +3546,6 @@ pub extern "C" fn demo_tick() -> u32 {
     })
 }
 
-#[no_mangle]
-pub extern "C" fn demo_buffer_ptr() -> *const u8 {
-    OUTPUT.with(|output| output.borrow().as_ptr())
-}
 
 #[no_mangle]
 pub extern "C" fn demo_pointer(kind: u32, x: f32, y: f32) {
