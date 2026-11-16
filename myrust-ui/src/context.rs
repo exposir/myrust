@@ -22,8 +22,11 @@ use super::calendar::{
     CalendarState,
 };
 use super::charts::{ChartKind, ChartResponse};
-use super::code_editor::{tokenize_rust_line, CodeEditorResponse, CodeEditorState, CodeTokenKind};
-use super::color_picker::{ColorPickerResponse, ColorPickerState, PRESET_COLORS};
+use super::code_editor::{CodeEditorOptions, CodeEditorResponse, CodeEditorState, CodeSeverity};
+use super::color_picker::{
+    hex_of, ColorPanelResponse, ColorPanelState, ColorPickerResponse, ColorPickerState, Hsv,
+    PanelDrag, SWATCH_COLORS, SWATCH_NAMES, PRESET_COLORS,
+};
 use super::combobox::{filter_options, ComboboxResponse, ComboboxState};
 use super::controls::{
     BadgeState, CollapsibleState, ProgressState, RadioGroupState, SelectState, SpinnerState,
@@ -32,7 +35,8 @@ use super::controls::{
 use super::date_input::{parse_iso_date, DateInputResponse, DateInputState};
 use super::dialog::{DialogAction, DialogResponse};
 use super::diff::{
-    diff_lines, paired_rows, DiffKind, DiffLayout, DiffViewerResponse, DiffViewerState,
+    diff_lines, lines_diff, split_lines, split_rows, word_ranges, DiffLayout, DiffViewerResponse,
+    DiffViewerState,
 };
 use super::direction::Direction;
 use super::drag::{
@@ -45,12 +49,13 @@ use super::find_bar::FindBarState;
 use super::floating::{
     ContextMenuResponse, ContextMenuState, MenuButtonState, MenuState, TooltipState,
 };
-use super::font::{default_font, RealFontMeasurer};
+use super::font::{default_font, FontFace};
 use super::form::FormFieldState;
 use super::grid_view::{GridViewResponse, GridViewState};
 use super::icon::{Icon, IconState};
 use super::image::{ImageData, ImageState};
 use super::inspector::{InspectorItem, InspectorResponse, InspectorTree};
+use super::languages::{format_date, DateStyle, Locale};
 use super::layout::{
     AlignItems, Edges, FlexDirection, JustifyContent, LayoutEngine, LayoutResult, Node, Point,
     Position, Size, Style,
@@ -59,6 +64,7 @@ use super::link::LinkState;
 use super::list::{ListResponse, ListRow, ListState};
 use super::markdown::{
     parse_inline, parse_markdown, InlineSpan, InlineStyle, MarkdownBlock, MarkdownResponse,
+    TableAlign,
 };
 use super::meter::{MeterState, MeterTone};
 use super::numeric::{
@@ -66,12 +72,14 @@ use super::numeric::{
     NumberInputOptions, NumberInputState,
 };
 use super::overlay::{OverlayResponse, OverlayState};
-use super::paint::{Color, DisplayList, DrawCommand, Radius, Rect, TextAlignment, Transform};
+use super::paint::{
+    Color, DisplayList, DrawCommand, GradientStop, Radius, Rect, TextAlignment, Transform,
+};
 use super::performance::{FrameStats, FrameStatsResponse};
 use super::range_slider::{RangeKnob, RangeSliderResponse, RangeSliderState};
 use super::rating::RatingState;
 use super::render::{CommandCounts, RenderStats};
-use super::rich_text::RichTextResponse;
+use super::rich_text::{RichTextResponse, RichTextSpan};
 use super::router::{BackForwardState, Page, RouterResponse, RouterState};
 use super::search_field::SearchFieldState;
 use super::segmented::SegmentedResponse;
@@ -81,7 +89,11 @@ use super::split::{
 };
 use super::stepper::StepperState;
 use super::table::{SortDirection, TableColumn, TableResponse, TableRow, TableSort, TableState};
-use super::text::{layout_text, ApproximateMeasurer};
+use super::text::{
+    host_text_ascent, host_text_descent, host_text_width, host_text_width_family,
+    host_text_width_weighted, host_text_x_height, layout_text, ApproximateMeasurer, TextMeasurer,
+    TextMetrics,
+};
 use super::text_input::TextInputState;
 use super::theme::Theme;
 use super::time_input::{filter_time_text, format_time, parse_time, TimeInputState};
@@ -139,6 +151,12 @@ enum WidgetState {
     SplitView {
         dragging: bool,
     },
+    /// A split whose first pane keeps a DIP size, as MyGo's `ui.Split`.
+    SplitSized {
+        dragging: bool,
+        /// The size the pane shows, as last laid out.
+        shown: f32,
+    },
     RangeSlider {
         dragging: Option<RangeKnob>,
     },
@@ -189,6 +207,9 @@ pub struct Context {
     previous_regions: HashMap<String, InteractiveRegion>,
     current_regions: HashMap<String, InteractiveRegion>,
     focused_id: Option<String>,
+    /// Whether focus came from the keyboard, as MyGo's `focusVisible`:
+    /// a pointer press focuses what it clicks without drawing a ring.
+    focus_visible: bool,
     focus_order: Vec<String>,
     pending_focusables: Vec<(u64, String, u32)>,
     current_focus_key: Option<String>,
@@ -217,7 +238,13 @@ pub struct Context {
     direction: Direction,
     embedded_overlay: bool,
     widgets_disabled: bool,
+    /// Width of the label column of the form being built, so that every
+    /// field's label lines up as MyGo's `alignLabels` makes them.
+    form_label_width: Option<f32>,
     disabled_theme_backup: Option<Theme>,
+    /// Device pixels per logical pixel, as the host draws them, where the
+    /// painter snaps a picture's box (`ui/paint.go` snap).
+    pixel_scale: f32,
 }
 
 impl Context {
@@ -235,6 +262,7 @@ impl Context {
             previous_regions: HashMap::new(),
             current_regions: HashMap::new(),
             focused_id: None,
+            focus_visible: false,
             focus_order: Vec::new(),
             pending_focusables: Vec::new(),
             current_focus_key: None,
@@ -263,8 +291,21 @@ impl Context {
             direction: Direction::Ltr,
             embedded_overlay: false,
             widgets_disabled: false,
+            form_label_width: None,
             disabled_theme_backup: None,
+            pixel_scale: 1.0,
         }
+    }
+
+    /// Sets how many device pixels the host draws per logical pixel, as
+    /// MyGo's painter takes its scale.
+    pub fn set_pixel_scale(&mut self, scale: f32) {
+        self.pixel_scale = if scale.is_finite() { scale.clamp(1.0, 4.0) } else { 1.0 };
+    }
+
+    /// Returns the device pixels per logical pixel of this frame.
+    pub fn pixel_scale(&self) -> f32 {
+        self.pixel_scale
     }
 
     /// Returns the current logical layout size.
@@ -467,6 +508,10 @@ impl Context {
             theme.muted,
             Some(width),
             TextAlignment::Start,
+            0.0,
+            false,
+            false,
+            None,
         );
         self.register_access_node(node, Role::Label, "frame stats", Some(text.as_str()), false);
         FrameStatsResponse { text }
@@ -600,9 +645,14 @@ impl Context {
     }
 
     /// Starts a horizontal flex container.
+    ///
+    /// Its children center across it, as MyGo's `Row()` sets `align` to
+    /// `Center` when it is left automatic (`ui/element.go` Row), rather than
+    /// stretching: a row of buttons keeps each button at its own height.
     pub fn row(&mut self) -> RowBuilder<'_> {
         let style = Style {
             flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
             ..Style::default()
         };
         let builder = RowBuilder::new(self, style);
@@ -619,6 +669,21 @@ impl Context {
             .ctx
             .register_access_node(builder.id, Role::Group, "container", None, false);
         builder
+    }
+
+    /// Starts a clickable container: one that reports whether the pointer is
+    /// over it and whether it was clicked this frame, so a demo can lay out
+    /// its own rows with MyGo's geometry and still take input.
+    pub fn clickable(&mut self, id: &str) -> ClickableBuilder<'_> {
+        let node = self.new_named_node(id, Style::default());
+        self.register_interaction(node, id.to_string());
+        let hovered = self.pointer_in_previous(id);
+        let clicked = self.clicked_in_previous(id);
+        ClickableBuilder {
+            builder: FlexBuilder { ctx: self, id: node },
+            hovered,
+            clicked,
+        }
     }
 
     /// Creates a text widget.
@@ -641,6 +706,11 @@ impl Context {
             color,
             max_width: None,
             alignment,
+            underline: false,
+            line_height: None,
+            single_line: false,
+            mono: false,
+            family: None,
         };
         builder.sync();
         builder
@@ -657,28 +727,52 @@ impl Context {
     }
 
     /// Creates a button with a built-in icon before the label.
-    /// Creates a secondary button with a built-in icon.
     pub fn button_with_icon(&mut self, label: &str, icon_name: &str) -> ButtonState {
-        self.button_icon_impl(label, icon_name, false)
+        self.button_icon_impl(label, icon_name, false, false, None, 0.0)
     }
 
     /// Creates a primary button with a built-in icon.
     pub fn button_primary_with_icon(&mut self, label: &str, icon_name: &str) -> ButtonState {
-        self.button_icon_impl(label, icon_name, true)
+        self.button_icon_impl(label, icon_name, true, false, None, 0.0)
     }
 
-    fn button_icon_impl(&mut self, label: &str, icon_name: &str, primary: bool) -> ButtonState {
+    /// Creates a button with a built-in icon before the label.
+    /// Creates a secondary button with a built-in icon after the label,
+    /// drawn at MyGo's 10px menu chevron size in the muted color.
+    pub fn button_with_icon_after(&mut self, label: &str, icon_name: &str) -> ButtonState {
+        let muted = self.theme.muted;
+        self.button_icon_impl(label, icon_name, false, true, Some(muted), 10.0)
+    }
+
+    fn button_icon_impl(
+        &mut self,
+        label: &str,
+        icon_name: &str,
+        primary: bool,
+        icon_after: bool,
+        icon_color: Option<Color>,
+        icon_size: f32,
+    ) -> ButtonState {
         let theme = self.theme.clone();
-        let spacing = theme.spacing;
         let font_size = theme.font_sizes.body;
-        let icon_size = 14.0;
         let text_size = estimated_text_size(label, font_size, None);
-        let vertical = ((28.0 - text_size.height) / 2.0).max(0.0);
+        // MyGo's styleButton: Space(1.5)=6 vertical and Space(3.5)=14
+        // horizontal, the border taking a pixel more on a plain button so
+        // that it stands as tall as the emphasized primary one.
+        let (vertical, horizontal) = if primary { (6.0, 14.0) } else { (7.0, 15.0) };
+        // An icon inside a button takes the button's text size.
+        let icon_size = if icon_size > 0.0 { icon_size } else { font_size };
+        let icon_gap = theme.spacing.base * 1.5;
+        // MyGo's button base is a centered row, so the label's own line box
+        // stands beside the icon rather than around it.
+        let content_size = Size::new(
+            text_size.width + icon_size + icon_gap,
+            text_size.height.max(icon_size),
+        );
         let id = self.new_node(Style {
-            padding: Edges::symmetric(vertical, spacing.md),
+            padding: Edges::symmetric(vertical, horizontal),
             ..Style::default()
         });
-        let content_size = Size::new(text_size.width + icon_size + 4.0, text_size.height);
         let key = self
             .nodes
             .get(&id)
@@ -699,21 +793,10 @@ impl Context {
         let pressed_progress =
             self.animate(&format!("{key}:pressed"), if pressed { 1.0 } else { 0.0 });
         let bounds = previous.as_ref().map(|region| region.bounds);
-        let horizontal = spacing.md;
-        let hover_bg = if primary {
-            mix_color(mix_color(theme.accent, Color::WHITE, 0.12), Color::WHITE, 0.08)
+        let (base_bg, hover_bg, pressed_bg) = if primary {
+            (theme.accent, theme.accent_hover, theme.accent_pressed)
         } else {
-            mix_color(theme.surface, theme.accent, 0.65)
-        };
-        let pressed_bg = if primary {
-            mix_color(theme.accent, Color::WHITE, 0.22)
-        } else {
-            theme.accent
-        };
-        let base_bg = if primary {
-            mix_color(theme.accent, Color::WHITE, 0.12)
-        } else {
-            theme.surface
+            (theme.surface, theme.surface_hover, theme.surface_pressed)
         };
         let background = mix_color(
             mix_color(base_bg, hover_bg, hover_progress.clamp(0.0, 1.0)),
@@ -721,45 +804,69 @@ impl Context {
             pressed_progress.clamp(0.0, 1.0),
         );
         let emphasis = hover_progress.max(pressed_progress);
+        let _ = emphasis;
         let text_color = if primary {
             theme.on_accent
         } else {
-            mix_color(theme.foreground, theme.on_accent, emphasis)
+            theme.foreground
         };
         let total_w = content_size.width + horizontal * 2.0;
         let total_h = content_size.height + vertical * 2.0;
-        let mut commands = vec![DrawCommand::RoundedRect {
-            x: 0.0,
-            y: 0.0,
-            width: total_w,
-            height: total_h,
-            radius: Radius::all(6.0),
+        // As MyGo's styleButton: a plain button is a Surface face with a
+        // 1px Border, a primary one a borderless accent face.
+        let mut commands = Vec::new();
+        if !primary {
+            commands.push(DrawCommand::RoundedRect {
+                x: 0.0,
+                y: 0.0,
+                width: total_w,
+                height: total_h,
+                radius: Radius::all(6.0),
+                color: theme.border,
+            });
+        }
+        commands.push(DrawCommand::RoundedRect {
+            x: if primary { 0.0 } else { 1.0 },
+            y: if primary { 0.0 } else { 1.0 },
+            width: if primary { total_w } else { (total_w - 2.0).max(1.0) },
+            height: if primary { total_h } else { (total_h - 2.0).max(1.0) },
+            radius: Radius::all(if primary { 6.0 } else { 5.0 }),
             color: background,
-        }];
-        // Icon
+        });
+        // Icon, before or after the label
         if let Some(icon) = Icon::builtin(icon_name) {
+            let icon_x = if icon_after {
+                horizontal + text_size.width + icon_gap
+            } else {
+                horizontal
+            };
+            let icon_y = vertical + (content_size.height - icon_size) / 2.0;
             commands.push(DrawCommand::TransformPush {
                 transform: Transform {
-                    translation: Point::new(horizontal, vertical),
+                    translation: Point::new(icon_x, icon_y),
                     scale: Point::new(1.0, 1.0),
                     rotation: 0.0,
                 },
             });
-            commands.extend(icon.to_commands_with_direction(icon_size, text_color, self.direction));
+            let color = icon_color.unwrap_or(text_color);
+            commands.extend(icon.to_commands_with_direction(icon_size, color, self.direction));
             commands.push(DrawCommand::TransformPop);
         }
-        // Label after icon
+        // Label
         commands.push(DrawCommand::Text {
-            x: horizontal + icon_size + 4.0,
+            x: horizontal + icon_size + icon_gap,
             y: vertical,
             text: label.to_string(),
             font_size,
-            weight: 500,
+            weight: 400,
+            italic: false,
+            mono: false,
+            family: None,
             color: text_color,
             max_width: None,
             alignment: TextAlignment::Start,
         });
-        if focused {
+        if self.shows_focus_ring(focused) {
             commands.extend(focus_ring(0.0, 0.0, total_w, total_h, theme.accent));
         }
         let node = self.nodes.get_mut(&id).expect("button node exists");
@@ -781,8 +888,13 @@ impl Context {
     /// Creates a 36×36 icon-only button.
     pub fn icon_button(&mut self, icon_name: &str) -> ButtonState {
         let theme = self.theme.clone();
-        let width = 36.0;
-        let height = 36.0;
+        // MyGo's icon buttons are ordinary buttons whose content is the
+        // icon: `Padding(Space(1.5), Space(3.5))` around a `Border(1)`, and
+        // an icon one em high (`intrinsicSize`: `em := e.resolvedText().size`),
+        // so 14 + 2 * (6 + 1) tall and 14 + 2 * (14 + 1) wide.
+        let icon_size = 14.0;
+        let width = 44.0;
+        let height = 28.0;
         let id = self.new_node(Style {
             width: Some(width),
             height: Some(height),
@@ -832,17 +944,20 @@ impl Context {
             },
         ];
         if let Some(icon) = Icon::builtin(icon_name) {
+            // The icon is the button's content, centered in its padding box.
+            let icon_x = (width - icon_size) / 2.0;
+            let icon_y = (height - icon_size) / 2.0;
             commands.push(DrawCommand::TransformPush {
                 transform: Transform {
-                    translation: Point::new(11.0, 11.0),
+                    translation: Point::new(icon_x, icon_y),
                     scale: Point::new(1.0, 1.0),
                     rotation: 0.0,
                 },
             });
-            commands.extend(icon.to_commands_with_direction(14.0, theme.muted, self.direction));
+            commands.extend(icon.to_commands_with_direction(icon_size, theme.foreground, self.direction));
             commands.push(DrawCommand::TransformPop);
         }
-        if focused {
+        if self.shows_focus_ring(focused) {
             commands.extend(focus_ring(0.0, 0.0, width, height, theme.accent));
         }
         self.nodes.get_mut(&id).expect("icon button exists").commands = commands;
@@ -860,13 +975,32 @@ impl Context {
     }
 
     fn button_styled(&mut self, label: &str, primary: bool) -> ButtonState {
+        self.button_styled_disabled(label, primary, false)
+    }
+
+    /// Creates a button that shows as unavailable when `disabled` is set.
+    ///
+    /// MyGo dims a disabled element, and what is inside it, to half its
+    /// opacity (`ui/paint.go`: `p.opacity *= 0.5`), so its face, border and
+    /// label all blend halfway into the page behind them.
+    pub fn button_disabled(&mut self, label: &str, disabled: bool) -> ButtonState {
+        self.button_styled_disabled(label, false, disabled)
+    }
+
+    fn button_styled_disabled(
+        &mut self,
+        label: &str,
+        primary: bool,
+        disabled: bool,
+    ) -> ButtonState {
         let theme = self.theme.clone();
-        let spacing = theme.spacing;
         let font_size = theme.font_sizes.body;
-        let content_height = measured_text_height(font_size);
-        let vertical = ((28.0 - content_height) / 2.0).max(0.0);
+        // MyGo's buttons pad 6 by 14 over a one-pixel border, 31 tall; the
+        // emphasized primary button pads 6 by 14 without a border, 29 tall
+        // (`ui/widgets.go` styleButton).
+        let (vertical, horizontal) = if primary { (6.0, 14.0) } else { (7.0, 15.0) };
         let id = self.new_node(Style {
-            padding: super::layout::Edges::symmetric(vertical, spacing.md),
+            padding: super::layout::Edges::symmetric(vertical, horizontal),
             ..Style::default()
         });
         let content_size = estimated_text_size(label, font_size, None);
@@ -878,10 +1012,11 @@ impl Context {
         let previous = self.previous_regions.get(&key).cloned();
         let mouse_clicked = self.clicked_in_previous(&key);
         let hovered = self.pointer_in_previous(&key);
-        let pressed = hovered && self.input.pointer_down;
+        let pressed = !disabled && hovered && self.input.pointer_down;
         let focused = self.focused_id.as_deref() == Some(key.as_str());
-        let clicked = mouse_clicked
-            || (focused && (self.key_pressed(Key::Enter) || self.key_pressed(Key::Space)));
+        let clicked = !disabled
+            && (mouse_clicked
+                || (focused && (self.key_pressed(Key::Enter) || self.key_pressed(Key::Space))));
         if pressed || clicked {
             self.focused_id = Some(key.clone());
         }
@@ -900,6 +1035,7 @@ impl Context {
             pressed_progress,
             focused,
             primary,
+            disabled,
         );
         self.register_interaction(id, key.clone());
         self.register_focusable(id, key.clone());
@@ -911,6 +1047,124 @@ impl Context {
             focused,
             hovered,
             bounds,
+        }
+    }
+
+    /// Creates a compact button whose label sits in `horizontal` by
+    /// `vertical` padding, as MyGo's `Button(...).Padding(v, h)`.
+    ///
+    /// `active` fills the face with the accent color at low alpha, the
+    /// mark of a selected formatting button in a toolbar.
+    pub fn button_padded(
+        &mut self,
+        id: &str,
+        label: &str,
+        horizontal: f32,
+        vertical: f32,
+        active: bool,
+    ) -> ButtonState {
+        self.button_padded_disabled(id, label, horizontal, vertical, active, false)
+    }
+
+    /// Creates a padded button that shows as unavailable when `disabled` is
+    /// set, as MyGo's `Button(...).Padding(v, h).Disabled(b)` does.
+    pub fn button_padded_disabled(
+        &mut self,
+        id: &str,
+        label: &str,
+        horizontal: f32,
+        vertical: f32,
+        active: bool,
+        disabled: bool,
+    ) -> ButtonState {
+        let theme = self.theme.clone();
+        let font_size = theme.font_sizes.body;
+        let text_size = estimated_text_size(label, font_size, None);
+        let width = text_size.width + horizontal * 2.0 + 2.0;
+        let height = text_size.height + vertical * 2.0 + 2.0;
+        let node = self.new_named_node(
+            id,
+            Style {
+                width: Some(width),
+                height: Some(height),
+                ..Style::default()
+            },
+        );
+        self.register_interaction(node, id.to_string());
+        self.register_focusable(node, id.to_string());
+        let hovered = !disabled && self.pointer_in_previous(id);
+        let pressed = hovered && self.input.pointer_down;
+        let clicked = !disabled && self.clicked_in_previous(id);
+        let focused = self.focused_id.as_deref() == Some(id);
+        let hover_progress = self.animate(&format!("{id}:hover"), if hovered { 1.0 } else { 0.0 });
+        let pressed_progress =
+            self.animate(&format!("{id}:pressed"), if pressed { 1.0 } else { 0.0 });
+        let background = if active {
+            Color::rgba(theme.accent.r, theme.accent.g, theme.accent.b, 46)
+        } else {
+            mix_color(
+                mix_color(
+                    theme.surface,
+                    theme.surface_hover,
+                    hover_progress.clamp(0.0, 1.0),
+                ),
+                theme.surface_pressed,
+                pressed_progress.clamp(0.0, 1.0),
+            )
+        };
+        // MyGo draws a bordered box as a rounded rect filled with the face,
+        // and the one-pixel border as a ring outside it (`internal/scene`
+        // OpFill border): a translucent face blends with the page behind it,
+        // not with the border's color.
+        let mut commands = vec![
+            DrawCommand::RoundedRect {
+                x: 1.0,
+                y: 1.0,
+                width: (width - 2.0).max(1.0),
+                height: (height - 2.0).max(1.0),
+                radius: Radius::all(5.0),
+                color: background,
+            },
+            rounded_ring(width, height, 6.0, 1.0, theme.border),
+            DrawCommand::Text {
+                x: 1.0 + horizontal,
+                y: (height - measured_text_height(font_size)) / 2.0,
+                text: label.to_string(),
+                font_size,
+                weight: 400,
+                italic: false,
+                mono: false,
+                family: None,
+                color: theme.foreground,
+                max_width: Some((text_size.width).max(1.0)),
+                alignment: TextAlignment::Start,
+            },
+        ];
+        if disabled {
+            // Half the opacity over the page, as MyGo dims a disabled
+            // element and its contents.
+            let dim = |color: Color| mix_color(color, theme.background, 0.5);
+            for command in &mut commands {
+                match command {
+                    DrawCommand::RoundedRect { color, .. }
+                    | DrawCommand::Rect { color, .. }
+                    | DrawCommand::Line { color, .. } => *color = dim(*color),
+                    DrawCommand::Text { color, .. } => *color = dim(*color),
+                    _ => {}
+                }
+            }
+        }
+        self.nodes
+            .get_mut(&node)
+            .expect("padded button exists")
+            .commands = commands;
+        ButtonState {
+            id: id.to_string(),
+            clicked,
+            pressed,
+            focused,
+            hovered,
+            bounds: None,
         }
     }
 
@@ -975,13 +1229,64 @@ impl Context {
 
     /// Creates a text field backed by a caller-owned string.
     pub fn text_field(&mut self, id: &str, value: &mut String) -> TextFieldState {
-        self.text_field_impl(id, value, None, false)
+        self.text_field_impl(id, value, None, false, None, false)
+    }
+
+    /// Creates a single-line field whose border shows the Danger color, as
+    /// MyGo's text input does inside a field that reports an error
+    /// (`ui/form.go` inputBorder).
+    pub fn text_field_invalid(
+        &mut self,
+        id: &str,
+        value: &mut String,
+        invalid: bool,
+    ) -> TextFieldState {
+        self.text_field_invalid_impl(id, value, None, false, None, false, invalid)
     }
 
     /// Creates a single-line field that renders a bullet for each typed
     /// character while keeping the caller's real string intact.
     pub fn text_field_password(&mut self, id: &str, value: &mut String) -> TextFieldState {
-        self.text_field_impl(id, value, None, true)
+        self.text_field_impl(id, value, None, true, None, false)
+    }
+
+    /// Creates a single-line field that shows `placeholder` while empty,
+    /// in the muted color, as MyGo's `Placeholder`.
+    pub fn text_field_placeholder(
+        &mut self,
+        id: &str,
+        value: &mut String,
+        placeholder: &str,
+    ) -> TextFieldState {
+        self.text_field_impl(id, value, None, false, Some(placeholder), false)
+    }
+    /// Creates a masked field that shows `placeholder` while empty.
+    pub fn text_field_password_placeholder(
+        &mut self,
+        id: &str,
+        value: &mut String,
+        placeholder: &str,
+    ) -> TextFieldState {
+        self.text_field_impl(id, value, None, true, Some(placeholder), false)
+    }
+
+
+
+    /// Creates a text field without its frame, the input inside a MyGo
+    /// field (`ui/combobox.go` field): one line, no padding, no border.
+    pub fn text_field_bare(&mut self, id: &str, value: &mut String) -> TextFieldState {
+        self.text_field_impl(id, value, None, false, None, true)
+    }
+
+    /// Creates a borderless single-line field that shows `placeholder`
+    /// while empty.
+    pub fn text_field_bare_placeholder(
+        &mut self,
+        id: &str,
+        value: &mut String,
+        placeholder: Option<&str>,
+    ) -> TextFieldState {
+        self.text_field_impl(id, value, None, false, placeholder, true)
     }
 
     fn text_field_impl(
@@ -990,15 +1295,37 @@ impl Context {
         value: &mut String,
         filter: Option<&dyn Fn(&str) -> String>,
         mask: bool,
+        placeholder: Option<&str>,
+        bare: bool,
+    ) -> TextFieldState {
+        self.text_field_invalid_impl(id, value, filter, mask, placeholder, bare, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn text_field_invalid_impl(
+        &mut self,
+        id: &str,
+        value: &mut String,
+        filter: Option<&dyn Fn(&str) -> String>,
+        mask: bool,
+        placeholder: Option<&str>,
+        bare: bool,
+        invalid: bool,
     ) -> TextFieldState {
         let theme = self.theme.clone();
-        let font_size = 15.5;
+        let font_size = theme.font_sizes.body;
         let measured = measured_text_height(font_size);
-        // MyGo's single-line control grid uses a 44px field. Center the text
-        // when the real font line height is shorter than that target.
-        let height = (measured + theme.spacing.sm * 2.0).max(44.0);
-        let vertical = (height - measured) / 2.0;
-        let horizontal = theme.spacing.sm;
+        // MyGo's text input: Space(1.5) of vertical and Space(2.5) of
+        // horizontal padding around one line, on a Surface box edged in
+        // Border (`ui/textinput.go` textInput).
+        // A bare field draws its line alone, as the input inside a MyGo
+        // field (`ui/combobox.go` field).
+        let vertical = if bare { 0.0 } else { 6.0 };
+        let horizontal = if bare { 0.0 } else { 10.0 };
+        let inset = if bare { 0.0 } else { 1.0 };
+        // MyGo's Border(1) takes layout space, so the box is two pixels
+        // taller than the padding and one line alone.
+        let height = measured + vertical * 2.0 + if bare { 0.0 } else { 2.0 };
         self.widget_state_text_field(id);
         let width = self.current_content_width();
         let style = Style {
@@ -1127,8 +1454,8 @@ impl Context {
         } else {
             value[..cursor].to_string()
         };
-        let cursor_x = horizontal + measure_text_width(&display_cursor_prefix, font_size);
-        let cursor_y = vertical;
+        let cursor_x = horizontal + inset + measure_text_width(&display_cursor_prefix, font_size);
+        let cursor_y = vertical + inset;
         self.widget_states.insert(
             id.to_string(),
             WidgetState::TextField {
@@ -1138,31 +1465,43 @@ impl Context {
                 cursor_y,
             },
         );
-        let height = measured_text_height(font_size) + vertical * 2.0;
-        let border = if focused {
+        // The box is the layout's own: the border takes layout space, so
+        // the face must fill the node rather than the padding alone.
+        let height = measured + vertical * 2.0 + if bare { 0.0 } else { 2.0 };
+        // MyGo's inputBorder (`ui/form.go`): the Danger color while the
+        // input is invalid, the accent while it has the focus, a darker
+        // border while the pointer is over it.
+        let border = if invalid {
+            theme.danger()
+        } else if focused {
             theme.accent
         } else if hovered {
             mix_color(theme.border, theme.accent, 0.35)
         } else {
             theme.border
         };
-        let mut commands = vec![
-            DrawCommand::Rect {
-                x: 0.0,
-                y: 0.0,
-                width,
-                height,
-                color: border,
-            },
-            DrawCommand::RoundedRect {
-                x: 1.0,
-                y: 1.0,
-                width: (width - 2.0).max(1.0),
-                height: (height - 2.0).max(1.0),
-                radius: Radius::all(5.0),
-                color: theme.surface,
-            },
-        ];
+        let mut commands = if bare {
+            Vec::new()
+        } else {
+            vec![
+                DrawCommand::RoundedRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width,
+                    height,
+                    radius: Radius::all(6.0),
+                    color: border,
+                },
+                DrawCommand::RoundedRect {
+                    x: 1.0,
+                    y: 1.0,
+                    width: (width - 2.0).max(1.0),
+                    height: (height - 2.0).max(1.0),
+                    radius: Radius::all(5.0),
+                    color: theme.surface,
+                },
+            ]
+        };
         if focused {
             if let Some((start, end)) = selection {
                 let selection_prefix: String = if mask {
@@ -1182,30 +1521,47 @@ impl Context {
                     y: vertical - 1.0,
                     width: selection_width.max(1.0),
                     height: measured_text_height(font_size) + 2.0,
-                    color: mix_color(theme.accent, theme.surface, 0.35),
+                    // MyGo's Selection: the accent at a quarter alpha.
+                    color: Color::rgba(theme.accent.r, theme.accent.g, theme.accent.b, 64),
                 });
             }
         }
+        // An empty field shows its placeholder in the muted color, as MyGo's
+        // editor does.
+        let empty = display.is_empty();
+        let (shown, shown_color) = if empty {
+            match placeholder {
+                Some(placeholder) if !placeholder.is_empty() => {
+                    (placeholder.to_string(), theme.muted)
+                }
+                _ => (display.clone(), theme.foreground),
+            }
+        } else {
+            (display.clone(), theme.foreground)
+        };
         commands.push(DrawCommand::Text {
-            x: horizontal,
-            y: vertical,
-            text: display.clone(),
+            x: horizontal + inset,
+            y: vertical + inset,
+            text: shown,
             font_size,
             weight: 400,
-            color: theme.foreground,
+            italic: false,
+            mono: false,
+            family: None,
+            color: shown_color,
             max_width: Some((width - horizontal * 2.0).max(1.0)),
             alignment: TextAlignment::Start,
         });
-        if focused {
+        if self.shows_focus_ring(focused) && !bare {
             commands.extend(focus_ring(0.0, 0.0, width, height, border));
         }
         if focused {
-            let cursor_x = horizontal + measure_text_width(&display_cursor_prefix, font_size);
+            let cursor_x = horizontal + inset + measure_text_width(&display_cursor_prefix, font_size);
             commands.push(DrawCommand::Line {
                 x1: cursor_x,
-                y1: vertical,
+                y1: vertical + inset,
                 x2: cursor_x,
-                y2: height - vertical,
+                y2: height - vertical - inset,
                 width: 1.0,
                 color: theme.accent,
             });
@@ -1217,10 +1573,16 @@ impl Context {
             Some(display.as_str()),
             focused,
         );
-        self.nodes
-            .get_mut(&node_id)
-            .expect("text field node exists")
-            .commands = commands;
+        let text_ascent = host_text_ascent(font_size, false, false, false)
+            .or_else(|| default_font().map(|font| font.ascent(font_size)))
+            .unwrap_or(font_size * 0.93);
+        if let Some(node) = self.nodes.get_mut(&node_id) {
+            node.commands = commands;
+            // MyGo lines a form field's row up on the first line of text it
+            // finds inside the control (`ui/form.go` anchor), which for a
+            // text input is its line inside the padding and border.
+            node.first_baseline = Some(vertical + inset + text_ascent);
+        }
         TextFieldState {
             changed,
             cursor,
@@ -1240,13 +1602,84 @@ impl Context {
         value: &mut String,
         visible_lines: usize,
     ) -> TextFieldState {
+        self.text_area_impl(id, value, visible_lines, None, 80.0, false)
+    }
+
+    /// Creates a multiline text area that shows `placeholder` while empty.
+    pub fn text_area_placeholder(
+        &mut self,
+        id: &str,
+        value: &mut String,
+        visible_lines: usize,
+        placeholder: &str,
+    ) -> TextFieldState {
+        self.text_area_impl(id, value, visible_lines, Some(placeholder), 80.0, false)
+    }
+    /// Creates a multiline text area at least `min_height` tall, as MyGo's
+    /// `Height` on a text area.
+    pub fn text_area_sized(
+        &mut self,
+        id: &str,
+        value: &mut String,
+        visible_lines: usize,
+        min_height: f32,
+    ) -> TextFieldState {
+        self.text_area_impl(id, value, visible_lines, None, min_height, false)
+    }
+
+    /// Creates a multiline text area at least `min_height` tall that shows
+    /// `placeholder` while empty, as MyGo's `TextArea(...).Placeholder`.
+    pub fn text_area_sized_placeholder(
+        &mut self,
+        id: &str,
+        value: &mut String,
+        visible_lines: usize,
+        min_height: f32,
+        placeholder: &str,
+    ) -> TextFieldState {
+        self.text_area_impl(
+            id,
+            value,
+            visible_lines,
+            Some(placeholder),
+            min_height,
+            false,
+        )
+    }
+
+    /// Creates a multiline text area in a monospace font, as MyGo's
+    /// `TextAreaBuffer(...).Font("monospace")`.
+    pub fn text_area_mono(
+        &mut self,
+        id: &str,
+        value: &mut String,
+        visible_lines: usize,
+        min_height: f32,
+    ) -> TextFieldState {
+        self.text_area_impl(id, value, visible_lines, None, min_height, true)
+    }
+
+
+
+    fn text_area_impl(
+        &mut self,
+        id: &str,
+        value: &mut String,
+        visible_lines: usize,
+        placeholder: Option<&str>,
+        min_height: f32,
+        mono: bool,
+    ) -> TextFieldState {
         let theme = self.theme.clone();
-        let font_size = 15.5;
-        let line_height = measured_text_height(font_size);
+        let font_size = theme.font_sizes.body;
+        // MyGo lays each line as tall as its font's ascent and descent; the
+        // monospace family is a pixel shorter than the sans one.
+        let line_height = measured_text_height_styled(font_size, mono);
         let visible = visible_lines.max(1);
-        let vertical = theme.spacing.sm;
-        let horizontal = theme.spacing.sm;
-        let height = (line_height * visible as f32 + vertical * 2.0).max(88.0);
+        let vertical = 6.0;
+        let horizontal = 10.0;
+        // MyGo's text area sets MinHeight Space(20) (`ui/textinput.go`).
+        let height = (line_height * visible as f32 + vertical * 2.0).max(min_height);
         let width = self.current_content_width();
         self.widget_state_text_field(id);
         let node_id = self.new_named_node(
@@ -1395,8 +1828,10 @@ impl Context {
             0
         };
         let (line_start, _) = spans[current_line];
-        let cursor_x = horizontal + measure_text_width(&value[line_start..cursor], font_size);
-        let cursor_y = vertical + (current_line - start_line) as f32 * line_height;
+        let cursor_x = horizontal + 1.0
+            + host_text_width_weighted(&value[line_start..cursor], font_size, false, mono, 400)
+                .unwrap_or_else(|| measure_text_width(&value[line_start..cursor], font_size));
+        let cursor_y = vertical + 1.0 + (current_line - start_line) as f32 * line_height;
         self.widget_states.insert(
             id.to_string(),
             WidgetState::TextField {
@@ -1414,11 +1849,12 @@ impl Context {
             theme.border
         };
         let mut commands = vec![
-            DrawCommand::Rect {
+            DrawCommand::RoundedRect {
                 x: 0.0,
                 y: 0.0,
                 width,
                 height,
+                radius: Radius::all(6.0),
                 color: border,
             },
             DrawCommand::RoundedRect {
@@ -1430,21 +1866,45 @@ impl Context {
                 color: theme.surface,
             },
         ];
+        if value.is_empty() {
+            if let Some(placeholder) = placeholder {
+                if !placeholder.is_empty() {
+                    // MyGo's border takes layout space, so the text starts
+                    // one pixel inside the padding (`ui/textinput.go`).
+                    commands.push(DrawCommand::Text {
+                        x: horizontal + 1.0,
+                        y: vertical + 1.0,
+                        text: placeholder.to_string(),
+                        font_size,
+                        weight: 400,
+                        italic: false,
+                        mono,
+                        family: None,
+                        color: theme.muted,
+                        max_width: Some((width - horizontal * 2.0).max(1.0)),
+                        alignment: TextAlignment::Start,
+                    });
+                }
+            }
+        }
         let line_count = spans.len();
         for line in start_line..line_count.min(start_line + visible) {
             let (start, end) = spans[line];
             commands.push(DrawCommand::Text {
-                x: horizontal,
-                y: vertical + (line - start_line) as f32 * line_height,
+                x: horizontal + 1.0,
+                y: vertical + 1.0 + (line - start_line) as f32 * line_height,
                 text: value[start..end].to_string(),
                 font_size,
                 weight: 400,
+                italic: false,
+                mono,
+                family: None,
                 color: theme.foreground,
                 max_width: Some((width - horizontal * 2.0).max(1.0)),
                 alignment: TextAlignment::Start,
             });
         }
-        if focused {
+        if self.shows_focus_ring(focused) {
             commands.extend(focus_ring(0.0, 0.0, width, height, border));
         }
         if focused {
@@ -1468,6 +1928,14 @@ impl Context {
             .get_mut(&node_id)
             .expect("text area node exists")
             .commands = commands;
+        // The area's first line, for a row that lines children up on
+        // baselines (`ui/form.go` anchor).
+        let area_ascent = host_text_ascent(font_size, false, mono, false)
+            .or_else(|| default_font().map(|font| font.ascent(font_size)))
+            .unwrap_or(font_size * 0.93);
+        if let Some(node) = self.nodes.get_mut(&node_id) {
+            node.first_baseline = Some(vertical + 1.0 + area_ascent);
+        }
         TextFieldState {
             changed,
             cursor,
@@ -1484,7 +1952,6 @@ impl Context {
         text: &mut String,
     ) -> EditableTextResponse {
         let theme = self.theme.clone();
-        let width = self.current_content_width();
         let input_id = format!("{id}:input");
         let mut submitted = false;
         let mut cancelled = false;
@@ -1552,7 +2019,7 @@ impl Context {
             }
         }
         if state.editing {
-            let field = self.text_field_impl(&input_id, &mut state.buffer, None, false);
+            let field = self.text_field_impl(&input_id, &mut state.buffer, None, false, None, false);
             if state.was_focused && !field.focused {
                 let next = state.buffer.trim().to_string();
                 state.editing = false;
@@ -1578,42 +2045,33 @@ impl Context {
             self.focused_id.as_deref() == Some(id)
         };
         if !state.editing {
-            let height = measured_text_height(theme.font_sizes.body) + theme.spacing.xs * 2.0;
+            // At rest MyGo shows the name as plain text, as wide as it is
+            // (`ui/editable.go` coreEditableText).
+            let height = measured_text_height(theme.font_sizes.body);
+            let text_width = measure_text_width(text, theme.font_sizes.body).max(1.0);
             let node = self.new_named_node(
                 id,
                 Style {
-                    width: Some(width),
+                    width: Some(text_width),
                     height: Some(height),
                     ..Style::default()
                 },
             );
             self.register_interaction(node, id.to_string());
             self.register_focusable(node, id.to_string());
-            let hovered = self.pointer_in_previous(id);
-            let mut commands = Vec::new();
-            if hovered || focused {
-                commands.push(DrawCommand::RoundedRect {
-                    x: 0.0,
-                    y: 0.0,
-                    width,
-                    height,
-                    radius: Radius::all(3.0),
-                    color: mix_color(theme.surface, theme.foreground, 0.06),
-                });
-            }
-            commands.push(DrawCommand::Text {
-                x: theme.spacing.xs,
-                y: theme.spacing.xs,
-                text: text.clone(),
+            let commands = vec![DrawCommand::Text {
+                x: 0.0,
+                y: 0.0,
+                text: text.to_string(),
                 font_size: theme.font_sizes.body,
                 weight: 400,
+                italic: false,
+                mono: false,
+                family: None,
                 color: theme.foreground,
-                max_width: Some((width - theme.spacing.xs * 2.0).max(1.0)),
+                max_width: Some(text_width),
                 alignment: TextAlignment::Start,
-            });
-            if focused {
-                commands.extend(focus_ring(0.0, 0.0, width, height, theme.accent));
-            }
+            }];
             self.register_access_node(node, Role::Button, text, Some("editable"), focused);
             self.nodes
                 .get_mut(&node)
@@ -1637,132 +2095,162 @@ impl Context {
         input: &mut String,
     ) -> TokenFieldState {
         let theme = self.theme.clone();
+        let font_size = theme.font_sizes.body;
         let width = self.current_content_width();
         let input_id = format!("{id}:input");
-        let root = self.new_named_node(
+        let gap = 6.0;
+        // MyGo's token field: a wrapping field of chips and the input
+        // (`ui/combobox.go` coreTokenField). Its Space(1.5) of vertical and
+        // Space(2.5) of horizontal padding sit inside a one-pixel border,
+        // which takes layout space, so the content starts a pixel in and the
+        // box is two pixels larger than the padding and a chip.
+        let field = self.new_named_node(
             id,
             Style {
                 width: Some(width),
-                flex_direction: FlexDirection::Column,
-                gap: theme.spacing.xs,
+                flex_direction: FlexDirection::Row,
+                flex_wrap: true,
+                gap,
+                align_items: AlignItems::Center,
+                padding: Edges {
+                    top: 7.0,
+                    right: 11.0,
+                    bottom: 7.0,
+                    left: 11.0,
+                },
                 ..Style::default()
             },
         );
-        let mut removed = false;
+        {
+            let node_ref = self.nodes.get_mut(&field).expect("token field exists");
+            node_ref.fill = Some((theme.surface, Radius::all(6.0)));
+            node_ref.stroke = Some((theme.border, Radius::all(6.0)));
+        }
+        self.push_parent(field);
+        let mut removed_index = None;
         for index in 0..tokens.len() {
-            let key = format!("{id}:token:{index}");
-            if self.clicked_in_previous(&key) {
-                tokens.remove(index);
-                removed = true;
-                self.focused_id = Some(input_id.clone());
-                break;
+            let token = tokens[index].clone();
+            let key = format!("{id}:token:{token}");
+            let remove_key = format!("{id}:token:{token}:remove");
+            let text_width = measure_text_width(&token, font_size);
+            // The chip gaps its text and remove button by Space(1).
+            let chip_gap = 4.0;
+            let chip_height = measured_text_height(font_size) + 2.0;
+            let chip_width = text_width + 8.0 + chip_gap + 14.0 + 4.0;
+            let chip = self.new_named_node(
+                &key,
+                Style {
+                    width: Some(chip_width),
+                    height: Some(chip_height),
+                    flex_direction: FlexDirection::Row,
+                    gap: chip_gap,
+                    align_items: AlignItems::Center,
+                    padding: Edges {
+                        top: 1.0,
+                        right: 4.0,
+                        bottom: 1.0,
+                        left: 8.0,
+                    },
+                    ..Style::default()
+                },
+            );
+            {
+                let node_ref = self.nodes.get_mut(&chip).expect("chip exists");
+                node_ref.fill = Some((theme.surface_pressed, Radius::all(6.0)));
             }
+            self.push_parent(chip);
+            self.text(&token);
+            let remove = self.new_named_node(
+                &remove_key,
+                Style {
+                    width: Some(14.0),
+                    height: Some(14.0),
+                    ..Style::default()
+                },
+            );
+            self.register_interaction(remove, remove_key.clone());
+            let hovered = self.pointer_in_previous(&remove_key);
+            let clicked = self.clicked_in_previous(&remove_key);
+            if clicked {
+                removed_index = Some(index);
+            }
+            let mut commands = Vec::new();
+            if hovered {
+                commands.push(DrawCommand::RoundedRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 14.0,
+                    height: 14.0,
+                    radius: Radius::all(4.0),
+                    color: theme.surface_hover,
+                });
+            }
+            for (from, to) in [((4.2, 4.2), (9.8, 9.8)), ((9.8, 4.2), (4.2, 9.8))] {
+                commands.push(DrawCommand::Line {
+                    x1: from.0,
+                    y1: from.1,
+                    x2: to.0,
+                    y2: to.1,
+                    width: 1.25,
+                    color: theme.muted,
+                });
+            }
+            self.register_access_node(
+                remove,
+                Role::Button,
+                &format!("remove token {}", token),
+                None,
+                false,
+            );
+            self.nodes
+                .get_mut(&remove)
+                .expect("token remove exists")
+                .commands = commands;
+            self.pop_parent();
         }
-        self.push_parent(root);
-        if !tokens.is_empty() {
-            self.row().gap(theme.spacing.xs).children(|context| {
-                for (index, token) in tokens.iter().enumerate() {
-                    let key = format!("{id}:token:{index}");
-                    let chip_width = measure_text_width(token, theme.font_sizes.small)
-                        + theme.spacing.sm * 2.0
-                        + 14.0;
-                    let node = context.new_named_node(
-                        &key,
-                        Style {
-                            width: Some(chip_width.max(36.0)),
-                            height: Some(22.0),
-                            ..Style::default()
-                        },
-                    );
-                    context.register_interaction(node, key.clone());
-                    let hovered = context.pointer_in_previous(&key);
-                    let commands = vec![
-                        DrawCommand::RoundedRect {
-                            x: 0.0,
-                            y: 0.0,
-                            width: chip_width.max(36.0),
-                            height: 22.0,
-                            radius: Radius::all(11.0),
-                            color: mix_color(theme.surface, theme.accent, 0.2),
-                        },
-                        DrawCommand::Text {
-                            x: theme.spacing.sm,
-                            y: 3.0,
-                            text: token.clone(),
-                            font_size: theme.font_sizes.small,
-                            weight: 400,
-                            color: theme.foreground,
-                            max_width: Some((chip_width - theme.spacing.sm * 2.0).max(1.0)),
-                            alignment: TextAlignment::Start,
-                        },
-                        DrawCommand::Text {
-                            x: (chip_width.max(36.0)
-                                - theme.spacing.xs
-                                - measure_text_width("×", theme.font_sizes.small))
-                            .max(theme.spacing.sm),
-                            y: 3.0,
-                            text: "×".to_string(),
-                            font_size: theme.font_sizes.small,
-                            weight: 400,
-                            color: if hovered {
-                                theme.foreground
-                            } else {
-                                theme.muted
-                            },
-                            max_width: None,
-                            alignment: TextAlignment::Start,
-                        },
-                    ];
-                    context.register_access_node(
-                        node,
-                        Role::Button,
-                        &format!("remove token {}", token),
-                        None,
-                        false,
-                    );
-                    context
-                        .nodes
-                        .get_mut(&node)
-                        .expect("token chip exists")
-                        .commands = commands;
-                }
-            });
-        }
-        let field = self.text_field_impl(&input_id, input, None, false);
+        let mut field_state = None;
+        self.container().width(80.0).children(|context| {
+            field_state = Some(context.text_field_bare(&input_id, input));
+        });
         self.pop_parent();
+        let field_state = field_state.expect("token input exists");
         let mut added = false;
-        if field.focused {
-            while let Some(position) = input.find(',') {
-                let token = input[..position].trim().to_string();
-                if !token.is_empty() {
+        let mut removed = false;
+        if let Some(index) = removed_index {
+            tokens.remove(index);
+            removed = true;
+            self.focused_id = Some(input_id.clone());
+        }
+        let mut typed = input.clone();
+        if field_state.focused {
+            while let Some(position) = typed.find(',') {
+                let token = typed[..position].trim().to_string();
+                if !token.is_empty() && !tokens.contains(&token) {
                     tokens.push(token);
                     added = true;
                 }
-                input.drain(..=position);
+                typed.drain(..=position);
             }
             if self.key_pressed(Key::Enter) {
-                let token = input.trim().to_string();
-                if !token.is_empty() {
+                let token = typed.trim().to_string();
+                if !token.is_empty() && !tokens.contains(&token) {
                     tokens.push(token);
-                    input.clear();
+                    typed.clear();
                     added = true;
                 }
             }
-            if input.is_empty() && self.key_pressed(Key::Backspace) && !tokens.is_empty() {
+            if typed.is_empty() && self.key_pressed(Key::Backspace) && !tokens.is_empty() {
                 tokens.pop();
                 removed = true;
             }
-            if added || removed {
-                self.focused_id = Some(input_id.clone());
-            }
         }
-        self.register_access_node(root, Role::Group, id, None, false);
+        *input = typed;
         TokenFieldState {
-            changed: field.changed || added || removed,
+            changed: field_state.changed || added || removed,
             added,
             removed,
-            focused: field.focused,
-            hovered: field.hovered,
+            focused: field_state.focused,
+            hovered: field_state.hovered,
         }
     }
 
@@ -1774,6 +2262,7 @@ impl Context {
         state: &mut AutocompleteState,
         candidates: &[&str],
     ) -> AutocompleteResponse {
+        let theme = self.theme.clone();
         let input_id = format!("{id}:input");
         let popup_id = format!("{id}:popup");
         let input_bounds = self
@@ -1814,7 +2303,42 @@ impl Context {
                 self.focused_id = Some(input_id.clone());
             }
         }
-        let field = self.text_field_impl(&input_id, text, None, false);
+        // MyGo's autocomplete input is a field like the combobox's, without
+        // the chevron (`ui/combobox.go` coreAutocomplete).
+        let font_size = self.theme.font_sizes.body;
+        let field_width = self.current_content_width();
+        let field_height = measured_text_height(font_size) + 14.0;
+        let inner_width = (field_width - 22.0).max(40.0);
+        let field_node = self.new_named_node(
+            &format!("{id}:field"),
+            Style {
+                width: Some(field_width),
+                height: Some(field_height),
+                flex_direction: FlexDirection::Row,
+                gap: 6.0,
+                align_items: AlignItems::Center,
+                // MyGo's input places its text after a 1 DIP border and 10
+                // DIP padding on each side (`ui/layout.go` contentX).
+                padding: Edges::new(6.0, 11.0, 6.0, 11.0),
+                ..Style::default()
+            },
+        );
+        {
+            let node_ref = self.nodes.get_mut(&field_node).expect("autocomplete field exists");
+            node_ref.fill = Some((theme.surface, Radius::all(6.0)));
+            node_ref.stroke = Some((theme.border, Radius::all(6.0)));
+        }
+        self.push_parent(field_node);
+        let mut field_state = None;
+        self.container().width(inner_width).children(|context| {
+            field_state = Some(context.text_field_bare_placeholder(
+                &input_id,
+                text,
+                state.placeholder.as_deref(),
+            ));
+        });
+        self.pop_parent();
+        let field = field_state.expect("autocomplete input exists");
         if field.changed {
             state.selected = None;
             state.dismissed = None;
@@ -1938,7 +2462,41 @@ impl Context {
                 }
             }
         }
-        let field = self.text_field_impl(&input_id, query, None, false);
+        // MyGo's combobox is a field: Surface with a Border, the input
+        // inside it and a 10px chevron at its end (`ui/combobox.go`).
+        let font_size = self.theme.font_sizes.body;
+        let field_width = self.current_content_width();
+        let field_height = measured_text_height(font_size) + 14.0;
+        let chevron_size = 10.0;
+        let field_gap = 6.0;
+        let inner_width = (field_width - 20.0 - field_gap - chevron_size - 2.0).max(40.0);
+        // The field's one-pixel border takes layout room, so its content
+        // starts a pixel inside the padding (`ui/combobox.go` field).
+        let field_node = self.new_named_node(
+            &format!("{id}:field"),
+            Style {
+                width: Some(field_width),
+                height: Some(field_height),
+                flex_direction: FlexDirection::Row,
+                gap: field_gap,
+                align_items: AlignItems::Center,
+                padding: Edges::symmetric(7.0, 11.0),
+                ..Style::default()
+            },
+        );
+        {
+            let node_ref = self.nodes.get_mut(&field_node).expect("combobox field exists");
+            node_ref.fill = Some((theme.surface, Radius::all(6.0)));
+            node_ref.stroke = Some((theme.border, Radius::all(6.0)));
+        }
+        self.push_parent(field_node);
+        let mut field_state = None;
+        self.container().width(inner_width).children(|context| {
+            field_state = Some(context.text_field_bare(&input_id, query));
+        });
+        self.icon(&format!("{id}:chevron"), "chevron_down", chevron_size, theme.muted);
+        self.pop_parent();
+        let field = field_state.expect("combobox input exists");
         if field.changed {
             state.selected = None;
             if state.open {
@@ -2011,6 +2569,18 @@ impl Context {
         target_width: f32,
         target_height: f32,
     ) -> ImageState {
+        self.image_styled(id, data, target_width, target_height, ImageStyle::default())
+    }
+
+    /// Draws an image with MyGo's Fit, corner radius and grayscale.
+    pub fn image_styled(
+        &mut self,
+        id: &str,
+        data: ImageData<'_>,
+        target_width: f32,
+        target_height: f32,
+        style: ImageStyle,
+    ) -> ImageState {
         let width = if target_width.is_finite() && target_width > 0.0 {
             target_width.round() as u32
         } else {
@@ -2031,7 +2601,93 @@ impl Context {
         );
         let mut commands = Vec::new();
         let (columns, rows) = if data.is_valid() && width > 0 && height > 0 {
-            scaled_rgba_commands(data, &mut commands, width as f32, height as f32, false)
+            // MyGo's fitIn (`ui/paint.go`): the picture is scaled into the
+            // box as Fit says, and only the part that falls inside it shows.
+            let box_width = width as f32;
+            let box_height = height as f32;
+            let source_width = data.width as f32;
+            let source_height = data.height as f32;
+            // MyGo's Fit fills the box whatever the picture's shape
+            // (`ui/paint.go` fitIn's `case FillBox: return dst, src`), and
+            // scales the rest about the box's middle.
+            let scale = match style.fit {
+                ImageFit::Fill => 1.0,
+                ImageFit::Contain => (box_width / source_width).min(box_height / source_height),
+                ImageFit::Cover => (box_width / source_width).max(box_height / source_height),
+                ImageFit::ScaleDown => (box_width / source_width)
+                    .min(box_height / source_height)
+                    .min(1.0),
+                ImageFit::NaturalSize => 1.0,
+            };
+            let (placed_width, placed_height) = if style.fit == ImageFit::Fill {
+                (box_width, box_height)
+            } else {
+                (source_width * scale, source_height * scale)
+            };
+            let placed_x = (box_width - placed_width) / 2.0;
+            let placed_y = (box_height - placed_height) / 2.0;
+            // MyGo's fitIn takes the source fractions from the unrounded
+            // shown rect and only then snaps that rect to device pixels
+            // (`ui/paint.go`): the sampler still walks the whole fraction
+            // across the snapped box. Rounding the rect before taking the
+            // fractions would shift every sample by the rounding error.
+            let shown_left = placed_x.max(0.0);
+            let shown_top = placed_y.max(0.0);
+            let shown_right = (placed_x + placed_width).min(box_width);
+            let shown_bottom = (placed_y + placed_height).min(box_height);
+            let source_x = (shown_left - placed_x) / placed_width.max(1.0);
+            let source_y = (shown_top - placed_y) / placed_height.max(1.0);
+            let source_fraction_width = (shown_right - shown_left) / placed_width.max(1.0);
+            let source_fraction_height = (shown_bottom - shown_top) / placed_height.max(1.0);
+            let pixel_scale = self.pixel_scale;
+            let snap = |value: f32| (value * pixel_scale).round() / pixel_scale;
+            let shown_x = snap(shown_left);
+            let shown_y = snap(shown_top);
+            let shown_width = snap(shown_right) - shown_x;
+            let shown_height = snap(shown_bottom) - shown_y;
+            if shown_width > 0.0 && shown_height > 0.0 {
+                let mut placed = Vec::new();
+                scaled_rgba_commands_with(
+                    data,
+                    &mut placed,
+                    shown_width,
+                    shown_height,
+                    ImageMask {
+                        radius: Radius::all(style.radius),
+                        origin_x: shown_x - placed_x,
+                        origin_y: shown_y - placed_y,
+                        width: placed_width,
+                        height: placed_height,
+                    },
+                    ImageRegion {
+                        x: source_x,
+                        y: source_y,
+                        width: source_fraction_width,
+                        height: source_fraction_height,
+                    },
+                    style.grayscale,
+                    self.pixel_scale,
+                );
+                for command in placed {
+                    match command {
+                        DrawCommand::Rect {
+                            x,
+                            y,
+                            width: cell_width,
+                            height: cell_height,
+                            color,
+                        } => commands.push(DrawCommand::Rect {
+                            x: x + shown_x,
+                            y: y + shown_y,
+                            width: cell_width,
+                            height: cell_height,
+                            color,
+                        }),
+                        other => commands.push(other),
+                    }
+                }
+            }
+            (shown_width.round() as usize, shown_height.round() as usize)
         } else {
             (0, 0)
         };
@@ -2091,198 +2747,110 @@ impl Context {
         let theme = self.theme.clone();
         let width = self.current_content_width();
         let blocks = parse_markdown(source);
+        let body = theme.font_sizes.body;
+        let block_spacing = body * 0.75;
+        let heading_sizes = [1.6_f32, 1.35, 1.15, 1.0, 0.95, 0.9];
+        let heading_weights = [700_u16, 650, 600, 600, 600, 600];
         let root = self.new_named_node(
             id,
             Style {
                 width: Some(width),
                 flex_direction: FlexDirection::Column,
-                gap: theme.spacing.sm,
                 ..Style::default()
             },
         );
         self.push_parent(root);
-        for block in &blocks {
-            match block {
-                MarkdownBlock::Heading { level, spans } => {
-                    let font_size = match level {
-                        1 => 26.0,
-                        2 => 22.0,
-                        3 => 19.0,
-                        4 => 17.0,
-                        5 => 15.0,
-                        _ => theme.font_sizes.body,
-                    };
-                    self.inline_row(spans, font_size, true);
+        let mut prev_heading = 0_u8;
+        let mut first = true;
+        for (index, block) in blocks.iter().enumerate() {
+            let mut top = 0.0_f32;
+            if !first {
+                top = block_spacing;
+                if prev_heading > 0 {
+                    top = body * 0.55;
                 }
-                MarkdownBlock::Paragraph(spans) => {
-                    self.inline_row(spans, theme.font_sizes.body, false);
-                }
-                MarkdownBlock::UnorderedList(items) => {
-                    for item in items {
-                        self.row().gap(theme.spacing.xs).children(|context| {
-                            context
-                                .text("•")
-                                .font_size(theme.font_sizes.body)
-                                .color(theme.muted);
-                            for span in item {
-                                context.inline_span_node(span, theme.font_sizes.body, false);
-                            }
-                        });
-                    }
-                }
-                MarkdownBlock::OrderedList(items) => {
-                    for (index, item) in items.iter().enumerate() {
-                        self.row().gap(theme.spacing.xs).children(|context| {
-                            context
-                                .text(&format!("{}.", index + 1))
-                                .font_size(theme.font_sizes.body)
-                                .color(theme.muted);
-                            for span in item {
-                                context.inline_span_node(span, theme.font_sizes.body, false);
-                            }
-                        });
-                    }
-                }
-                MarkdownBlock::Code { language, lines } => {
-                    let font_size = theme.font_sizes.body;
-                    let line_height = measured_text_height(font_size);
-                    let code_top = if language.is_some() { 26.0 } else { 12.0 };
-                    let height = code_top + line_height * lines.len() as f32 + 10.0;
-                    let node = self.new_node(Style {
-                        width: Some(width),
-                        height: Some(height),
-                        ..Style::default()
-                    });
-                    let mut commands = vec![DrawCommand::RoundedRect {
-                        x: 0.0,
-                        y: 0.0,
-                        width,
-                        height,
-                        radius: Radius::all(8.0),
-                        color: mix_color(theme.surface, theme.background, 0.65),
-                    }];
-                    if let Some(language) = language {
-                        commands.push(DrawCommand::Text {
-                            x: 12.0,
-                            y: 8.0,
-                            text: language.clone(),
-                            font_size: 11.0,
-                            weight: 400,
-                            color: theme.muted,
-                            max_width: Some((width - 24.0).max(1.0)),
-                            alignment: TextAlignment::Start,
-                        });
-                    }
-                    commands.push(DrawCommand::Text {
-                        x: 12.0,
-                        y: code_top,
-                        text: lines.join("\n"),
-                        font_size,
-                        weight: 400,
-                        color: theme.foreground,
-                        max_width: Some((width - 24.0).max(1.0)),
-                        alignment: TextAlignment::Start,
-                    });
-                    self.nodes
-                        .get_mut(&node)
-                        .expect("markdown code node exists")
-                        .commands = commands;
-                }
-                MarkdownBlock::Table { headers, rows } => {
-                    let font_size = theme.font_sizes.body;
-                    let row_height = measured_text_height(font_size) + 10.0;
-                    let columns = headers
-                        .len()
-                        .max(rows.iter().map(Vec::len).max().unwrap_or(0))
-                        .max(1);
-                    let mut widths = vec![0.0_f32; columns];
-                    for (column, header) in headers.iter().enumerate() {
-                        widths[column] = widths[column].max(measure_text_width(header, font_size));
-                    }
-                    for row in rows {
-                        for (column, cell) in row.iter().enumerate().take(columns) {
-                            widths[column] = widths[column].max(measure_text_width(cell, font_size));
-                        }
-                    }
-                    for width in &mut widths {
-                        *width = (*width + 28.0).max(80.0);
-                    }
-                    let total: f32 = widths.iter().sum();
-                    let scale = if total > width { width / total } else { 1.0 };
-                    for width in &mut widths {
-                        *width *= scale;
-                    }
-                    let height = row_height * (rows.len() + 1) as f32;
-                    let node = self.new_node(Style {
-                        width: Some(width),
-                        height: Some(height),
-                        ..Style::default()
-                    });
-                    let mut commands = vec![
-                        DrawCommand::RoundedRect {
-                            x: 0.0,
-                            y: 0.0,
-                            width,
-                            height,
-                            radius: Radius::all(8.0),
-                            color: theme.surface,
-                        },
-                        DrawCommand::Rect {
-                            x: 0.0,
-                            y: 0.0,
-                            width,
-                            height: row_height,
-                            color: mix_color(theme.surface, theme.border, 0.3),
-                        },
-                    ];
-                    let mut x = 0.0;
-                    for (column, header) in headers.iter().enumerate() {
-                        commands.push(DrawCommand::Text {
-                            x: x + 12.0,
-                            y: (row_height - measured_text_height(font_size)) / 2.0,
-                            text: header.clone(),
-                            font_size,
-                            weight: 600,
-                            color: theme.foreground,
-                            max_width: Some((widths[column] - 24.0).max(1.0)),
-                            alignment: TextAlignment::Start,
-                        });
-                        x += widths[column];
-                    }
-                    for (row_index, row) in rows.iter().enumerate() {
-                        let y = row_height * (row_index + 1) as f32;
-                        let mut x = 0.0;
-                        for (column, cell) in row.iter().enumerate().take(columns) {
-                            commands.push(DrawCommand::Text {
-                                x: x + 12.0,
-                                y: y + (row_height - measured_text_height(font_size)) / 2.0,
-                                text: cell.clone(),
-                                font_size,
-                                weight: 400,
-                                color: theme.muted,
-                                max_width: Some((widths[column] - 24.0).max(1.0)),
-                                alignment: TextAlignment::Start,
-                            });
-                            x += widths[column];
-                        }
-                    }
-                    for row_index in 0..=rows.len() {
-                        let y = row_height * row_index as f32;
-                        commands.push(DrawCommand::Line {
-                            x1: 0.0,
-                            y1: y,
-                            x2: width,
-                            y2: y,
-                            width: 1.0,
-                            color: theme.border,
-                        });
-                    }
-                    self.nodes
-                        .get_mut(&node)
-                        .expect("markdown table node exists")
-                        .commands = commands;
+                if let MarkdownBlock::Heading { level, .. } = block {
+                    top = top.max(body * 1.4);
+                    let _ = level;
                 }
             }
+            prev_heading = match block {
+                MarkdownBlock::Heading { level, .. } => *level,
+                _ => 0,
+            };
+            if top > 0.0 {
+                let spacer = self.new_node(Style {
+                    width: Some(1.0),
+                    height: Some(top),
+                    ..Style::default()
+                });
+                let _ = spacer;
+            }
+            match block {
+                MarkdownBlock::Heading { level, spans } => {
+                    let size = body * heading_sizes[(*level as usize - 1).min(5)];
+                    let weight = heading_weights[(*level as usize - 1).min(5)];
+                    let color = if *level == 6 {
+                        theme.muted
+                    } else {
+                        theme.foreground
+                    };
+                    let runs = markdown_runs(spans, size, weight, color, &theme);
+                    // MyGo's LineHeight multiplies the view's font size, not
+                    // the span's: a heading sits in a body line box.
+                    self.rich_text_spans_sized(
+                        &format!("{id}:h{index}"),
+                        &runs,
+                        width,
+                        body * 1.5,
+                    );
+                }
+                MarkdownBlock::Paragraph(spans) => {
+                    let runs = markdown_runs(spans, body, 400, theme.foreground, &theme);
+                    self.rich_text_spans_sized(
+                        &format!("{id}:p{index}"),
+                        &runs,
+                        width,
+                        body * 1.5,
+                    );
+                }
+                MarkdownBlock::UnorderedList(items) => {
+                    self.markdown_list(
+                        &format!("{id}:ul{index}"),
+                        items.iter().map(|item| (None, item.as_slice())).collect::<Vec<_>>().as_slice(),
+                        width,
+                        body,
+                        &theme,
+                    );
+                }
+                MarkdownBlock::TaskList(items) => {
+                    self.markdown_list(
+                        &format!("{id}:ul{index}"),
+                        items
+                            .iter()
+                            .map(|item| (Some(item.checked), item.spans.as_slice()))
+                            .collect::<Vec<_>>()
+                            .as_slice(),
+                        width,
+                        body,
+                        &theme,
+                    );
+                }
+                MarkdownBlock::OrderedList(items) => {
+                    self.markdown_numbered_list(&format!("{id}:ol{index}"), items, width, body, &theme);
+                }
+                MarkdownBlock::Code { language, lines } => {
+                    self.markdown_code_block(&format!("{id}:code{index}"), language.as_deref(), lines, width, body, &theme);
+                }
+                MarkdownBlock::Table {
+                    headers,
+                    rows,
+                    aligns,
+                } => {
+                    self.markdown_table(&format!("{id}:table{index}"), headers, rows, aligns, width, body, &theme);
+                }
+            }
+            first = false;
         }
         self.pop_parent();
         self.register_access_node(
@@ -2297,8 +2865,802 @@ impl Context {
         }
     }
 
+    fn markdown_list(
+        &mut self,
+        id: &str,
+        items: &[(Option<bool>, &[InlineSpan])],
+        width: f32,
+        body: f32,
+        theme: &Theme,
+    ) {
+        let line_height = body * 1.5;
+        let marker_width = body * 1.6;
+        for (index, (task, spans)) in items.iter().enumerate() {
+            if index > 0 {
+                // A tight list spaces its items by 0.25em.
+                self.new_node(Style {
+                    width: Some(1.0),
+                    height: Some(body * 0.25),
+                    ..Style::default()
+                });
+            }
+            let row = self.new_named_node(
+                &format!("{id}:i{index}"),
+                Style {
+                    width: Some(width),
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::FlexStart,
+                    ..Style::default()
+                },
+            );
+            self.push_parent(row);
+            let marker = self.new_node(Style {
+                width: Some(marker_width),
+                height: Some(line_height),
+                ..Style::default()
+            });
+            let mut commands = Vec::new();
+            match task {
+                None => {
+                    // MyGo centers the bullet in a line less its own width
+                    // (`ui/markdown/view.go` marker).
+                    let bullet = "•";
+                    let bullet_width = host_text_width_weighted(bullet, body, false, false, 400)
+                        .unwrap_or_else(|| measure_text_width(bullet, body));
+                    let left = ((marker_width - 7.0) - bullet_width) / 2.0;
+                    commands.push(DrawCommand::Text {
+                        x: left,
+                        y: (line_height - measured_text_height(body)) / 2.0,
+                        text: bullet.to_string(),
+                        font_size: body,
+                        weight: 400,
+                        italic: false,
+                        mono: false,
+                        family: None,
+                        color: theme.muted,
+                        max_width: None,
+                        alignment: TextAlignment::Start,
+                    });
+                }
+                Some(checked) => {
+                    // A 0.95em box, its radius a fifth, centered in the
+                    // line the item starts with (`marker`).
+                    let size = body * 0.95;
+                    let radius = (size / 5.0).max(3.0);
+                    let top = ((body * 1.5 * 1.2 - size) / 2.0 - 1.0).max(0.0);
+                    if *checked {
+                        commands.push(DrawCommand::RoundedRect {
+                            x: 0.0,
+                            y: top,
+                            width: size,
+                            height: size,
+                            radius: Radius::all(radius),
+                            color: theme.accent,
+                        });
+                        let stroke = (size / 9.0).max(1.5);
+                        commands.push(DrawCommand::Line {
+                            x1: size * 0.25,
+                            y1: top + size * 0.52,
+                            x2: size * 0.43,
+                            y2: top + size * 0.7,
+                            width: stroke,
+                            color: crate::paint::Color::rgb(255, 255, 255),
+                        });
+                        commands.push(DrawCommand::Line {
+                            x1: size * 0.43,
+                            y1: top + size * 0.7,
+                            x2: size * 0.76,
+                            y2: top + size * 0.32,
+                            width: stroke,
+                            color: crate::paint::Color::rgb(255, 255, 255),
+                        });
+                    } else {
+                        commands.push(DrawCommand::RoundedRect {
+                            x: 0.0,
+                            y: top,
+                            width: size,
+                            height: size,
+                            radius: Radius::all(radius),
+                            color: theme.muted,
+                        });
+                        commands.push(DrawCommand::RoundedRect {
+                            x: 1.5,
+                            y: top + 1.5,
+                            width: size - 3.0,
+                            height: size - 3.0,
+                            radius: Radius::all((radius - 1.5).max(0.0)),
+                            color: theme.background,
+                        });
+                    }
+                }
+            }
+            self.nodes.get_mut(&marker).expect("marker exists").commands = commands;
+            let runs = markdown_runs(spans, body, 400, theme.foreground, theme);
+            self.rich_text_spans_sized(
+                &format!("{id}:i{index}:text"),
+                &runs,
+                width - marker_width,
+                line_height,
+            );
+            self.pop_parent();
+        }
+    }
+
+    fn markdown_numbered_list(
+        &mut self,
+        id: &str,
+        items: &[Vec<InlineSpan>],
+        width: f32,
+        body: f32,
+        theme: &Theme,
+    ) {
+        let line_height = body * 1.5;
+        let marker_width = body * 1.6;
+        for (index, spans) in items.iter().enumerate() {
+            if index > 0 {
+                self.new_node(Style {
+                    width: Some(1.0),
+                    height: Some(body * 0.25),
+                    ..Style::default()
+                });
+            }
+            let row = self.new_named_node(
+                &format!("{id}:i{index}"),
+                Style {
+                    width: Some(width),
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::FlexStart,
+                    ..Style::default()
+                },
+            );
+            self.push_parent(row);
+            let marker = self.new_node(Style {
+                width: Some(marker_width),
+                height: Some(line_height),
+                ..Style::default()
+            });
+            let label = format!("{}.", index + 1);
+            let label_width = measure_text_width(&label, body);
+            self.nodes.get_mut(&marker).expect("marker exists").commands =
+                vec![DrawCommand::Text {
+                    x: marker_width - 7.0 - label_width,
+                    y: (line_height - measured_text_height(body)) / 2.0,
+                    text: label,
+                    font_size: body,
+                    weight: 400,
+                    italic: false,
+                    mono: false,
+                    family: None,
+                    color: theme.muted,
+                    max_width: None,
+                    alignment: TextAlignment::Start,
+                }];
+            let runs = markdown_runs(spans, body, 400, theme.foreground, theme);
+            self.rich_text_spans_sized(
+                &format!("{id}:i{index}:text"),
+                &runs,
+                width - marker_width,
+                line_height,
+            );
+            self.pop_parent();
+        }
+    }
+
+    fn markdown_code_block(
+        &mut self,
+        id: &str,
+        language: Option<&str>,
+        lines: &[String],
+        width: f32,
+        body: f32,
+        theme: &Theme,
+    ) {
+        let pad = body * 0.85;
+        let code_size = body * 0.875;
+        // The code's own line box, the monospace font's ascent and descent,
+        // which the block centers in its taller `1.4` line height
+        // (`internal/text/layout.go` line: Baseline sits half the leftover
+        // above the ascent).
+        let code_line = measured_text_height_styled(code_size, true);
+        // The head's row is as tall as its tallest child, the copy button:
+        // a `0.95em` icon and a `0.8em` label in `0.2em` of padding either
+        // side. The label's line box, `0.8em` at the theme's 1.5 line
+        // height, is taller than the icon, so the row is `1.6em`
+        // (`ui/markdown/code.go` DefaultCodeBlock and CopyButton).
+        let copy_content = (body * 0.95).max(body * 0.8 * 1.5);
+        let button_height = copy_content + body * 0.2 * 2.0;
+        let head_height = button_height.max(body * 0.8 * 1.5);
+        let head_top = body * 0.35;
+        let line_height = body * 0.875 * 1.4;
+        let body_top = body * 0.25;
+        let height = 2.0
+            + head_top
+            + head_height
+            + body_top
+            + line_height * lines.len() as f32
+            + pad;
+        let node = self.new_named_node(
+            id,
+            Style {
+                width: Some(width),
+                height: Some(height),
+                ..Style::default()
+            },
+        );
+        self.nodes.get_mut(&node).expect("code node exists").fill = Some((
+            Color::rgba(24, 24, 27, 10),
+            Radius::all(8.0),
+        ));
+        self.nodes.get_mut(&node).expect("code node exists").stroke =
+            Some((theme.border, Radius::all(8.0)));
+        // A Text command's y is the top of its line box, and the baseline
+        // sits half the leftover above the ascent when the line is taller
+        // than the font's own extent (`internal/text/layout.go` line:
+        // `Baseline = y + (Height-Ascent-Descent)/2 + Ascent`). Without the
+        // leftover the label draws about two pixels high.
+        let label_size = body * 0.8;
+        let label_line = label_size * 1.5;
+        let label_shift = (label_line - measured_text_height_styled(label_size, false)) / 2.0;
+        let mut commands = Vec::new();
+        if let Some(language) = language {
+            commands.push(DrawCommand::Text {
+                x: 1.0 + body * 0.85,
+                y: 1.0 + head_top + (head_height - label_line) / 2.0 + label_shift,
+                text: language.to_string(),
+                font_size: label_size,
+                weight: 400,
+                italic: false,
+                mono: false,
+                family: None,
+                color: theme.muted,
+                max_width: Some((width - body * 0.8).max(1.0)),
+                alignment: TextAlignment::Start,
+            });
+        }
+        // The copy button: an icon and its label, muted, at the right. MyGo
+        // pads it `(0.2em, 0.45em)` with a `0.3em` gap, and its row centers
+        // what it holds (`ui/markdown/code.go` CopyButton), so the button's
+        // height is its tallest child, the `0.95em` icon.
+        let copy_label = "Copy";
+        let copy_size = label_size;
+        let copy_width = measure_text_width(copy_label, copy_size);
+        let icon_size = body * 0.95;
+        let copy_pad_x = body * 0.45;
+        let copy_pad_y = body * 0.2;
+        let copy_gap = body * 0.3;
+        let button_width = copy_pad_x * 2.0 + icon_size + copy_gap + copy_width;
+        let button_x = width - 1.0 - body * 0.4 - button_width;
+        let button_y = 1.0 + head_top + (head_height - button_height) / 2.0;
+        // The copy glyph is a 16-unit view box, as MyGo's copyIcon is; the
+        // painter scales it into its target box, so the path is mapped
+        // rather than drawn at its own coordinates.
+        let icon_x = button_x + copy_pad_x;
+        // The row centers the icon inside the label's taller line box.
+        let icon_y = button_y + copy_pad_y + (copy_content - icon_size) / 2.0;
+        let icon_scale = icon_size / 16.0;
+        commands.push(DrawCommand::TransformPush {
+            transform: Transform {
+                translation: Point::new(icon_x, icon_y),
+                scale: Point::new(icon_scale, icon_scale),
+                rotation: 0.0,
+            },
+        });
+        commands.push(DrawCommand::SvgPath {
+            x: 0.0,
+            y: 0.0,
+            width: 16.0,
+            height: 16.0,
+            path: "M7.1 5.5H11.9A1.6 1.6 0 0 1 13.5 7.1V11.9A1.6 1.6 0 0 1 11.9 13.5H7.1A1.6 1.6 0 0 1 5.5 11.9V7.1A1.6 1.6 0 0 1 7.1 5.5ZM10.5 3.6V3.2A1.7 1.7 0 0 0 8.8 1.5H4.2A1.7 1.7 0 0 0 2.5 3.2v4.6a1.7 1.7 0 0 0 1.7 1.7h.4".to_string(),
+            stroke: Some(theme.muted),
+            stroke_width: 1.3,
+            fill: None,
+        });
+        commands.push(DrawCommand::TransformPop);
+        commands.push(DrawCommand::Text {
+            x: button_x + copy_pad_x + icon_size + copy_gap,
+            y: button_y + (button_height - label_line) / 2.0 + label_shift,
+            text: copy_label.to_string(),
+            font_size: copy_size,
+            weight: 400,
+            italic: false,
+            mono: false,
+            family: None,
+            color: theme.muted,
+            max_width: Some(copy_width.max(1.0)),
+            alignment: TextAlignment::Start,
+        });
+        for (index, line) in lines.iter().enumerate() {
+            let top = 1.0 + head_top + head_height + body_top + line_height * index as f32;
+            let y = top + (line_height - code_line) / 2.0;
+            let mut x = 1.0 + pad;
+            let runs: Vec<(String, CodeColor)> = if language
+                .map(|name| matches!(name.to_ascii_lowercase().as_str(), "go" | "golang"))
+                .unwrap_or(false)
+            {
+                go_tokens(line)
+            } else {
+                vec![(line.clone(), CodeColor::Text)]
+            };
+            for (text, kind) in runs {
+                if text.is_empty() {
+                    continue;
+                }
+                let run_width = host_text_width_weighted(&text, code_size, false, true, 400)
+                    .unwrap_or_else(|| measure_text_width(&text, code_size));
+                let color = match kind {
+                    CodeColor::Text => theme.foreground,
+                    CodeColor::Keyword | CodeColor::Operator => Color::rgb(207, 34, 46),
+                    CodeColor::Type => Color::rgb(149, 56, 0),
+                    CodeColor::Constant => Color::rgb(5, 80, 174),
+                    CodeColor::Function => Color::rgb(130, 80, 223),
+                    CodeColor::Property | CodeColor::Number => Color::rgb(5, 80, 174),
+                    CodeColor::String => Color::rgb(10, 48, 105),
+                    CodeColor::Comment => Color::rgb(110, 119, 129),
+                };
+                commands.push(DrawCommand::Text {
+                    x,
+                    y,
+                    text,
+                    font_size: code_size,
+                    weight: 400,
+                    italic: false,
+                    mono: true,
+                    family: None,
+                    color,
+                    max_width: Some(run_width.max(1.0)),
+                    alignment: TextAlignment::Start,
+                });
+                x += run_width;
+            }
+        }
+        self.nodes.get_mut(&node).expect("code node exists").commands = commands;
+    }
+
+    fn markdown_table(
+        &mut self,
+        id: &str,
+        headers: &[String],
+        rows: &[Vec<String>],
+        aligns: &[TableAlign],
+        width: f32,
+        body: f32,
+        theme: &Theme,
+    ) {
+        let pad_x = body * 0.6;
+        let pad_y = body * 0.4;
+        let line_height = body * 1.5;
+        let row_height = line_height + pad_y * 2.0;
+        // A body row carries a one-pixel rule above it, inside its box.
+        let data_row_height = row_height + 1.0;
+        let columns = headers
+            .len()
+            .max(rows.iter().map(Vec::len).max().unwrap_or(0))
+            .max(1);
+        let mut widths = vec![0.0_f32; columns];
+        for (column, header) in headers.iter().enumerate() {
+            let text_width = measure_text_width(header, body);
+            widths[column] = widths[column].max((text_width).min(body * 24.0) + pad_x * 2.0 + 1.0);
+        }
+        for row in rows {
+            for (column, cell) in row.iter().enumerate().take(columns) {
+                let text_width = measure_text_width(cell, body);
+                widths[column] = widths[column].max((text_width).min(body * 24.0) + pad_x * 2.0 + 1.0);
+            }
+        }
+        let table_width: f32 = widths.iter().sum::<f32>() + 2.0;
+        // The layout keeps the rows' fractional height, as MyGo's does, and
+        // the painter rounds each edge of the frame to a device pixel
+        // (`ui/paint.go` snap), so a frame that ends part way through a pixel
+        // still paints a whole bottom rule.
+        let height = 2.0 + row_height + data_row_height * rows.len() as f32;
+        let node = self.new_named_node(
+            id,
+            Style {
+                width: Some(table_width.min(width)),
+                height: Some(height),
+                ..Style::default()
+            },
+        );
+        // MyGo fills the table's frame and its inner face, so every rule is
+        // a whole device pixel; stroked rules blur across two at fractional
+        // layout positions. The outer box carries the border color, and the
+        // face one pixel in covers it everywhere but the rules. Both faces
+        // are painted here rather than left to the node, whose stroke would
+        // be a half-pixel-out path once the node's own offset applies.
+        let radius = body * 0.3;
+        let mut commands = Vec::new();
+        commands.push(DrawCommand::RoundedRect {
+            x: 0.0,
+            y: 0.0,
+            width: table_width.min(width),
+            height,
+            radius: Radius::all(radius),
+            color: theme.border,
+        });
+        commands.push(DrawCommand::RoundedRect {
+            x: 1.0,
+            y: 1.0,
+            width: (table_width.min(width) - 2.0).max(0.0),
+            height: (height - 2.0).max(0.0),
+            radius: Radius::all((radius - 1.0).max(0.0)),
+            color: theme.background,
+        });
+        // Header face: 4% of the text color.
+        commands.push(DrawCommand::Rect {
+            x: 1.0,
+            y: 1.0,
+            width: table_width - 2.0,
+            height: row_height,
+            color: Color::rgba(24, 24, 27, 10),
+        });
+        for row_index in 1..=rows.len() {
+            let y = 1.0 + row_height + data_row_height * (row_index - 1) as f32;
+            commands.push(DrawCommand::Rect {
+                x: 1.0,
+                y,
+                width: table_width - 2.0,
+                height: 1.0,
+                color: theme.border,
+            });
+        }
+        let mut x = 1.0;
+        for (column, column_width) in widths.iter().enumerate() {
+            if column > 0 {
+                commands.push(DrawCommand::Rect {
+                    x,
+                    y: 1.0,
+                    width: 1.0,
+                    height: height - 2.0,
+                    color: theme.border,
+                });
+            }
+            x += column_width;
+        }
+        let draw_cell = |commands: &mut Vec<DrawCommand>, text: &str, column: usize, cell_x: f32, top: f32, header: bool| {
+            let base_weight = if header { 600 } else { 400 };
+            let spans = parse_inline(text);
+            let span_width = |span: &InlineSpan| -> f32 {
+                let weight = if header || matches!(span.style, InlineStyle::Bold) {
+                    600
+                } else {
+                    400
+                };
+                let mono = matches!(span.style, InlineStyle::Code);
+                let size = if mono { body * 0.875 } else { body };
+                host_text_width_weighted(&span.text, size, false, mono, weight)
+                    .unwrap_or_else(|| measure_text_width(&span.text, size))
+            };
+            let text_width: f32 = spans.iter().map(span_width).sum();
+            let align = aligns.get(column).copied().unwrap_or_default();
+            let inner = (widths[column] - pad_x * 2.0).max(1.0);
+            let start_x = match align {
+                TableAlign::Start => cell_x + pad_x,
+                TableAlign::Center => cell_x + pad_x + (inner - text_width).max(0.0) / 2.0,
+                TableAlign::End => cell_x + widths[column] - pad_x - text_width,
+            };
+            let mut x = start_x;
+            for span in &spans {
+                let weight = if header || matches!(span.style, InlineStyle::Bold) {
+                    600
+                } else {
+                    400
+                };
+                let mono = matches!(span.style, InlineStyle::Code);
+                let italic = matches!(span.style, InlineStyle::Italic);
+                let size = if mono { body * 0.875 } else { body };
+                let color = match &span.style {
+                    InlineStyle::Link { .. } => theme.accent,
+                    _ => theme.foreground,
+                };
+                let width = span_width(span);
+                commands.push(DrawCommand::Text {
+                    x,
+                    y: top
+                        + pad_y
+                        + (line_height - measured_text_height(body)) / 2.0
+                        + (body - size) * 0.25,
+                    text: span.text.clone(),
+                    font_size: size,
+                    weight,
+                    italic,
+                    mono,
+                    family: None,
+                    color,
+                    max_width: Some(width.max(1.0)),
+                    alignment: TextAlignment::Start,
+                });
+                x += width;
+            }
+            let _ = base_weight;
+        };
+        let mut cell_x = 1.0;
+        for (column, header) in headers.iter().enumerate() {
+            draw_cell(&mut commands, header, column, cell_x, 1.0, true);
+            cell_x += widths[column];
+        }
+        for (row_index, row) in rows.iter().enumerate() {
+            let mut cell_x = 1.0;
+            let top = 1.0 + row_height + data_row_height * row_index as f32;
+            for (column, cell) in row.iter().enumerate().take(columns) {
+                draw_cell(&mut commands, cell, column, cell_x, top + 1.0, false);
+                cell_x += widths[column];
+            }
+        }
+        self.nodes.get_mut(&node).expect("table node exists").commands = commands;
+    }
+
+    /// Renders rich text spans that wrap across lines, as MyGo's
+    /// `RichText` over `ui.Span`s.
+    pub fn rich_text_spans(&mut self, id: &str, spans: &[RichTextSpan]) -> RichTextResponse {
+        let width = self.current_content_width();
+        self.rich_text_sized(id, spans, width, 0.0)
+    }
+
+    /// Draws runs as one wrapping paragraph inside `width`, each line box
+    /// `line_height` tall with its glyphs centered, as MyGo's markdown
+    /// body sets a line and a half.
+    pub fn rich_text_spans_sized(
+        &mut self,
+        id: &str,
+        spans: &[RichTextSpan],
+        width: f32,
+        line_height: f32,
+    ) -> RichTextResponse {
+        self.rich_text_sized(id, spans, width, line_height)
+    }
+
+    fn rich_text_sized(
+        &mut self,
+        id: &str,
+        spans: &[RichTextSpan],
+        width: f32,
+        line_height_override: f32,
+    ) -> RichTextResponse {
+        let theme = self.theme.clone();
+        let font_size = theme.font_sizes.body;
+        // MyGo sets every run of a line on one baseline, the line's tallest
+        // ascent (`internal/text` line()), and sizes the line box to the
+        // body line height unless a run's ascent and descent need more.
+        let body_ascent = host_text_ascent(font_size, false, false, false)
+            .or_else(|| default_font().map(|font| font.ascent(font_size)))
+            .unwrap_or(font_size * 0.93);
+        let body_descent = host_text_descent(font_size, false, false, false)
+            .unwrap_or(font_size * 0.25);
+        let mut span_metrics = Vec::with_capacity(spans.len());
+        for span in spans {
+            let size = if span.font_size > 0.0 {
+                span.font_size
+            } else {
+                font_size
+            };
+            let ascent = host_text_ascent(size, span.italic, span.mono, span.weight >= 600)
+                .or_else(|| default_font().map(|font| font.ascent(size)))
+                .unwrap_or(size * 0.93);
+            let descent = host_text_descent(size, span.italic, span.mono, span.weight >= 600)
+                .unwrap_or(size * 0.25);
+            span_metrics.push((size, ascent, descent));
+        }
+        let line_ascent = span_metrics
+            .iter()
+            .fold(body_ascent, |ascent, metrics| ascent.max(metrics.1));
+        let line_descent = span_metrics
+            .iter()
+            .fold(body_descent, |descent, metrics| descent.max(metrics.2));
+        let line_height = if line_height_override > 0.0 {
+            line_height_override.max(line_ascent + line_descent)
+        } else {
+            measured_text_height(font_size).max(line_ascent + line_descent)
+        };
+        // MyGo centers the line's faces in a line box taller than they are
+        // (`internal/text` line()): its baseline drops by the surplus.
+        let line_top = (line_height - line_ascent - line_descent) / 2.0;
+        let root = self.new_named_node(
+            id,
+            Style {
+                width: Some(width),
+                flex_direction: FlexDirection::Row,
+                flex_wrap: true,
+                align_items: AlignItems::FlexStart,
+                ..Style::default()
+            },
+        );
+        self.register_access_node(root, Role::Group, id, None, false);
+        self.push_parent(root);
+        for (span, &(size, ascent, _descent)) in spans.iter().zip(&span_metrics) {
+            // This run's glyphs sit on the line baseline, not its own.
+            let baseline = line_top + line_ascent - ascent;
+            // Each run keeps a label node so assistive tech can read the
+            // styled text, as the per-span layout used to.
+            let span_value = if span.mono && span.background.is_some() {
+                "code"
+            } else if span.strikethrough {
+                "strikethrough"
+            } else if span.weight >= 600 {
+                "bold"
+            } else if span.italic {
+                "italic"
+            } else {
+                "plain"
+            };
+            let mut span_registered = false;
+            // A trailing space is advance, not ink: measure and reserve it
+            // explicitly, since canvas measurement drops trailing spaces.
+            let styled_width = |text: &str| {
+                host_text_width_weighted(text, size, span.italic, span.mono, span.weight)
+                    .unwrap_or_else(|| measure_text_width(text, size))
+            };
+            let space_width = (styled_width("x x") - styled_width("xx")).max(0.0);
+            let trimmed = span.text.trim_end();
+            let full_width = styled_width(trimmed);
+            // A run that fits on one line stays one node, so a code pill or
+            // a strikethrough covers the run whole rather than per word.
+            let one_line = !span.text.trim_end().contains(' ');
+            if !span.text.contains('\n')
+                && full_width <= width
+                && (span.strikethrough || span.background_radius > 0.0 || one_line)
+            {
+                let node = self.new_node(Style {
+                    width: Some(full_width.max(1.0)),
+                    height: Some(line_height),
+                    ..Style::default()
+                });
+                let mut commands = Vec::new();
+                let color = span.color.unwrap_or(theme.foreground);
+                if let Some(background) = span.background {
+                    if span.background_radius > 0.0 {
+                        // MyGo hugs a code pill with a sixth of an em of
+                        // side room and a line and a third of height
+                        // (`ui/richtext.go` spanPaint.backgrounds).
+                        let pad = (size * 0.22).min(span.background_radius);
+                        commands.push(DrawCommand::RoundedRect {
+                            x: -pad,
+                            y: line_top + line_ascent - size * 0.98,
+                            width: full_width + pad * 2.0,
+                            height: size * 1.32,
+                            radius: Radius::all(span.background_radius),
+                            color: background,
+                        });
+                    } else {
+                        commands.push(DrawCommand::Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: full_width,
+                            height: line_height,
+                            color: background,
+                        });
+                    }
+                }
+                commands.push(DrawCommand::Text {
+                    x: 0.0,
+                    y: baseline,
+                    text: trimmed.to_string(),
+                    font_size: size,
+                    weight: span.weight,
+                    italic: span.italic,
+                    mono: span.mono,
+                    family: None,
+                    color,
+                    max_width: Some(full_width.max(1.0)),
+                    alignment: TextAlignment::Start,
+                });
+                if span.strikethrough {
+                    // MyGo strikes through the middle of the lowercase: its
+                    // canvas engine sets the strike's top half an x above the
+                    // baseline, less half its own thickness
+                    // (`internal/text/canvas_js.go` font, decorate).
+                    let strike_top = host_text_x_height(size, span.italic, span.mono, span.weight >= 600)
+                        .unwrap_or(size * 0.53) / 2.0
+                        + strike_thickness(size) / 2.0;
+                    let y = line_top + line_ascent - strike_top + strike_thickness(size) / 2.0;
+                    commands.push(DrawCommand::Line {
+                        x1: 0.0,
+                        y1: y,
+                        x2: full_width,
+                        y2: y,
+                        width: strike_thickness(size),
+                        color,
+                    });
+                }
+                self.nodes
+                    .get_mut(&node)
+                    .expect("rich text run exists")
+                    .commands = commands;
+                self.register_access_node(node, Role::Label, span.text.trim(), Some(span_value), false);
+                continue;
+            }
+            for word in span.text.split_inclusive(' ') {
+                let text = word.trim_end();
+                // A run that is only space still advances: the space belongs
+                // to this run's face, and dropping it glues the neighbouring
+                // runs together.
+                let mut word_width = if text.is_empty() {
+                    0.0
+                } else {
+                    styled_width(text)
+                };
+                if text.len() != word.len() {
+                    word_width += space_width;
+                }
+                if word_width <= 0.0 {
+                    continue;
+                }
+                let node = self.new_node(Style {
+                    width: Some(word_width.max(1.0)),
+                    height: Some(line_height),
+                    ..Style::default()
+                });
+                let mut commands = Vec::new();
+                if let Some(background) = span.background {
+                    if span.background_radius > 0.0 {
+                        let pad = (size * 0.22).min(span.background_radius);
+                        commands.push(DrawCommand::RoundedRect {
+                            x: -pad,
+                            y: line_top + line_ascent - size * 0.98,
+                            width: word_width + pad * 2.0,
+                            height: size * 1.32,
+                            radius: Radius::all(span.background_radius),
+                            color: background,
+                        });
+                    } else {
+                        commands.push(DrawCommand::Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: word_width,
+                            height: line_height,
+                            color: background,
+                        });
+                    }
+                }
+                let color = span.color.unwrap_or(theme.foreground);
+                commands.push(DrawCommand::Text {
+                    x: 0.0,
+                    y: baseline,
+                    text: text.to_string(),
+                    font_size: size,
+                    weight: span.weight,
+                    italic: span.italic,
+                    mono: span.mono,
+                    family: None,
+                    color,
+                    max_width: Some(word_width.max(1.0)),
+                    alignment: TextAlignment::Start,
+                });
+                if span.strikethrough {
+                    let strike_top = host_text_x_height(size, span.italic, span.mono, span.weight >= 600)
+                        .unwrap_or(size * 0.53) / 2.0
+                        + strike_thickness(size) / 2.0;
+                    let y = line_top + line_ascent - strike_top + strike_thickness(size) / 2.0;
+                    commands.push(DrawCommand::Line {
+                        x1: 0.0,
+                        y1: y,
+                        x2: word_width,
+                        y2: y,
+                        width: strike_thickness(size),
+                        color,
+                    });
+                }
+                self.nodes
+                    .get_mut(&node)
+                    .expect("rich text word exists")
+                    .commands = commands;
+                if !span_registered {
+                    span_registered = true;
+                    self.register_access_node(
+                        node,
+                        Role::Label,
+                        span.text.trim(),
+                        Some(span_value),
+                        false,
+                    );
+                }
+            }
+        }
+        self.pop_parent();
+        RichTextResponse { spans: spans.len() }
+    }
+
     fn inline_row(&mut self, spans: &[InlineSpan], font_size: f32, heading: bool) {
-        self.row().gap(0.0).children(|context| {
+        self.row().gap(0.0).wrap().children(|context| {
             for span in spans {
                 context.inline_span_node(span, font_size, heading);
             }
@@ -2356,6 +3718,9 @@ impl Context {
                 weight = 500;
                 color = theme.accent;
             }
+            InlineStyle::Strikethrough => {
+                access_value = "strikethrough";
+            }
         }
         let (text_x, text_y) = if matches!(span.style, InlineStyle::Code) {
             (4.0, 1.0)
@@ -2368,12 +3733,25 @@ impl Context {
             text: span.text.clone(),
             font_size,
             weight,
+            italic: matches!(span.style, InlineStyle::Italic),
+            mono: matches!(span.style, InlineStyle::Code),
+            family: None,
             color,
             max_width: Some(width.max(1.0)),
             alignment: TextAlignment::Start,
         });
         if matches!(span.style, InlineStyle::Italic) {
             commands.push(DrawCommand::TransformPop);
+        }
+        if matches!(span.style, InlineStyle::Strikethrough) {
+            commands.push(DrawCommand::Line {
+                x1: 0.0,
+                y1: text_height * 0.62,
+                x2: width,
+                y2: text_height * 0.62,
+                width: 1.0,
+                color: theme.foreground,
+            });
         }
         if matches!(span.style, InlineStyle::Link { .. }) {
             commands.push(DrawCommand::Line {
@@ -2402,20 +3780,23 @@ impl Context {
         matches: usize,
     ) -> FindBarState {
         let theme = self.theme.clone();
+        let font_size = theme.font_sizes.body;
         let width = self.current_content_width();
-        let field_height = measured_text_height(theme.font_sizes.body) + theme.spacing.sm * 2.0;
-        let gap = theme.spacing.xs;
-        let button_width = 26.0;
-        let count_width = 42.0;
         let input_id = format!("{id}:input");
-        let previous_key = format!("{id}:prev");
+        let prev_key = format!("{id}:prev");
         let next_key = format!("{id}:next");
+        // A bar that was not here last frame takes the focus, its field's
+        // text chosen ready to type over (`ui/feedback.go` coreFindBar).
+        let opening = !self.previous_regions.contains_key(&input_id);
+        if opening {
+            self.focused_id = Some(input_id.clone());
+        }
         if matches == 0 {
             *current = 0;
         } else {
             *current = (*current).min(matches - 1);
         }
-        let previous_clicked = matches > 0 && self.clicked_in_previous(&previous_key);
+        let previous_clicked = matches > 0 && self.clicked_in_previous(&prev_key);
         let next_clicked = matches > 0 && self.clicked_in_previous(&next_key);
         if previous_clicked {
             *current = if *current == 0 {
@@ -2427,122 +3808,230 @@ impl Context {
         if next_clicked {
             *current = (*current + 1) % matches;
         }
-        let root = self.new_named_node(
+        // MyGo's find bar: a Surface row with a bottom border, Space(2) of
+        // gap and Space(1.5)/Space(3) padding (`ui/feedback.go` coreFindBar).
+        let bar = self.new_named_node(
             id,
             Style {
                 width: Some(width),
-                height: Some(field_height),
                 flex_direction: FlexDirection::Row,
-                gap,
+                gap: 8.0,
                 align_items: AlignItems::Center,
+                // MyGo's one-pixel bottom border takes layout room, so the
+                // bar is a pixel taller than its padding and its line.
+                padding: Edges {
+                    top: 6.0,
+                    right: 12.0,
+                    bottom: 7.0,
+                    left: 12.0,
+                },
                 ..Style::default()
             },
         );
-        let input_width = (width - count_width - button_width * 2.0 - gap * 3.0).max(1.0);
-        self.push_parent(root);
-        let mut field_changed = false;
-        let mut field_focused = false;
-        let mut field_hovered = false;
+        {
+            let node_ref = self.nodes.get_mut(&bar).expect("find bar exists");
+            node_ref.fill = Some((theme.surface, Radius::all(0.0)));
+        }
+        self.push_parent(bar);
+        // MyGo's buttons carry their one-pixel border inside the padding:
+        // the step buttons hold a 12×12 box padded 6/8, and Done is its
+        // label padded 6/14, each two pixels more with the border.
+        let status_width = 72.0;
+        let step_width = 30.0;
+        let step_height = 26.0;
+        let done_text_width = measure_text_width("Done", font_size);
+        let done_height = measured_text_height(font_size) + 14.0;
+        let done_width = done_text_width + 30.0;
+        let field_width = (width
+            - 24.0
+            - status_width
+            - step_width * 2.0
+            - done_width
+            - 8.0 * 4.0)
+            .max(120.0);
+        // MyGo's field takes Space(1.5) of padding and Space(2.5) of side
+        // padding inside its one-pixel border, which takes layout room, so
+        // the content starts a pixel further in (`ui/combobox.go` field).
+        let field = self.new_named_node(
+            &format!("{id}:field"),
+            Style {
+                width: Some(field_width),
+                height: Some(measured_text_height(font_size) + 14.0),
+                flex_direction: FlexDirection::Row,
+                gap: 6.0,
+                align_items: AlignItems::Center,
+                padding: Edges::symmetric(7.0, 11.0),
+                ..Style::default()
+            },
+        );
+        {
+            let node_ref = self.nodes.get_mut(&field).expect("find field exists");
+            node_ref.fill = Some((theme.surface, Radius::all(6.0)));
+            node_ref.stroke = Some((theme.border, Radius::all(6.0)));
+        }
+        self.push_parent(field);
+        // MyGo's magnifier is an icon Space(3.75) = 15 across
+        // (`ui/combobox.go` magnifier), which its row centers.
+        self.icon(&format!("{id}:icon"), "magnifier", 15.0, theme.muted);
+        let mut input = None;
+        let input_width = (field_width - 20.0 - 6.0 - 15.0 - 2.0).max(60.0);
         self.container().width(input_width).children(|context| {
-            let field = context.text_field(&input_id, query);
-            field_changed = field.changed;
-            field_focused = field.focused;
-            field_hovered = field.hovered;
+            input = Some(context.text_field_bare(&input_id, query));
         });
-        let count = if matches == 0 {
-            "0/0".to_string()
+        self.pop_parent();
+        let input = input.expect("find input exists");
+        if opening && !query.is_empty() {
+            self.set_text_input_selection(&input_id, 0, query.len());
+        }
+        if input.focused {
+            // As MyGo's field, the box's border turns the accent color while
+            // its input owns the focus (`ui/form.go` inputBorder).
+            self.nodes
+                .get_mut(&field)
+                .expect("find field exists")
+                .stroke = Some((theme.accent, Radius::all(6.0)));
+        }
+        // The match count, in the muted color, Space(18) wide at least.
+        let status = if query.is_empty() {
+            String::new()
+        } else if matches > 0 {
+            format!("{} of {}", *current + 1, matches)
         } else {
-            format!("{}/{}", *current + 1, matches)
+            "No matches".to_string()
         };
-        self.text(&count)
-            .font_size(theme.font_sizes.small)
-            .color(theme.muted)
-            .max_width(count_width);
-        for (key, label, enabled) in [
-            (previous_key.as_str(), "<", matches > 0),
-            (next_key.as_str(), ">", matches > 0),
-        ] {
+        let muted = theme.muted;
+        self.container().width(status_width).children(|context| {
+            context.text(&status).font_size(theme.font_sizes.body).color(muted);
+        });
+        // Previous and next step buttons, arrows drawn as MyGo draws them.
+        for (key, up) in [(prev_key.clone(), true), (next_key.clone(), false)] {
             let node = self.new_named_node(
-                key,
+                &key,
                 Style {
-                    width: Some(button_width),
-                    height: Some(24.0),
+                    width: Some(step_width),
+                    height: Some(step_height),
                     ..Style::default()
                 },
             );
-            if enabled {
-                self.register_interaction(node, key.to_string());
-            }
-            let hovered = enabled && self.pointer_in_previous(key);
-            let mut commands = vec![
+            self.register_interaction(node, key.clone());
+            let hovered = matches > 0 && self.pointer_in_previous(&key);
+            let arrow = if up {
+                "M3 7.5 L6 4.5 L9 7.5"
+            } else {
+                "M3 4.5 L6 7.5 L9 4.5"
+            };
+            let commands = vec![
                 DrawCommand::RoundedRect {
                     x: 0.0,
                     y: 0.0,
-                    width: button_width,
-                    height: 24.0,
-                    radius: Radius::all(4.0),
+                    width: step_width,
+                    height: step_height,
+                    radius: Radius::all(6.0),
+                    color: theme.border,
+                },
+                DrawCommand::RoundedRect {
+                    x: 1.0,
+                    y: 1.0,
+                    width: step_width - 2.0,
+                    height: step_height - 2.0,
+                    radius: Radius::all(5.0),
                     color: if hovered {
-                        mix_color(theme.surface, theme.accent, 0.3)
+                        theme.surface_hover
                     } else {
                         theme.surface
                     },
                 },
-                DrawCommand::Text {
-                    x: 0.0,
-                    y: 3.0,
-                    text: label.to_string(),
-                    font_size: theme.font_sizes.small,
-                    weight: 600,
-                    color: if enabled {
-                        theme.foreground
-                    } else {
-                        theme.muted
-                    },
-                    max_width: Some(button_width),
-                    alignment: TextAlignment::Center,
+                DrawCommand::TransformPush {
+                    transform: Transform::translate(Point::new(9.0, 7.0)),
                 },
-            ];
-            if !enabled {
-                commands[0] = DrawCommand::RoundedRect {
+                DrawCommand::SvgPath {
                     x: 0.0,
                     y: 0.0,
-                    width: button_width,
-                    height: 24.0,
-                    radius: Radius::all(4.0),
-                    color: mix_color(theme.surface, theme.border, 0.4),
-                };
-            }
-            self.register_access_node(
-                node,
-                Role::Button,
-                if label == "<" {
-                    "previous match"
-                } else {
-                    "next match"
+                    width: 12.0,
+                    height: 12.0,
+                    path: arrow.to_string(),
+                    fill: None,
+                    stroke: Some(theme.foreground),
+                    stroke_width: 1.5,
                 },
-                Some(if enabled { "enabled" } else { "disabled" }),
-                false,
-            );
+                DrawCommand::TransformPop,
+            ];
             self.nodes
                 .get_mut(&node)
-                .expect("find bar button exists")
+                .expect("find step exists")
                 .commands = commands;
         }
+        // Done, styled like MyGo's default button: its label padded 6/14.
+        let done_id = format!("{id}:done");
+        let done = self.new_named_node(
+            &done_id,
+            Style {
+                width: Some(done_width),
+                height: Some(done_height),
+                ..Style::default()
+            },
+        );
+        self.register_interaction(done, done_id.clone());
+        let done_hovered = self.pointer_in_previous(&done_id);
+        let done_pressed = done_hovered && self.input.pointer_down;
+        let closed = self.clicked_in_previous(&done_id);
+        let done_commands = vec![
+            DrawCommand::RoundedRect {
+                x: 0.0,
+                y: 0.0,
+                width: done_width,
+                height: done_height,
+                radius: Radius::all(6.0),
+                color: theme.border,
+            },
+            DrawCommand::RoundedRect {
+                x: 1.0,
+                y: 1.0,
+                width: done_width - 2.0,
+                height: done_height - 2.0,
+                radius: Radius::all(5.0),
+                color: if done_pressed {
+                    theme.surface_pressed
+                } else if done_hovered {
+                    theme.surface_hover
+                } else {
+                    theme.surface
+                },
+            },
+            DrawCommand::Text {
+                x: 15.0,
+                y: 7.0,
+                text: "Done".to_string(),
+                font_size,
+                weight: 400,
+                italic: false,
+                mono: false,
+                family: None,
+                color: theme.foreground,
+                max_width: Some(done_text_width),
+                alignment: TextAlignment::Start,
+            },
+        ];
+        self.nodes
+            .get_mut(&done)
+            .expect("find done exists")
+            .commands = done_commands;
         self.pop_parent();
-        if previous_clicked || next_clicked {
-            self.focused_id = Some(input_id.clone());
-            field_focused = true;
-        }
-        self.register_access_node(root, Role::Group, id, None, false);
+        // MyGo's `BorderWidth(0, 0, 1, 0)` fills the bar's bottom row with
+        // the border color; a stroked line would center on the box edge and
+        // spread across two half-covered rows instead.
+        self.set_node_bottom_border(bar, theme.border);
+        let changed = input.changed || previous_clicked || next_clicked;
         FindBarState {
-            changed: field_changed || previous_clicked || next_clicked,
+            changed,
             current: *current,
             matches,
             query: query.clone(),
             previous_clicked,
             next_clicked,
-            focused: field_focused,
-            hovered: field_hovered,
+            closed,
+            focused: input.focused,
+            hovered: self.pointer_in_previous(&input_id),
         }
     }
 
@@ -2589,14 +4078,26 @@ impl Context {
     /// Creates back/forward buttons driven by router history.
     pub fn back_forward_buttons(&mut self, id: &str, state: &mut RouterState) -> BackForwardState {
         let theme = self.theme.clone();
+        let space = theme.spacing.base;
         let width = self.current_content_width();
-        let height = 28.0;
+        // MyGo's history buttons are buttons in a Toolbar, which strips
+        // their face and border and pads them `Space(1.5), Space(2.5)`
+        // (`ui/widgets.go` styleButton's toolbarButtons case); historyButton
+        // then *replaces* that padding with `Space(1.5), Space(2)`
+        // (`ui/router.go`), since `Padding` assigns rather than adds. Each
+        // button holds a `Space(4)` box with a 1.6-wide chevron in it.
+        let vertical = space * 1.5;
+        let horizontal = space * 2.0;
+        let arrow = space * 4.0;
+        let height = arrow + vertical * 2.0;
+        let button_width = arrow + horizontal * 2.0;
         let root = self.new_named_node(
             id,
             Style {
                 width: Some(width),
                 height: Some(height),
-                gap: theme.spacing.xs,
+                // The Toolbar holding them gaps its children `Space(1)`.
+                gap: space,
                 ..Style::default()
             },
         );
@@ -2605,16 +4106,15 @@ impl Context {
         let forward_key = format!("{id}:forward");
         let mut back_clicked = false;
         let mut forward_clicked = false;
-        for (key, label, enabled) in [
-            (back_key.as_str(), "←", state.can_back()),
-            (forward_key.as_str(), "→", state.can_forward()),
+        for (key, name, direction, enabled) in [
+            (back_key.as_str(), "back", -1.0_f32, state.can_back()),
+            (forward_key.as_str(), "forward", 1.0_f32, state.can_forward()),
         ] {
-            let button_width = 30.0;
             let node = self.new_named_node(
                 key,
                 Style {
                     width: Some(button_width),
-                    height: Some(24.0),
+                    height: Some(height),
                     ..Style::default()
                 },
             );
@@ -2622,48 +4122,55 @@ impl Context {
                 self.register_interaction(node, key.to_string());
             }
             let hovered = enabled && self.pointer_in_previous(key);
-            let mut commands = vec![
-                DrawCommand::RoundedRect {
+            // The chevron's own box sits inside the padding.
+            let cx = horizontal + arrow / 2.0;
+            let cy = height / 2.0;
+            let s = arrow * 0.22;
+            let dx = s * direction;
+            // MyGo dims a disabled element, and what is inside it, to half
+            // its opacity (`ui/paint.go`), the arrow with the button.
+            let color = if enabled {
+                theme.foreground
+            } else {
+                mix_color(theme.muted, theme.background, 0.5)
+            };
+            let mut commands = vec![DrawCommand::SvgPath {
                     x: 0.0,
                     y: 0.0,
                     width: button_width,
-                    height: 24.0,
-                    radius: Radius::all(4.0),
-                    color: if hovered {
-                        mix_color(theme.surface, theme.accent, 0.3)
-                    } else {
-                        theme.surface
+                    height,
+                    path: format!(
+                        "M{} {}L{} {}L{} {}",
+                        cx - dx / 2.0,
+                        cy - s * 1.6,
+                        cx + dx,
+                        cy,
+                        cx - dx / 2.0,
+                        cy + s * 1.6
+                    ),
+                    fill: None,
+                    stroke: Some(color),
+                    stroke_width: 1.6,
+                }];
+            // A toolbar button shows its face only while the pointer is
+            // over it, as MyGo's `styleFn` swaps in the hover color.
+            if hovered {
+                commands.insert(
+                    0,
+                    DrawCommand::RoundedRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: button_width,
+                        height,
+                        radius: Radius::all(6.0),
+                        color: theme.surface_hover,
                     },
-                },
-                DrawCommand::Text {
-                    x: 0.0,
-                    y: 3.0,
-                    text: label.to_string(),
-                    font_size: theme.font_sizes.body,
-                    weight: 600,
-                    color: if enabled {
-                        theme.foreground
-                    } else {
-                        theme.muted
-                    },
-                    max_width: Some(button_width),
-                    alignment: TextAlignment::Center,
-                },
-            ];
-            if !enabled {
-                commands[0] = DrawCommand::RoundedRect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: button_width,
-                    height: 24.0,
-                    radius: Radius::all(4.0),
-                    color: mix_color(theme.surface, theme.border, 0.4),
-                };
+                );
             }
             self.register_access_node(
                 node,
                 Role::Button,
-                if label == "←" { "back" } else { "forward" },
+                name,
                 Some(if enabled { "enabled" } else { "disabled" }),
                 false,
             );
@@ -2692,105 +4199,112 @@ impl Context {
     /// Creates a single-line search field with a clear button.
     pub fn search_field(&mut self, id: &str, text: &mut String) -> SearchFieldState {
         let theme = self.theme.clone();
+        let font_size = theme.font_sizes.body;
         let width = self.current_content_width();
-        let field_height = measured_text_height(theme.font_sizes.body) + theme.spacing.sm * 2.0;
-        let gap = theme.spacing.xs;
-        let clear_width = 24.0;
-        let root = self.new_named_node(
+        let input_id = format!("{id}:input");
+        let clear_key = format!("{id}:clear");
+        let gap = 6.0;
+        // MyGo's search field overrides its field's Space(2.5) horizontal
+        // padding with Space(2), inside a border that takes layout space
+        // (`ui/combobox.go` coreSearchField).
+        let padding_x = 9.0;
+        let padding_y = 6.0;
+        let icon_size = 15.0;
+        let clear_size = 16.0;
+        let height = measured_text_height(font_size) + padding_y * 2.0 + 2.0;
+        let has_text = !text.is_empty();
+        let input_width = (width
+            - padding_x * 2.0
+            - icon_size
+            - gap
+            - if has_text { clear_size + gap } else { 0.0 }
+            - 2.0)
+            .max(40.0);
+        let node = self.new_named_node(
             id,
             Style {
                 width: Some(width),
-                height: Some(field_height),
+                height: Some(height),
                 flex_direction: FlexDirection::Row,
                 gap,
                 align_items: AlignItems::Center,
+                padding: Edges::symmetric(padding_y, padding_x),
                 ..Style::default()
             },
         );
-        let input_id = format!("{id}:input");
-        let clear_key = format!("{id}:clear");
-        let input_width = (width - clear_width - gap).max(1.0);
-        self.push_parent(root);
-        let mut input_changed = false;
-        let mut input_focused = false;
-        let mut input_hovered = false;
+        self.register_access_node(node, Role::Group, id, None, false);
+        {
+            let node_ref = self.nodes.get_mut(&node).expect("search node exists");
+            node_ref.fill = Some((theme.surface, Radius::all(6.0)));
+            node_ref.stroke = Some((theme.border, Radius::all(6.0)));
+        }
+        self.push_parent(node);
+        let magnifier_id = format!("{id}:icon");
+        self.icon(&magnifier_id, "magnifier", icon_size, theme.muted);
+        let mut input = None;
         self.container().width(input_width).children(|context| {
-            let field = context.text_field(&input_id, text);
-            input_changed = field.changed;
-            input_focused = field.focused;
-            input_hovered = field.hovered;
+            // MyGo's search field carries the placeholder its locale names
+            // "Search" (`ui/combobox.go` coreSearchField).
+            input = Some(context.text_field_impl(&input_id, text, None, false, Some("Search"), true));
         });
-        let clear = self.new_named_node(
-            &clear_key,
-            Style {
-                width: Some(clear_width),
-                height: Some(field_height),
-                ..Style::default()
-            },
-        );
-        self.register_interaction(clear, clear_key.clone());
-        let clear_hovered = self.pointer_in_previous(&clear_key);
-        let clicked = self.clicked_in_previous(&clear_key);
-        let mut commands = vec![
-            DrawCommand::RoundedRect {
+        let mut cleared = false;
+        if has_text {
+            let clear = self.new_named_node(
+                &clear_key,
+                Style {
+                    width: Some(clear_size),
+                    height: Some(clear_size),
+                    ..Style::default()
+                },
+            );
+            self.register_interaction(clear, clear_key.clone());
+            let clicked = self.clicked_in_previous(&clear_key);
+            // TextMuted at half over the field, with the X in the
+            // background color, as MyGo clears a search.
+            let clear_face = mix_color(theme.muted, theme.surface, 0.5);
+            let mut commands = vec![DrawCommand::RoundedRect {
                 x: 0.0,
                 y: 0.0,
-                width: clear_width,
-                height: field_height,
-                radius: Radius::all(4.0),
-                color: if clear_hovered {
-                    mix_color(theme.surface, theme.foreground, 0.08)
-                } else {
-                    theme.surface
-                },
-            },
-            DrawCommand::Text {
-                x: 0.0,
-                y: theme.spacing.sm,
-                text: "×".to_string(),
-                font_size: theme.font_sizes.body,
-                weight: 400,
-                color: if clear_hovered {
-                    theme.foreground
-                } else {
-                    theme.muted
-                },
-                max_width: Some(clear_width),
-                alignment: TextAlignment::Center,
-            },
-        ];
-        if clear_hovered {
-            commands.push(DrawCommand::Line {
-                x1: 8.0,
-                y1: field_height / 2.0,
-                x2: clear_width - 8.0,
-                y2: field_height / 2.0,
-                width: 1.0,
-                color: theme.border,
-            });
+                width: clear_size,
+                height: clear_size,
+                radius: Radius::all(8.0),
+                color: clear_face,
+            }];
+            for (from, to) in [((4.8, 4.8), (11.2, 11.2)), ((11.2, 4.8), (4.8, 11.2))] {
+                commands.push(DrawCommand::Line {
+                    x1: from.0,
+                    y1: from.1,
+                    x2: to.0,
+                    y2: to.1,
+                    width: 1.5,
+                    color: theme.background,
+                });
+            }
+            self.register_access_node(clear, Role::Button, "clear search", None, false);
+            self.nodes
+                .get_mut(&clear)
+                .expect("search clear exists")
+                .commands = commands;
+            if clicked {
+                text.clear();
+                self.focused_id = Some(input_id.clone());
+                cleared = true;
+            }
         }
-        self.register_access_node(clear, Role::Button, "clear search", None, false);
-        self.nodes
-            .get_mut(&clear)
-            .expect("search clear exists")
-            .commands = commands;
         self.pop_parent();
-
-        let mut cleared = false;
-        if clicked || (input_focused && self.key_pressed(Key::Escape)) {
+        let field = input.expect("search input exists");
+        if field.focused && self.key_pressed(Key::Escape) {
             text.clear();
             self.focused_id = Some(input_id.clone());
             cleared = true;
         }
-        let submitted = input_focused && self.key_pressed(Key::Enter);
-        let focused = input_focused || cleared;
-        self.register_access_node(root, Role::Group, id, None, false);
+        let submitted = field.focused && self.key_pressed(Key::Enter);
         SearchFieldState {
-            changed: input_changed || cleared,
+            changed: field.changed || cleared,
             submitted,
             cleared,
-            focused,
-            hovered: input_hovered,
+            focused: field.focused || cleared,
+            hovered: field.hovered,
             text: text.clone(),
         }
     }
@@ -3304,16 +4818,36 @@ impl Context {
                             }
                             let marker_x = state.saturation as f32 / 100.0 * field_width;
                             let marker_y = (1.0 - state.value as f32 / 100.0) * field_height;
-                            field_commands.push(DrawCommand::Circle {
-                                x: marker_x,
-                                y: marker_y,
-                                radius: 6.0,
+                            // MyGo rings the chosen color with a white
+                            // stroke two DIPs wide, its border filled
+                            // inward from the snapped box, and a black
+                            // 30% ring one wider around it
+                            // (`ui/colorpicker.go`). A rounded rect of
+                            // half-size radius is that ring's circle.
+                            field_commands.push(DrawCommand::RoundedRect {
+                                x: marker_x - 7.0,
+                                y: marker_y - 7.0,
+                                width: 14.0,
+                                height: 14.0,
+                                radius: Radius::all(7.0),
                                 color: Color::rgb(255, 255, 255),
                             });
-                            field_commands.push(DrawCommand::Circle {
-                                x: marker_x,
-                                y: marker_y,
-                                radius: 4.0,
+                            field_commands.push(DrawCommand::RoundedRect {
+                                x: marker_x - 8.0,
+                                y: marker_y - 8.0,
+                                width: 16.0,
+                                height: 16.0,
+                                radius: Radius::all(8.0),
+                                color: Color::rgba(0, 0, 0, 77),
+                            });
+                            // The ring's middle is the field's own color
+                            // there, which is the color chosen.
+                            field_commands.push(DrawCommand::RoundedRect {
+                                x: marker_x - 5.0,
+                                y: marker_y - 5.0,
+                                width: 10.0,
+                                height: 10.0,
+                                radius: Radius::all(5.0),
                                 color: *color,
                             });
                             context
@@ -3580,127 +5114,632 @@ impl Context {
         }
     }
 
-    /// Creates a HH:MM time input with step buttons.
-    pub fn time_input(&mut self, id: &str, text: &mut String) -> TimeInputState {
+    /// Draws MyGo's `ColorPicker`: a panel always open, 240 DIPs wide, of a
+    /// saturation/brightness square, hue and opacity sliders, the color in
+    /// hex, and swatches of common colors (`ui/colorpicker.go`).
+    pub fn color_panel(
+        &mut self,
+        id: &str,
+        color: &mut Color,
+        state: &mut ColorPanelState,
+    ) -> ColorPanelResponse {
         let theme = self.theme.clone();
-        let width = self.current_content_width();
-        let input_id = format!("{id}:input");
-        let input_width = (width - 108.0).max(1.0);
+        let space = theme.spacing.base;
+        let radius = 6.0_f32;
+        // The app set another color: take it, as MyGo's picker does.
+        if *color != state.last {
+            state.hsv = Hsv::from_color(*color);
+            state.last = *color;
+            state.hex = hex_of(*color);
+        }
+        let mut changed = false;
+        let width = space * 60.0;
         let root = self.new_named_node(
             id,
             Style {
                 width: Some(width),
-                height: Some(30.0),
-                flex_direction: FlexDirection::Row,
-                gap: theme.spacing.xs,
-                align_items: AlignItems::Center,
+                flex_direction: FlexDirection::Column,
+                gap: space * 2.5,
                 ..Style::default()
             },
         );
         self.push_parent(root);
-        let mut field_changed = false;
-        let mut field_focused = false;
-        let mut field_hovered = false;
-        self.container().width(input_width).children(|context| {
-            let filter = |raw: &str| filter_time_text(raw);
-            let field = context.text_field_impl(&input_id, text, Some(&filter), false);
-            field_changed = field.changed;
-            field_focused = field.focused;
-            field_hovered = field.hovered;
-        });
-        let (mut hour, mut minute) = parse_time(text).unwrap_or((0, 0));
-        let mut changed = field_changed;
-        let mut submitted = false;
-        if field_focused && self.key_pressed(Key::Enter) && parse_time(text).is_some() {
-            let normalized = format_time(hour, minute);
-            if normalized != *text {
-                *text = normalized;
-                changed = true;
-            }
-            submitted = true;
+        let hsv = state.hsv;
+
+        // The square of saturation and brightness.
+        let square_id = format!("{id}:square");
+        let square_height = space * 40.0;
+        let square = self.new_named_node(
+            &square_id,
+            Style {
+                width: Some(width),
+                height: Some(square_height),
+                ..Style::default()
+            },
+        );
+        self.register_interaction(square, square_id.clone());
+        self.register_focusable(square, square_id.clone());
+        let square_hovered = self.pointer_in_previous(&square_id);
+        if square_hovered && self.input.pointer_down {
+            state.dragging = Some(PanelDrag::Square);
+            self.focused_id = Some(square_id.clone());
         }
-        let mut step = |context: &mut Context, key: &str, delta_hour: i32, delta_minute: i32| {
-            let node = context.new_named_node(
-                key,
+        if state.dragging == Some(PanelDrag::Square) {
+            if let Some(point) = self.local_pointer_in_previous(&square_id) {
+                if let Some(bounds) = self.previous_regions.get(&square_id).map(|r| r.bounds) {
+                    let left = bounds.x;
+                    let top = bounds.y;
+                    let w = bounds.width.max(1.0);
+                    let h = bounds.height.max(1.0);
+                    let saturation = ((point.x - left) / w).clamp(0.0, 1.0);
+                    let value = 1.0 - ((point.y - top) / h).clamp(0.0, 1.0);
+                    changed |= set_hsv(state, color, Hsv { saturation, value, ..hsv });
+                }
+            }
+            if !self.input.pointer_down {
+                state.dragging = None;
+            }
+        }
+        let square_focused = self.focused_id.as_deref() == Some(square_id.as_str());
+        let hsv = state.hsv;
+        if square_focused {
+            let next = if self.key_pressed(Key::ArrowRight) {
+                Some(Hsv { saturation: hsv.saturation + 0.01, ..hsv })
+            } else if self.key_pressed(Key::ArrowLeft) {
+                Some(Hsv { saturation: hsv.saturation - 0.01, ..hsv })
+            } else if self.key_pressed(Key::ArrowUp) {
+                Some(Hsv { value: hsv.value + 0.01, ..hsv })
+            } else if self.key_pressed(Key::ArrowDown) {
+                Some(Hsv { value: hsv.value - 0.01, ..hsv })
+            } else {
+                None
+            };
+            if let Some(next) = next {
+                changed |= set_hsv(state, color, next);
+            }
+        }
+        let hsv = state.hsv;
+        let hue_color = Hsv { saturation: 1.0, value: 1.0, alpha: 1.0, ..hsv }.to_color();
+        let mut commands = vec![
+            DrawCommand::LinearGradient {
+                x: 0.0,
+                y: 0.0,
+                width,
+                height: square_height,
+                radius: Radius::all(radius),
+                start: Point::new(0.0, 0.5),
+                end: Point::new(1.0, 0.5),
+                stops: vec![
+                    GradientStop { offset: 0.0, color: Color::rgb(255, 255, 255) },
+                    GradientStop { offset: 1.0, color: hue_color },
+                ],
+            },
+            DrawCommand::LinearGradient {
+                x: 0.0,
+                y: 0.0,
+                width,
+                height: square_height,
+                radius: Radius::all(radius),
+                start: Point::new(0.5, 0.0),
+                end: Point::new(0.5, 1.0),
+                stops: vec![
+                    GradientStop { offset: 0.0, color: Color::rgba(0, 0, 0, 0) },
+                    GradientStop { offset: 1.0, color: Color::rgb(0, 0, 0) },
+                ],
+            },
+        ];
+        // The color chosen, ringed: a white ring inside a dark one
+        // (`ui/colorpicker.go` strokes the square's mark twice). MyGo's
+        // Painter fills a stroke's border inward from the snapped box
+        // (`ui/paint.go` borders), so the rings are filled discs one DIP
+        // apart, the middle the color the square shows there.
+        let marker_x = width * hsv.saturation;
+        let marker_y = square_height * (1.0 - hsv.value);
+        let d = space * 3.5;
+        commands.push(DrawCommand::RoundedRect {
+            x: marker_x - d / 2.0 - 1.0,
+            y: marker_y - d / 2.0 - 1.0,
+            width: d + 2.0,
+            height: d + 2.0,
+            radius: Radius::all(d / 2.0 + 1.0),
+            color: Color::rgba(0, 0, 0, 77),
+        });
+        commands.push(DrawCommand::RoundedRect {
+            x: marker_x - d / 2.0,
+            y: marker_y - d / 2.0,
+            width: d,
+            height: d,
+            radius: Radius::all(d / 2.0),
+            color: Color::rgb(255, 255, 255),
+        });
+        let inner = d - 4.0;
+        commands.push(DrawCommand::RoundedRect {
+            x: marker_x - inner / 2.0,
+            y: marker_y - inner / 2.0,
+            width: inner,
+            height: inner,
+            radius: Radius::all(inner / 2.0),
+            color: hsv_to_color(hsv.hue, hsv.saturation, hsv.value),
+        });
+        if self.shows_focus_ring(square_focused) {
+            commands.extend(focus_ring(0.0, 0.0, width, square_height, theme.accent));
+        }
+        self.set_node_commands(square, commands);
+        self.register_access_node(square, Role::Slider, "Saturation", None, square_focused);
+
+        // The hue, and the opacity.
+        let hues = [
+            Color::rgb(255, 0, 0),
+            Color::rgb(255, 255, 0),
+            Color::rgb(0, 255, 0),
+            Color::rgb(0, 255, 255),
+            Color::rgb(0, 0, 255),
+            Color::rgb(255, 0, 255),
+            Color::rgb(255, 0, 0),
+        ];
+        let mut hue = hsv.hue;
+        let hue_changed = self.channel_slider(
+            &format!("{id}:hue"),
+            &mut hue,
+            360.0,
+            "Hue",
+            move |width, bar_y, bar_height| {
+                // Six bands, each interpolating one hue step to the next, as
+                // MyGo paints the hue track (`ui/colorpicker.go`
+                // channelSlider): a single seven-stop gradient would take a
+                // different path through the same colors. MyGo clips the
+                // track to a capsule, so only the two outer ends look round;
+                // rounding the outer corners here gives the same outline
+                // without the notches a chain of pills would leave.
+                let band = width / 6.0;
+                let mut commands = Vec::with_capacity(6);
+                for index in 0..6 {
+                    let radius = match index {
+                        0 => Radius::new(bar_height / 2.0, 0.0, 0.0, bar_height / 2.0),
+                        5 => Radius::new(0.0, bar_height / 2.0, bar_height / 2.0, 0.0),
+                        _ => Radius::all(0.0),
+                    };
+                    // MyGo overlaps each band by half a pixel, but clips the
+                    // last one to the track: its round end is the capsule's,
+                    // so the last band stops at the track's width.
+                    let band_width = if index == 5 { band } else { band + 0.5 };
+                    commands.push(DrawCommand::LinearGradient {
+                        x: band * index as f32,
+                        y: bar_y,
+                        width: band_width,
+                        height: bar_height,
+                        radius,
+                        start: Point::new(0.0, 0.5),
+                        end: Point::new(1.0, 0.5),
+                        stops: vec![
+                            GradientStop { offset: 0.0, color: hues[index] },
+                            GradientStop { offset: 1.0, color: hues[index + 1] },
+                        ],
+                    });
+                }
+                commands
+            },
+        );
+        if hue_changed {
+            changed |= set_hsv(state, color, Hsv { hue, ..hsv });
+        }
+        let hsv = state.hsv;
+        let opaque = Hsv { alpha: 1.0, ..hsv }.to_color();
+        let mut alpha = hsv.alpha;
+        let alpha_changed = self.channel_slider(
+            &format!("{id}:alpha"),
+            &mut alpha,
+            1.0,
+            "Opacity",
+            move |width, bar_y, bar_height| {
+                // The checkerboard shows through the gradient, as MyGo
+                // paints `checkers` before the color (`ui/colorpicker.go`
+                // channelSlider).
+                let mut commands =
+                    checkerboard_commands(width, bar_y, bar_height, space * 1.5, bar_height / 2.0);
+                commands.push(DrawCommand::LinearGradient {
+                    x: 0.0,
+                    y: bar_y,
+                    width,
+                    height: bar_height,
+                    radius: Radius::all(bar_height / 2.0),
+                    start: Point::new(0.0, 0.5),
+                    end: Point::new(1.0, 0.5),
+                    stops: vec![
+                        GradientStop {
+                            offset: 0.0,
+                            color: Color::rgba(opaque.r, opaque.g, opaque.b, 0),
+                        },
+                        GradientStop { offset: 1.0, color: opaque },
+                    ],
+                });
+                commands
+            },
+        );
+        if alpha_changed {
+            changed |= set_hsv(state, color, Hsv { alpha, ..hsv });
+        }
+
+        // The color, and its hex. The field grows into what the swatch and
+        // the gap leave of the panel's width.
+        let swatch_size = space * 7.0;
+        let now = *color;
+        let field_width = (width - swatch_size - space * 2.0).max(1.0);
+        self.row().gap(space * 2.0).align(AlignItems::Center).children(|context| {
+            let box_id = format!("{id}:well");
+            let swatch = context.new_named_node(
+                &box_id,
                 Style {
-                    width: Some(22.0),
-                    height: Some(22.0),
+                    width: Some(swatch_size),
+                    height: Some(swatch_size),
                     ..Style::default()
                 },
             );
-            context.register_interaction(node, key.to_string());
-            let hovered = context.pointer_in_previous(key);
-            let clicked = context.clicked_in_previous(key);
-            if clicked {
-                let before = text.clone();
-                if delta_hour != 0 {
-                    hour = (hour as i32 + delta_hour).clamp(0, 23) as u32;
+            context.set_node_commands(
+                swatch,
+                vec![
+                    DrawCommand::RoundedRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: swatch_size,
+                        height: swatch_size,
+                        radius: Radius::all(radius),
+                        color: theme.surface,
+                    },
+                    DrawCommand::RoundedRect {
+                        x: 1.0,
+                        y: 1.0,
+                        width: swatch_size - 2.0,
+                        height: swatch_size - 2.0,
+                        radius: Radius::all(radius - 1.0),
+                        color: now,
+                    },
+                ],
+            );
+            let hex_id = format!("{id}:hex");
+            let mut text = state.hex.clone();
+            let mut field = TextFieldState {
+                changed: false,
+                cursor: 0,
+                focused: false,
+                hovered: false,
+            };
+            context.container().width(field_width).children(|context| {
+                field = context.text_field_impl(&hex_id, &mut text, None, false, None, false);
+            });
+            state.hex = text;
+            if field.changed {
+                if let Ok(next) = Color::from_hex(&state.hex) {
+                    changed |= next != *color;
+                    *color = next;
+                    state.hsv = Hsv::from_color(next);
+                    state.last = next;
                 }
-                if delta_minute != 0 {
-                    minute = (minute as i32 + delta_minute).clamp(0, 59) as u32;
+            }
+            if !field.focused && state.hex != hex_of(*color) {
+                state.hex = hex_of(*color);
+            }
+        });
+
+        // Swatches.
+        self.grid().columns(6).gap(space * 1.5).children(|context| {
+            for (index, swatch) in SWATCH_COLORS.iter().enumerate() {
+                let key = format!("{id}:swatch:{index}");
+                // A swatch stretches across its column, as MyGo's Fr(1)
+                // tracks do, at Space(5) high.
+                let cell_width = (width - space * 1.5 * 5.0) / 6.0;
+                let cell_height = space * 5.0;
+                let cell = context.new_named_node(
+                    &key,
+                    Style {
+                        width: Some(cell_width),
+                        height: Some(cell_height),
+                        ..Style::default()
+                    },
+                );
+                context.register_interaction(cell, key.clone());
+                let selected = *color == *swatch;
+                // MyGo's Border(2) fills two pixels inside the box, so a
+                // chosen swatch shows the theme's text color as a ring
+                // around the color itself.
+                let mut commands = Vec::with_capacity(2);
+                if selected {
+                    commands.push(DrawCommand::RoundedRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: cell_width,
+                        height: cell_height,
+                        radius: Radius::all(radius),
+                        color: theme.foreground,
+                    });
                 }
-                *text = format_time(hour, minute);
-                if *text != before {
+                let inset = if selected { 2.0 } else { 0.0 };
+                commands.push(DrawCommand::RoundedRect {
+                    x: inset,
+                    y: inset,
+                    width: cell_width - inset * 2.0,
+                    height: cell_height - inset * 2.0,
+                    radius: Radius::all((radius - inset).max(0.0)),
+                    color: *swatch,
+                });
+                context.set_node_commands(cell, commands);
+                context.register_access_node(
+                    cell,
+                    Role::Button,
+                    SWATCH_NAMES[index],
+                    None,
+                    false,
+                );
+                if context.clicked_in_previous(&key) {
+                    changed |= set_hsv(state, color, Hsv::from_color(*swatch));
+                }
+            }
+        });
+        self.pop_parent();
+        ColorPanelResponse {
+            color: *color,
+            changed,
+        }
+    }
+
+    /// Draws one channel of a color panel: a rounded track the caller
+    /// paints, and a white knob half the track's padding inside its ends,
+    /// as MyGo's `channelSlider` (`ui/colorpicker.go`).
+    fn channel_slider(
+        &mut self,
+        id: &str,
+        value: &mut f32,
+        max: f32,
+        label: &str,
+        track: impl FnOnce(f32, f32, f32) -> Vec<DrawCommand>,
+    ) -> bool {
+        let theme = self.theme.clone();
+        let space = theme.spacing.base;
+        let knob = space * 3.0;
+        let height = space * 4.0;
+        let width = self.current_content_width();
+        *value = value.clamp(0.0, max);
+        let node = self.new_named_node(
+            id,
+            Style {
+                width: Some(width),
+                height: Some(height),
+                ..Style::default()
+            },
+        );
+        self.register_interaction(node, id.to_string());
+        self.register_focusable(node, id.to_string());
+        let hovered = self.pointer_in_previous(id);
+        if hovered && self.input.pointer_down {
+            self.focused_id = Some(id.to_string());
+        }
+        let focused = self.focused_id.as_deref() == Some(id);
+        let dragging = self.widget_states.get(id).is_some_and(|state| {
+            matches!(state, WidgetState::Slider { dragging } if *dragging)
+        });
+        let mut changed = false;
+        let pressed = hovered && self.input.pointer_down;
+        if pressed || dragging {
+            if let Some(point) = self.local_pointer_in_previous(id) {
+                if let Some(bounds) = self.previous_regions.get(id).map(|r| r.bounds) {
+                    let inner = (bounds.width - knob).max(1.0);
+                    let fraction =
+                        ((point.x - bounds.x - knob / 2.0) / inner).clamp(0.0, 1.0);
+                    let next = fraction * max;
+                    if (next - *value).abs() > f32::EPSILON {
+                        *value = next;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        self.widget_states.insert(
+            id.to_string(),
+            WidgetState::Slider {
+                dragging: pressed || dragging,
+            },
+        );
+        let fraction = if max > 0.0 { (*value / max).clamp(0.0, 1.0) } else { 0.0 };
+        // The track is the node less Space(0.5) above and below, clipped to
+        // a capsule as MyGo's `Clip(bar, bar.H/2)` does.
+        let bar_y = space * 0.5;
+        let bar_height = height - space;
+        let mut commands = vec![
+            DrawCommand::ScissorPush {
+                rect: Rect::new(0.0, bar_y, width, bar_height),
+            },
+            DrawCommand::RoundedRect {
+                x: 0.0,
+                y: bar_y,
+                width,
+                height: bar_height,
+                radius: Radius::all(bar_height / 2.0),
+                color: Color::rgb(255, 255, 255),
+            },
+        ];
+        commands.extend(track(width, bar_y, bar_height));
+        commands.push(DrawCommand::ScissorPop);
+        let knob_x = knob / 2.0 + (width - knob) * fraction;
+        let mut knob_commands = vec![
+            DrawCommand::Shadow {
+                x: knob_x - knob / 2.0,
+                y: 0.0,
+                width: knob,
+                height,
+                radius: knob / 2.0,
+                offset_x: 0.0,
+                offset_y: 1.0,
+                blur: 3.0,
+                color: Color::rgba(0, 0, 0, 77),
+            },
+            DrawCommand::RoundedRect {
+                x: knob_x - knob / 2.0,
+                y: 0.0,
+                width: knob,
+                height,
+                radius: Radius::all(knob / 2.0),
+                color: Color::rgb(255, 255, 255),
+            },
+        ];
+        if self.shows_focus_ring(focused) {
+            knob_commands.extend(focus_ring(
+                knob_x - knob / 2.0,
+                0.0,
+                knob,
+                height,
+                theme.accent,
+            ));
+        }
+        commands.extend(knob_commands);
+        self.set_node_commands(node, commands);
+        self.register_access_node(node, Role::Slider, label, None, focused);
+        changed
+    }
+
+    /// Creates a HH:MM time input with step buttons.
+    pub fn time_input(&mut self, id: &str, text: &mut String) -> TimeInputState {
+        let theme = self.theme.clone();
+        let space = theme.spacing.base;
+        // MyGo's time field is one pill of the hours, the minutes and the
+        // half of the day, each a segment the arrows step
+        // (`ui/timeinput.go` coreTimeInput). The preview's locale writes
+        // them as `07:30`, 24 hours, as this demo's page does.
+        let (mut hour, mut minute) = parse_time(text).unwrap_or((7, 30));
+        let pill = self.new_named_node(
+            id,
+            Style {
+                // The line's height plus the padding and the border, as
+                // MyGo lays the field out.
+                height: Some((theme.font_sizes.body * 1.5).round() + space * 3.0 - 2.0),
+                flex_direction: FlexDirection::Row,
+                gap: 0.0,
+                // MyGo's field is `Padding(Space(1.5), Space(2))` inside a
+                // 1 DIP border, which its layout gives a pixel of room.
+                padding: Edges {
+                    top: space * 1.5 + 1.0,
+                    right: space * 2.0 + 1.0,
+                    bottom: space * 1.5 + 1.0,
+                    left: space * 2.0 + 1.0,
+                },
+                align_items: AlignItems::Center,
+                ..Style::default()
+            },
+        );
+        self.nodes
+            .get_mut(&pill)
+            .expect("time pill exists")
+            .fill = Some((theme.surface, Radius::all(6.0)));
+        self.nodes
+            .get_mut(&pill)
+            .expect("time pill exists")
+            .stroke = Some((theme.border, Radius::all(6.0)));
+        self.push_parent(pill);
+        let mut changed = false;
+        let mut focused = false;
+        let mut hovered = false;
+        // The hours and the minutes, each stepped by the arrows while it
+        // has the focus, with the separator between them.
+        for (index, (key, digits, top)) in [("hours", 2usize, 24i32), ("minutes", 2, 60)]
+            .into_iter()
+            .enumerate()
+        {
+            if index == 1 {
+                // MyGo's separator takes `Padding(0, 1)` of its own.
+                self.container().padding_x(1.0).children(|context| {
+                    context
+                        .text(":")
+                        .font_size(theme.font_sizes.body)
+                        .color(theme.muted);
+                });
+            }
+            let value = if index == 0 { hour } else { minute };
+            let label = format!("{value:0digits$}");
+            let glyphs =
+                host_text_width_weighted(&label, theme.font_sizes.body, false, false, 400)
+                    .unwrap_or(theme.font_sizes.body * 0.6 * digits as f32);
+            let segment_id = format!("{id}:{key}");
+            let segment = self.new_named_node(
+                &segment_id,
+                Style {
+                    width: Some(glyphs + space),
+                    height: Some(theme.font_sizes.body * 1.5),
+                    padding: Edges {
+                        top: 0.0,
+                        right: space * 0.5,
+                        bottom: 0.0,
+                        left: space * 0.5,
+                    },
+                    ..Style::default()
+                },
+            );
+            self.register_interaction(segment, segment_id.clone());
+            self.register_focusable(segment, segment_id.clone());
+            // A click takes the segment's focus, as MyGo's segments do
+            // (`ui/timeinput.go` coreTimeInput's Focusable boxes).
+            if self.clicked_in_previous(&segment_id) {
+                self.focused_id = Some(segment_id.clone());
+            }
+            let is_focused = self.focused_id.as_deref() == Some(segment_id.as_str());
+            if is_focused {
+                focused = true;
+                self.nodes.get_mut(&segment).expect("segment").fill =
+                    Some((theme.accent, Radius::all(space)));
+            }
+            if self.pointer_in_previous(&segment_id) {
+                hovered = true;
+            }
+            if is_focused {
+                let step = if self.key_pressed(Key::ArrowUp) {
+                    1
+                } else if self.key_pressed(Key::ArrowDown) {
+                    -1
+                } else {
+                    0
+                };
+                if step != 0 {
+                    let next = (value as i32 + step).rem_euclid(top);
+                    if index == 0 {
+                        hour = next as u32;
+                    } else {
+                        minute = next as u32;
+                    }
+                    *text = format_time(hour, minute);
                     changed = true;
                 }
-                context.focused_id = Some(input_id.clone());
             }
-            context
-                .nodes
-                .get_mut(&node)
-                .expect("time step exists")
-                .commands = vec![
-                DrawCommand::RoundedRect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 22.0,
-                    height: 22.0,
-                    radius: Radius::all(4.0),
-                    color: if hovered {
-                        mix_color(theme.surface, theme.foreground, 0.08)
-                    } else {
-                        theme.surface
-                    },
+            self.nodes.get_mut(&segment).expect("segment").commands = vec![DrawCommand::Text {
+                // The segment's text sits inside its `Padding(0, Space(0.5))`,
+                // as every text node draws inside its own padding.
+                x: space * 0.5,
+                y: 0.0,
+                text: label,
+                font_size: theme.font_sizes.body,
+                weight: 400,
+                italic: false,
+                mono: false,
+                family: None,
+                color: if is_focused {
+                    theme.background
+                } else {
+                    theme.foreground
                 },
-                DrawCommand::Text {
-                    x: 0.0,
-                    y: 2.0,
-                    text: if delta_hour > 0 {
-                        "H+"
-                    } else if delta_hour < 0 {
-                        "H-"
-                    } else if delta_minute > 0 {
-                        "M+"
-                    } else {
-                        "M-"
-                    }
-                    .to_string(),
-                    font_size: 9.0,
-                    weight: 600,
-                    color: theme.foreground,
-                    max_width: Some(22.0),
-                    alignment: TextAlignment::Center,
-                },
-            ];
-            context.register_access_node(node, Role::Button, key, None, false);
-        };
-        step(self, &format!("{id}:hour_dec"), -1, 0);
-        step(self, &format!("{id}:hour_inc"), 1, 0);
-        step(self, &format!("{id}:minute_dec"), 0, -1);
-        step(self, &format!("{id}:minute_inc"), 0, 1);
+                max_width: Some(glyphs.max(1.0)),
+                alignment: TextAlignment::Center,
+            }];
+            self.register_access_node(segment, Role::Slider, &segment_id, None, false);
+        }
         self.pop_parent();
-        self.register_access_node(root, Role::Group, id, None, false);
-        let parsed = parse_time(text);
-        let valid = parsed.is_some();
-        let (hour, minute) = parsed.unwrap_or((hour, minute));
+        self.register_access_node(pill, Role::Group, id, None, false);
         TimeInputState {
             changed,
-            valid,
+            // The field reports what its text parses to, as MyGo's
+            // `coreTimeInput` keeps the time it was given.
+            valid: parse_time(text).is_some(),
             hour,
             minute,
-            submitted,
-            focused: field_focused,
-            hovered: field_hovered,
+            submitted: changed,
+            focused,
+            hovered,
         }
     }
 
@@ -3838,12 +5877,15 @@ impl Context {
                 text: label.to_string(),
                 font_size,
                 weight: if active_now { 600 } else { 400 },
+                italic: false,
+                mono: false,
+                family: None,
                 color: text_color,
                 max_width: Some((width - theme.spacing.md * 2.0).max(1.0)),
                 alignment: TextAlignment::Start,
             },
         ];
-        if focused {
+        if self.shows_focus_ring(focused) {
             commands.extend(focus_ring(0.0, 0.0, width, height, theme.accent));
         }
         self.register_access_node(
@@ -3867,6 +5909,307 @@ impl Context {
         }
     }
 
+    /// Creates a MyGo segment: a centered icon or label in a box the
+    /// caller styles, reporting clicks without owning the choice.
+    ///
+    /// MyGo draws toggles and segments as buttons whose face depends on
+    /// the group they sit in (`ui/widgets.go` styleButton): a plain toggle
+    /// has a Surface face with a 1px border, while a segment is transparent
+    /// until hovered and paints the theme background when chosen.
+    #[allow(clippy::too_many_arguments)]
+    pub fn segment(
+        &mut self,
+        id: &str,
+        label: &str,
+        icon: Option<&str>,
+        selected: bool,
+        padding: Edges,
+        radius: f32,
+        face: SegmentFace,
+        disabled: bool,
+    ) -> SegmentState {
+        let theme = self.theme.clone();
+        let font_size = theme.font_sizes.body;
+        let line = measured_text_height(font_size);
+        let content_size = match icon {
+            // MyGo sizes an icon at one em of the text around it, its
+            // `intrinsicSize`, and the box is that em tall too; a toolbar's
+            // history arrow is a `Space(4)` = 16 box instead (`historyButton`
+            // in `ui/router.go`).
+            Some(_) => {
+                let side = if matches!(face, SegmentFace::Toolbar) {
+                    theme.spacing.base * 4.0
+                } else {
+                    14.0
+                };
+                Size::new(side, side)
+            }
+            // Segment labels measure with the canvas at weight 400, the
+            // face they draw with; the CPU estimate runs wide.
+            None => Size::new(
+                host_text_width_weighted(label, font_size, false, false, 400)
+                    .unwrap_or_else(|| measure_text_width(label, font_size)),
+                line,
+            ),
+        };
+        let width = padding.left + content_size.width + padding.right;
+        let height = padding.top + content_size.height + padding.bottom;
+        let node = self.new_named_node(
+            id,
+            Style {
+                width: Some(width),
+                height: Some(height),
+                ..Style::default()
+            },
+        );
+        self.register_interaction(node, id.to_string());
+        self.register_focusable(node, id.to_string());
+        let hovered = !disabled && self.pointer_in_previous(id);
+        let pressed = hovered && self.input.pointer_down;
+        if pressed {
+            self.focused_id = Some(id.to_string());
+        }
+        let focused = !disabled && self.focused_id.as_deref() == Some(id);
+        let clicked = !disabled
+            && (self.clicked_in_previous(id) || (focused && self.key_pressed(Key::Space)));
+        let (fill, stroke) = match face {
+            SegmentFace::Plain if !disabled => {
+                let color = if selected || pressed {
+                    theme.surface_pressed
+                } else if hovered {
+                    theme.surface_hover
+                } else {
+                    theme.surface
+                };
+                (Some(color), Some(theme.border))
+            }
+            SegmentFace::Plain => (None, None),
+            SegmentFace::Segment if !disabled => {
+                let color = if selected {
+                    theme.background
+                } else if pressed {
+                    theme.surface_pressed
+                } else if hovered {
+                    theme.surface_hover
+                } else {
+                    Color::TRANSPARENT
+                };
+                (Some(color), None)
+            }
+            SegmentFace::Segment => (None, None),
+            SegmentFace::Toolbar if !disabled => {
+                let color = if selected || pressed {
+                    theme.surface_pressed
+                } else if hovered {
+                    theme.surface_hover
+                } else {
+                    Color::TRANSPARENT
+                };
+                (Some(color), None)
+            }
+            SegmentFace::Toolbar => (None, None),
+        };
+        let ring_visible = self.shows_focus_ring(focused);
+        // MyGo's chosen segment lifts off the track with a one-DIP drop
+        // shadow (`ui/toggle.go` coreSegmented: Shadow(0, 1, 2, 0, 12%)).
+        // The node's face paints before its own commands, so the lifted
+        // face is drawn here instead, shadow first.
+        let lift = matches!(face, SegmentFace::Segment) && selected && !disabled;
+        let node_ref = self.nodes.get_mut(&node).expect("segment node exists");
+        node_ref.fill = if lift {
+            None
+        } else {
+            fill.map(|color| (color, Radius::all(radius)))
+        };
+        node_ref.stroke = stroke.map(|color| (color, Radius::all(radius)));
+        let mut commands = Vec::new();
+        if lift {
+            commands.push(DrawCommand::Shadow {
+                x: 0.0,
+                y: 0.0,
+                width,
+                height,
+                radius,
+                offset_x: 0.0,
+                offset_y: 1.0,
+                blur: 2.0,
+                color: Color::rgba(0, 0, 0, 31),
+            });
+            commands.push(DrawCommand::RoundedRect {
+                x: 0.0,
+                y: 0.0,
+                width,
+                height,
+                radius: Radius::all(radius),
+                color: theme.background,
+            });
+        }
+        if let Some(icon_name) = icon {
+            if let Some(icon) = Icon::builtin(icon_name) {
+                // The icon is one em square, the size its box already
+                // reserves; drawing it larger would spill past the padding.
+                let icon_size = content_size.width.min(16.0);
+                let icon_x = padding.left + (content_size.width - icon_size) / 2.0;
+                let icon_y = padding.top + (content_size.height - icon_size) / 2.0;
+                commands.push(DrawCommand::TransformPush {
+                    transform: Transform {
+                        translation: Point::new(icon_x, icon_y),
+                        scale: Point::new(1.0, 1.0),
+                        rotation: 0.0,
+                    },
+                });
+                // MyGo dims a disabled element, and what is inside it, to
+                // half its opacity (`ui/paint.go`), its icon with the rest.
+                let color = if disabled {
+                    mix_color(theme.muted, theme.background, 0.5)
+                } else {
+                    theme.foreground
+                };
+                commands.extend(icon.to_commands_with_direction(icon_size, color, self.direction));
+                commands.push(DrawCommand::TransformPop);
+            }
+        } else if !label.is_empty() {
+            let color = if disabled {
+                mix_color(theme.muted, theme.background, 0.5)
+            } else {
+                theme.foreground
+            };
+            commands.push(DrawCommand::Text {
+                x: padding.left,
+                y: padding.top + (content_size.height - line) / 2.0,
+                text: label.to_string(),
+                font_size,
+                weight: 400,
+                italic: false,
+                mono: false,
+                family: None,
+                color,
+                max_width: Some(content_size.width.max(1.0)),
+                alignment: TextAlignment::Start,
+            });
+        }
+        if ring_visible {
+            commands.extend(focus_ring(0.0, 0.0, width, height, theme.accent));
+        }
+        node_ref.commands = commands;
+        self.register_access_node(
+            node,
+            Role::Button,
+            label,
+            Some(if selected { "active" } else { "inactive" }),
+            focused,
+        );
+        SegmentState {
+            clicked,
+            hovered,
+            pressed,
+            focused,
+        }
+    }
+
+    /// Creates a MyGo radio button in a row: a 16px dot and a label, in
+    /// the text color either way (`ui/widgets.go` coreRadio).
+    pub fn radio(
+        &mut self,
+        id: &str,
+        label: &str,
+        selected: &mut usize,
+        value: usize,
+    ) -> RadioState {
+        let theme = self.theme.clone();
+        let font_size = theme.font_sizes.body;
+        let line = measured_text_height(font_size);
+        let dot = 16.0;
+        let gap = theme.spacing.sm;
+        let height = line.max(dot);
+        let width = dot + gap + measure_text_width(label, font_size);
+        let node = self.new_named_node(
+            id,
+            Style {
+                width: Some(width),
+                height: Some(height),
+                ..Style::default()
+            },
+        );
+        self.register_interaction(node, id.to_string());
+        self.register_focusable(node, id.to_string());
+        let hovered = self.pointer_in_previous(id);
+        let pressed = hovered && self.input.pointer_down;
+        if pressed {
+            self.focused_id = Some(id.to_string());
+        }
+        let focused = self.focused_id.as_deref() == Some(id);
+        let clicked = self.clicked_in_previous(id) || (focused && self.key_pressed(Key::Space));
+        if clicked {
+            *selected = value;
+        }
+        let on = *selected == value;
+        let ring = if on || hovered {
+            theme.accent
+        } else {
+            mix_color(theme.border, theme.foreground, 0.25)
+        };
+        let mut commands = Vec::new();
+        let cy = height / 2.0;
+        if on {
+            commands.push(DrawCommand::Circle {
+                x: dot / 2.0,
+                y: cy,
+                radius: 8.0,
+                color: theme.accent,
+            });
+            // MyGo fills a Space(1.5)=6 diameter accent-text dot.
+            commands.push(DrawCommand::Circle {
+                x: dot / 2.0,
+                y: cy,
+                radius: 3.0,
+                color: theme.on_accent,
+            });
+        } else {
+            commands.push(DrawCommand::Circle {
+                x: dot / 2.0,
+                y: cy,
+                radius: 8.0,
+                color: ring,
+            });
+            commands.push(DrawCommand::Circle {
+                x: dot / 2.0,
+                y: cy,
+                radius: 7.0,
+                color: theme.background,
+            });
+        }
+        commands.push(DrawCommand::Text {
+            x: dot + gap,
+            y: (height - line) / 2.0,
+            text: label.to_string(),
+            font_size,
+            weight: 400,
+            italic: false,
+            mono: false,
+            family: None,
+            color: theme.foreground,
+            max_width: Some((width - dot - gap).max(1.0)),
+            alignment: TextAlignment::Start,
+        });
+        self.nodes
+            .get_mut(&node)
+            .expect("radio node exists")
+            .commands = commands;
+        self.register_access_node(
+            node,
+            Role::Radio,
+            label,
+            Some(if on { "selected" } else { "unselected" }),
+            focused,
+        );
+        RadioState {
+            clicked,
+            hovered,
+            focused,
+        }
+    }
+
     /// Creates an equal-width segmented selector.
     pub fn segmented(
         &mut self,
@@ -3875,23 +6218,37 @@ impl Context {
         labels: &[&str],
     ) -> SegmentedResponse {
         let theme = self.theme.clone();
-        let width = self.current_content_width();
-        let height = measured_text_height(theme.font_sizes.body) + theme.spacing.sm * 2.0;
+        let font_size = theme.font_sizes.body;
+        let line_height = measured_text_height(font_size);
         if labels.is_empty() {
             *selected = 0;
         } else {
             *selected = (*selected).min(labels.len() - 1);
         }
+        let segment_widths: Vec<f32> = labels
+            .iter()
+            .map(|label| measure_text_width(label, font_size) + 24.0)
+            .collect();
+        // MyGo's Segmented hugs its segments: one pixel of border and two
+        // inside it, the segments two apart (`ui/toggle.go` coreSegmented).
+        let width = segment_widths.iter().sum::<f32>()
+            + 6.0
+            + 2.0 * labels.len().saturating_sub(1) as f32;
+        let height = line_height + 14.0;
         let root = self.new_named_node(
             id,
             Style {
                 width: Some(width),
                 height: Some(height),
-                gap: theme.spacing.xs,
-                padding: Edges::all(2.0),
+                gap: 2.0,
+                padding: Edges::all(3.0),
                 ..Style::default()
             },
         );
+        self.nodes.get_mut(&root).expect("segmented root exists").fill =
+            Some((theme.surface, Radius::all(6.0)));
+        self.nodes.get_mut(&root).expect("segmented root exists").stroke =
+            Some((theme.border, Radius::all(6.0)));
         self.register_interaction(root, id.to_string());
         self.register_focusable(root, id.to_string());
         let hovered = self.pointer_in_previous(id);
@@ -3929,82 +6286,72 @@ impl Context {
             }
         }
         let changed = *selected != previous;
-        let inner_width =
-            (width - 4.0 - theme.spacing.xs * labels.len().saturating_sub(1) as f32).max(1.0);
-        let segment_width = if labels.is_empty() {
-            0.0
-        } else {
-            inner_width / labels.len() as f32
-        };
-        let mut root_commands = vec![DrawCommand::RoundedRect {
-            x: 0.0,
-            y: 0.0,
-            width,
-            height,
-            radius: Radius::all(7.0),
-            color: theme.surface,
-        }];
-        if focused {
-            root_commands.extend(focus_ring(0.0, 0.0, width, height, theme.accent));
+        if self.shows_focus_ring(focused) {
+            let root_ref = self.nodes.get_mut(&root).expect("segmented root exists");
+            root_ref.commands = vec![];
+            root_ref.commands.extend(focus_ring(0.0, 0.0, width, height, theme.accent));
         }
-        self.nodes
-            .get_mut(&root)
-            .expect("segmented root exists")
-            .commands = root_commands;
         self.push_parent(root);
         for (index, label) in labels.iter().enumerate() {
             let key = format!("{id}:segment:{index}");
+            let segment_width = segment_widths[index];
+            let segment_height = line_height + 8.0;
             let node = self.new_named_node(
                 &key,
                 Style {
                     width: Some(segment_width),
-                    height: Some((height - 4.0).max(1.0)),
+                    height: Some(segment_height),
                     ..Style::default()
                 },
             );
             self.register_interaction(node, key.clone());
             let segment_hovered = self.pointer_in_previous(&key);
             let selected_segment = *selected == index;
-            let mut commands = vec![
-                DrawCommand::RoundedRect {
+            let mut commands = Vec::new();
+            if selected_segment {
+                // Raised off the track: white with a soft drop shadow.
+                commands.push(DrawCommand::Shadow {
                     x: 0.0,
                     y: 0.0,
                     width: segment_width,
-                    height: (height - 4.0).max(1.0),
-                    radius: Radius::all(5.0),
-                    color: if selected_segment {
-                        theme.accent
-                    } else if segment_hovered {
-                        mix_color(theme.surface, theme.foreground, 0.08)
-                    } else {
-                        theme.surface
-                    },
-                },
-                DrawCommand::Text {
+                    height: segment_height,
+                    radius: 4.0,
+                    offset_x: 0.0,
+                    offset_y: 1.0,
+                    blur: 2.0,
+                    color: Color::rgba(0, 0, 0, 31),
+                });
+                commands.push(DrawCommand::RoundedRect {
                     x: 0.0,
-                    y: theme.spacing.sm,
-                    text: label.to_string(),
-                    font_size: theme.font_sizes.body,
-                    weight: if selected_segment { 600 } else { 400 },
-                    color: if selected_segment {
-                        theme.on_accent
-                    } else {
-                        theme.foreground
-                    },
-                    max_width: Some(segment_width.max(1.0)),
-                    alignment: TextAlignment::Center,
-                },
-            ];
-            if selected_segment {
-                commands.push(DrawCommand::Line {
-                    x1: 0.0,
-                    y1: height - 5.0,
-                    x2: segment_width,
-                    y2: height - 5.0,
-                    width: 1.0,
-                    color: theme.accent,
+                    y: 0.0,
+                    width: segment_width,
+                    height: segment_height,
+                    radius: Radius::all(4.0),
+                    color: theme.background,
+                });
+            } else if segment_hovered {
+                commands.push(DrawCommand::RoundedRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: segment_width,
+                    height: segment_height,
+                    radius: Radius::all(4.0),
+                    color: theme.surface_hover,
                 });
             }
+            commands.push(DrawCommand::Text {
+                x: 12.0,
+                y: 4.0,
+                text: label.to_string(),
+                font_size,
+                weight: 400,
+                italic: false,
+                mono: false,
+                family: None,
+                color: theme.foreground,
+                max_width: Some((segment_width - 24.0).max(1.0)),
+                alignment: TextAlignment::Start,
+            });
             self.register_access_node(
                 node,
                 Role::Tab,
@@ -4091,6 +6438,9 @@ impl Context {
                 y: 6.0,
                 text: label.to_string(),
                 font_size,
+                italic: false,
+                mono: false,
+                family: None,
                 weight: 500,
                 color: theme.foreground,
                 max_width: Some((width - theme.spacing.md * 2.0).max(1.0)),
@@ -4116,6 +6466,9 @@ impl Context {
                         y: ghost_y + 5.0,
                         text: state.payload.clone().unwrap_or_default(),
                         font_size: theme.font_sizes.small,
+                        italic: false,
+                        mono: false,
+                        family: None,
                         weight: 500,
                         color: theme.on_accent,
                         max_width: Some(ghost_width - 16.0),
@@ -4206,6 +6559,9 @@ impl Context {
                 y: 8.0,
                 text: label.to_string(),
                 font_size,
+                italic: false,
+                mono: false,
+                family: None,
                 weight: 500,
                 color: theme.foreground,
                 max_width: Some((width - theme.spacing.md * 2.0).max(1.0)),
@@ -4295,6 +6651,9 @@ impl Context {
                     y: 3.0,
                     text: row.label.to_string(),
                     font_size: theme.font_sizes.small,
+                    italic: false,
+                    mono: false,
+                    family: None,
                     weight: 400,
                     color: theme.foreground,
                     max_width: Some(width - 16.0),
@@ -4321,8 +6680,17 @@ impl Context {
         state: &mut DiffViewerState,
     ) -> DiffViewerResponse {
         let theme = self.theme.clone();
+        // The filler's stripes are the text color at 7% over the page
+        // (`ui/editor/diffside.go` fillerStripes, `ct.Text.Alpha(0.07)`).
+        let hatch = Color::rgba(theme.foreground.r, theme.foreground.g, theme.foreground.b, 18);
         let width = self.current_content_width();
-        let lines = diff_lines(old, new);
+        let height = self.current_content_height();
+        let old_lines = split_lines(old);
+        let new_lines = split_lines(new);
+        let hunks = lines_diff(&old_lines, &new_lines);
+        let added: usize = hunks.iter().map(|h| h.b1 - h.b0).sum();
+        let removed: usize = hunks.iter().map(|h| h.a1 - h.a0).sum();
+        let same = old_lines.len() + new_lines.len() - added - removed;
         let toggle_key = format!("{id}:layout");
         if self.clicked_in_previous(&toggle_key) {
             state.layout = match state.layout {
@@ -4330,178 +6698,175 @@ impl Context {
                 DiffLayout::SideBySide => DiffLayout::Unified,
             };
         }
+        // MyGo's diff viewer: an editor on each side of a split view, both
+        // gutters as wide, tinted changed lines, striped bars for deletions,
+        // word highlights within changed lines, and the change marks of the
+        // new side's scroll bar (`ui/editor/diffview.go`, `diffside.go`).
+        let code_size = 13.0_f32;
+        let line_height = 19.5_f32;
+        let char_width = host_text_width_weighted("0", code_size, false, true, 400)
+            .unwrap_or(code_size * 0.6);
+        let ascent = host_text_ascent(code_size, false, true, false).unwrap_or(code_size * 0.93);
+        let descent = host_text_descent(code_size, false, true, false).unwrap_or(code_size * 0.25);
+        let line_top = ((line_height - ascent - descent) / 2.0).max(0.0);
+        // Both gutters take the digits of the longer text, at least three,
+        // then the change bar's room and the padding (`gutterWidth`).
+        let digits = 3.max(old_lines.len().max(new_lines.len()).to_string().len());
+        let gutter = (digits as f32 * char_width + char_width * 1.5 + 4.0 + 6.0).ceil();
+        let text_x = gutter + 4.0;
+        let geometry = DiffGeometry {
+            gutter,
+            text_x,
+            line_height,
+            line_top,
+            code_size,
+            scrollbar: 10.0,
+        };
         let root = self.new_named_node(
             id,
             Style {
                 width: Some(width),
+                height: Some(height),
                 flex_direction: FlexDirection::Column,
-                gap: theme.spacing.xs,
                 ..Style::default()
             },
         );
-        self.push_parent(root);
-        let toggle = self.new_named_node(
-            &toggle_key,
-            Style {
-                width: Some(92.0),
-                height: Some(22.0),
-                ..Style::default()
-            },
-        );
-        self.register_interaction(toggle, toggle_key.clone());
-        let hovered = self.pointer_in_previous(&toggle_key);
-        self.nodes
-            .get_mut(&toggle)
-            .expect("diff toggle exists")
-            .commands = vec![
-            DrawCommand::RoundedRect {
-                x: 0.0,
-                y: 0.0,
-                width: 92.0,
-                height: 22.0,
-                radius: Radius::all(4.0),
-                color: if hovered {
-                    mix_color(theme.surface, theme.foreground, 0.08)
+        let mut commands = Vec::new();
+        let rows = split_rows(&old_lines, &new_lines, &hunks);
+        let half = ((width - 1.0) / 2.0).max(0.0);
+        commands.push(DrawCommand::Rect {
+            x: half,
+            y: 0.0,
+            width: 1.0,
+            height,
+            color: DIVIDER,
+        });
+        let hunk_of = |line: usize, old: bool| -> Option<usize> {
+            hunks.iter().position(|h| {
+                if old {
+                    line >= h.a0 && line < h.a1
                 } else {
-                    theme.surface
-                },
-            },
-            DrawCommand::Text {
-                x: 0.0,
-                y: 3.0,
-                text: match state.layout {
-                    DiffLayout::Unified => "Side by side".to_string(),
-                    DiffLayout::SideBySide => "Unified".to_string(),
-                },
-                font_size: theme.font_sizes.small,
-                weight: 500,
-                color: theme.foreground,
-                max_width: Some(92.0),
-                alignment: TextAlignment::Center,
-            },
-        ];
-        self.register_access_node(toggle, Role::Button, "toggle diff layout", None, false);
-        let row_height = 18.0;
-        let add_background = mix_color(theme.surface, Color::rgb(34, 197, 94), 0.18);
-        let remove_background = mix_color(theme.surface, Color::rgb(239, 68, 68), 0.18);
-        match state.layout {
-            DiffLayout::Unified => {
-                for (index, line) in lines.iter().enumerate() {
-                    let node = self.new_named_node(
-                        &format!("{id}:line:{index}"),
-                        Style {
-                            width: Some(width),
-                            height: Some(row_height),
-                            ..Style::default()
-                        },
-                    );
-                    self.register_interaction(node, format!("{id}:line:{index}"));
-                    let mut commands = Vec::new();
-                    let background = match line.kind {
-                        DiffKind::Added => Some(add_background),
-                        DiffKind::Removed => Some(remove_background),
-                        DiffKind::Same => None,
-                    };
-                    if let Some(color) = background {
-                        commands.push(DrawCommand::RoundedRect {
-                            x: 0.0,
-                            y: 0.0,
-                            width,
-                            height: row_height,
-                            radius: Radius::all(2.0),
-                            color,
-                        });
-                    }
-                    let prefix = match line.kind {
-                        DiffKind::Added => "+",
-                        DiffKind::Removed => "-",
-                        DiffKind::Same => " ",
-                    };
-                    commands.push(DrawCommand::Text {
-                        x: 4.0,
-                        y: 1.0,
-                        text: format!(
-                            "{:>3} {:>3} {}{}",
-                            line.old_line.map_or("-".to_string(), |n| n.to_string()),
-                            line.new_line.map_or("-".to_string(), |n| n.to_string()),
-                            prefix,
-                            line.text
-                        ),
-                        font_size: theme.font_sizes.small,
-                        weight: 400,
-                        color: theme.foreground,
-                        max_width: Some(width),
-                        alignment: TextAlignment::Start,
-                    });
-                    self.nodes
-                        .get_mut(&node)
-                        .expect("diff line exists")
-                        .commands = commands;
+                    line >= h.b0 && line < h.b1
                 }
-            }
-            DiffLayout::SideBySide => {
-                let half = ((width - theme.spacing.xs) / 2.0).max(1.0);
-                for (row, (left, right)) in paired_rows(&lines).into_iter().enumerate() {
-                    let node = self.new_named_node(
-                        &format!("{id}:line:{row}"),
-                        Style {
-                            width: Some(width),
-                            height: Some(row_height),
-                            ..Style::default()
-                        },
-                    );
-                    let mut commands = Vec::new();
-                    for (offset, line_index) in [(0.0, left), (half + theme.spacing.xs, right)] {
-                        let Some(line_index) = line_index else {
-                            continue;
-                        };
-                        let line = &lines[line_index];
-                        let background = match line.kind {
-                            DiffKind::Added => Some(add_background),
-                            DiffKind::Removed => Some(remove_background),
-                            DiffKind::Same => None,
-                        };
-                        if let Some(color) = background {
-                            commands.push(DrawCommand::RoundedRect {
-                                x: offset,
-                                y: 0.0,
-                                width: half,
-                                height: row_height,
-                                radius: Radius::all(2.0),
-                                color,
-                            });
-                        }
-                        commands.push(DrawCommand::Text {
-                            x: offset + 4.0,
-                            y: 1.0,
-                            text: line.text.clone(),
-                            font_size: theme.font_sizes.small,
-                            weight: 400,
-                            color: theme.foreground,
-                            max_width: Some(half - 8.0),
-                            alignment: TextAlignment::Start,
-                        });
-                    }
-                    self.nodes
-                        .get_mut(&node)
-                        .expect("diff pair exists")
-                        .commands = commands;
+            })
+        };
+        // The rows a side lacks, hatched as one filler per run.
+        for side in 0..2 {
+            let mut row = 0;
+            while row < rows.len() {
+                let missing = if side == 0 {
+                    rows[row].old.is_none()
+                } else {
+                    rows[row].new.is_none()
+                };
+                if !missing {
+                    row += 1;
+                    continue;
                 }
+                let start = row;
+                while row < rows.len() {
+                    let missing = if side == 0 {
+                        rows[row].old.is_none()
+                    } else {
+                        rows[row].new.is_none()
+                    };
+                    if !missing {
+                        break;
+                    }
+                    row += 1;
+                }
+                let x = if side == 0 { 0.0 } else { half + 1.0 };
+                let side_width = if side == 0 { half } else { width - half - 1.0 };
+                let y = start as f32 * line_height;
+                let run = (row - start) as f32 * line_height;
+                push_filler(&mut commands, x, y, side_width, run, gutter, hatch);
             }
         }
-        self.pop_parent();
-        let added = lines
-            .iter()
-            .filter(|line| line.kind == DiffKind::Added)
-            .count();
-        let removed = lines
-            .iter()
-            .filter(|line| line.kind == DiffKind::Removed)
-            .count();
-        let same = lines.len() - added - removed;
+        for (row, pair) in rows.iter().enumerate() {
+            let y = row as f32 * line_height;
+            if y >= height {
+                break;
+            }
+            for side in 0..2 {
+                let old_side = side == 0;
+                let x = if old_side { 0.0 } else { half + 1.0 };
+                let side_width = if old_side { half } else { width - half - 1.0 };
+                let line = if old_side { pair.old } else { pair.new };
+                let Some(index) = line else {
+                    continue;
+                };
+                let hunk = hunk_of(index, old_side);
+                let look = match (old_side, hunk) {
+                    (true, Some(_)) => LineLook::removed(),
+                    (false, Some(_)) => LineLook::added(),
+                    _ => LineLook::same(),
+                };
+                let text = expand_tabs(if old_side {
+                    &old_lines[index]
+                } else {
+                    &new_lines[index]
+                });
+                // Words changed within the line, compared with the line the
+                // other side pairs with.
+                let words = match (hunk, pair.old, pair.new) {
+                    (Some(_), Some(a), Some(b)) => {
+                        let raw = if old_side { &old_lines[a] } else { &new_lines[b] };
+                        let (ra, rb) = word_ranges(&old_lines[a], &new_lines[b]);
+                        let ranges = if old_side { ra } else { rb };
+                        ranges
+                            .into_iter()
+                            .map(|r| {
+                                (
+                                    expand_tabs_prefix(raw, r.start).len(),
+                                    expand_tabs_prefix(raw, r.end).len(),
+                                )
+                            })
+                            .collect()
+                    }
+                    _ => Vec::new(),
+                };
+                self.push_diff_line(
+                    &mut commands,
+                    x,
+                    y,
+                    side_width,
+                    &text,
+                    Some(index + 1),
+                    &look,
+                    &geometry,
+                    &theme,
+                    &words,
+                );
+            }
+        }
+        // The changes on the new side's scroll bar, as MyGo marks them.
+        let total = new_lines.len().max(1) as f32;
+        for hunk in &hunks {
+            if hunk.b0 == hunk.b1 {
+                continue;
+            }
+            let color = if hunk.a0 == hunk.a1 {
+                ADDED_BAR
+            } else {
+                MODIFIED
+            };
+            let from = (hunk.b0 as f32 / total * height).round();
+            let to = (hunk.b1 as f32 / total * height).round();
+            commands.push(DrawCommand::Rect {
+                x: width - 10.0,
+                y: from,
+                width: 3.0,
+                height: (to - from).max(2.0),
+                color,
+            });
+        }
+        self.nodes
+            .get_mut(&root)
+            .expect("diff root exists")
+            .commands = commands;
         self.register_access_node(root, Role::Group, id, None, false);
         DiffViewerResponse {
-            lines,
+            lines: diff_lines(old, new),
             added,
             removed,
             same,
@@ -4509,17 +6874,220 @@ impl Context {
         }
     }
 
-    /// Creates a read-only code viewer.
+    /// Draws one diff line at `x`, `y`, as MyGo's editor paints a line: the
+    /// tint across the text, the gutter's, the change bar, the number, and
+    /// the words changed within it.
+    #[allow(clippy::too_many_arguments)]
+    fn push_diff_line(
+        &self,
+        commands: &mut Vec<DrawCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        text: &str,
+        number: Option<usize>,
+        look: &LineLook,
+        geometry: &DiffGeometry,
+        theme: &Theme,
+        words: &[(usize, usize)],
+    ) {
+        // The tint runs under the scroll bar's track too: MyGo paints it
+        // across the text rectangle, which the track lies over.
+        let text_width = (width - geometry.gutter).max(0.0);
+        if let Some(color) = look.bg {
+            commands.push(DrawCommand::Rect {
+                x: x + geometry.gutter,
+                y,
+                width: text_width,
+                height: geometry.line_height,
+                color,
+            });
+        }
+        if let Some(color) = look.gutter {
+            commands.push(DrawCommand::Rect {
+                x,
+                y,
+                width: geometry.gutter,
+                height: geometry.line_height,
+                color,
+            });
+        }
+        if let Some(color) = look.bar {
+            if look.striped {
+                // Two DIPs every four from the content's top, cut to the
+                // line, so consecutive lines make one pattern that scrolls
+                // with them (`ui/editor/paint.go` barStripes).
+                const PERIOD: f32 = 4.0;
+                const WIDTH: f32 = 2.0;
+                let phase = y.rem_euclid(PERIOD);
+                let mut stripe = y - phase;
+                while stripe < y + geometry.line_height {
+                    let top = stripe.max(y);
+                    let bottom = (stripe + WIDTH).min(y + geometry.line_height);
+                    if bottom > top {
+                        commands.push(DrawCommand::Rect {
+                            x,
+                            y: top,
+                            width: 4.0,
+                            height: bottom - top,
+                            color,
+                        });
+                    }
+                    stripe += PERIOD;
+                }
+            } else {
+                commands.push(DrawCommand::Rect {
+                    x,
+                    y,
+                    width: 4.0,
+                    height: geometry.line_height,
+                    color,
+                });
+            }
+        }
+        if let Some(n) = number {
+            let digits = n.to_string();
+            let number_width =
+                host_text_width_weighted(&digits, geometry.code_size, false, true, 400)
+                    .unwrap_or(geometry.code_size * 0.6 * digits.len() as f32);
+            commands.push(DrawCommand::Text {
+                x: x + geometry.gutter - 4.0 - geometry.code_size * 0.3 - number_width,
+                y: y + geometry.line_top,
+                text: digits,
+                font_size: geometry.code_size,
+                italic: false,
+                mono: true,
+                family: None,
+                weight: 400,
+                color: look.number.unwrap_or(LINE_NUMBER),
+                max_width: Some(number_width.max(1.0)),
+                alignment: TextAlignment::Start,
+            });
+        }
+        let origin = x + geometry.text_x;
+        let clip = Rect {
+            x: x + geometry.gutter,
+            y,
+            width: text_width,
+            height: geometry.line_height,
+        };
+        commands.push(DrawCommand::ScissorPush { rect: clip });
+        // The words changed within the line, at 22% of the change color, as
+        // MyGo's `lineLook.word` highlights them.
+        if let Some(bar) = look.bar {
+            let word = Color::rgba(bar.r, bar.g, bar.b, 56);
+            for (start, end) in words {
+                let (start, end) = (*start, (*end).min(text.len()));
+                if end <= start || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+                    continue;
+                }
+                let before = host_text_width_weighted(
+                    &text[..start],
+                    geometry.code_size,
+                    false,
+                    true,
+                    400,
+                )
+                .unwrap_or(geometry.code_size * 0.6 * start as f32);
+                let span =
+                    host_text_width_weighted(&text[start..end], geometry.code_size, false, true, 400)
+                        .unwrap_or(geometry.code_size * 0.6 * (end - start) as f32);
+                commands.push(DrawCommand::RoundedRect {
+                    x: origin + before,
+                    y,
+                    width: span,
+                    height: geometry.line_height,
+                    radius: Radius::all(3.0),
+                    color: word,
+                });
+            }
+        }
+        self.push_line_tokens(
+            commands,
+            text,
+            origin,
+            y + geometry.line_top,
+            geometry.code_size,
+            theme,
+        );
+        commands.push(DrawCommand::ScissorPop);
+    }
+
+    /// Appends the tokens of one line of Go, colored as MyGo's editor
+    /// colors them, and returns the width they take.
+    fn push_line_tokens(
+        &self,
+        commands: &mut Vec<DrawCommand>,
+        line: &str,
+        start_x: f32,
+        y: f32,
+        code_size: f32,
+        theme: &Theme,
+    ) -> f32 {
+        let mut x = start_x;
+        for (token_text, token_kind) in go_tokens(line) {
+            let token_width = host_text_width_weighted(&token_text, code_size, false, true, 400)
+                .unwrap_or_else(|| measure_text_width(&token_text, code_size));
+            let color = match token_kind {
+                CodeColor::Keyword | CodeColor::Operator => Color::rgb(207, 34, 46),
+                CodeColor::Type => Color::rgb(149, 56, 0),
+                CodeColor::Constant => Color::rgb(5, 80, 174),
+                CodeColor::Function => Color::rgb(130, 80, 223),
+                CodeColor::Property | CodeColor::Number => Color::rgb(5, 80, 174),
+                CodeColor::String => Color::rgb(10, 48, 105),
+                CodeColor::Comment => Color::rgb(110, 119, 129),
+                CodeColor::Text => theme.foreground,
+            };
+            commands.push(DrawCommand::Text {
+                x,
+                y,
+                text: token_text,
+                font_size: code_size,
+                italic: false,
+                mono: true,
+                family: None,
+                weight: 400,
+                color,
+                max_width: Some(token_width.max(1.0)),
+                alignment: TextAlignment::Start,
+            });
+            x += token_width;
+        }
+        x - start_x
+    }
+
     pub fn code_editor(
         &mut self,
         id: &str,
         code: &str,
         state: &mut CodeEditorState,
     ) -> CodeEditorResponse {
+        self.code_editor_with_options(id, code, state, &CodeEditorOptions::default())
+    }
+
+    /// Creates a read-only code viewer with MyGo's editor options.
+    ///
+    /// The geometry follows `ui/editor` in MyGo: the gutter holds the digits
+    /// plus one and a half characters, a fold marker's slot and a pad of 4
+    /// (`gutterWidth`), tabs advance to the next stop (`view.go` expand), and
+    /// the line with the caret carries the active-line fill.
+    pub fn code_editor_with_options(
+        &mut self,
+        id: &str,
+        code: &str,
+        state: &mut CodeEditorState,
+        options: &CodeEditorOptions<'_>,
+    ) -> CodeEditorResponse {
         let theme = self.theme.clone();
         let width = self.current_content_width();
-        let line_height = 20.0;
-        let lines = code.lines().collect::<Vec<_>>();
+        // MyGo's editor defaults to a 13-pixel mono face with a line box of
+        // 1.5 of it, rounded at the device scale (`ui/editor/view.go`
+        // setStyle): 19.5 at a 2x device.
+        let code_size = 13.0_f32;
+        let line_height = (code_size * 1.5 * 2.0).round() / 2.0;
+        // A buffer's lines are its newline-separated lines: text ending in
+        // a newline has an empty last line, and MyGo's editor shows it.
+        let lines = code.split('\n').collect::<Vec<_>>();
         let line_count = lines.len().max(1);
         let previous = state.selected_line;
         let mut clicked_line = None;
@@ -4544,15 +7112,8 @@ impl Context {
         self.register_focusable(root, id.to_string());
         let focused = self.focused_id.as_deref() == Some(id);
         let height = line_count as f32 * line_height;
-        let mut root_commands = vec![DrawCommand::RoundedRect {
-            x: 0.0,
-            y: 0.0,
-            width,
-            height,
-            radius: Radius::all(6.0),
-            color: theme.background,
-        }];
-        if focused {
+        let mut root_commands = Vec::new();
+        if self.shows_focus_ring(focused) {
             root_commands.extend(focus_ring(0.0, 0.0, width, height, theme.accent));
         }
         self.nodes
@@ -4560,7 +7121,35 @@ impl Context {
             .expect("code root exists")
             .commands = root_commands;
         self.push_parent(root);
-        let gutter = 36.0;
+        // MyGo's gutter: the digits, one and a half characters of room, the
+        // fold marker's slot and a pad of 4, rounded up (`gutterWidth` in
+        // `ui/editor/editor.go`). It reserves at least three digits
+        // (`State.options` sets `minDigits: 3`).
+        let char_width = host_text_width_weighted("0", code_size, false, true, 400)
+            .unwrap_or(code_size * 0.6);
+        let digits = (line_count.to_string().len()).max(3) as f32;
+        let fold_slot = line_height * 0.8;
+        let gutter = (char_width * digits + char_width * 1.5 + fold_slot + 4.0).ceil();
+        let text_x = gutter + 4.0;
+        // Line numbers end a pad of 4 and half a character short of the
+        // gutter's right edge, before the fold marker's slot (`paintGutter`).
+        let number_right = gutter - 4.0 - char_width * 0.5 - fold_slot;
+        // MyGo centers the line's glyphs in its line box and rounds the
+        // baseline to a whole pixel (`ui/editor/view.go` paintRow, the canvas
+        // engine's baseline).
+        let ascent = host_text_ascent(code_size, false, true, false).unwrap_or(code_size * 0.9);
+        let descent = host_text_descent(code_size, false, true, false).unwrap_or(code_size * 0.25);
+        let line_top = (line_height - ascent - descent) / 2.0;
+        // The caret's line carries the active-line fill, over the text
+        // column only, and its number takes the text color; neither waits for
+        // the focus, as MyGo's `activeLines` comes from the selections alone
+        // (`ui/editor/paint.go`). An editor always has a caret, at its first
+        // line until one is clicked.
+        let caret_line = Some(state.selected_line.unwrap_or(0));
+        let active_fill = Color::rgba(0, 0, 0, 9);
+        let guide_color = Color::rgba(theme.border.r, theme.border.g, theme.border.b, 140);
+        let wrap_guide_color = Color::rgba(theme.border.r, theme.border.g, theme.border.b, 153);
+        let tab_size = options.tab_size.max(1);
         for (index, line) in lines.iter().enumerate() {
             let key = format!("{id}:line:{index}");
             let node = self.new_named_node(
@@ -4574,59 +7163,167 @@ impl Context {
             self.register_interaction(node, key.clone());
             let hovered = self.pointer_in_previous(&key);
             let selected = state.selected_line == Some(index);
+            let active = caret_line == Some(index);
             let mut commands = Vec::new();
-            if selected || hovered {
-                commands.push(DrawCommand::RoundedRect {
+            if hovered && !active {
+                commands.push(DrawCommand::Rect {
                     x: 0.0,
                     y: 0.0,
                     width,
                     height: line_height,
-                    radius: Radius::all(2.0),
-                    color: if selected {
-                        mix_color(theme.accent, theme.background, 0.15)
-                    } else {
-                        mix_color(theme.surface, theme.foreground, 0.05)
-                    },
+                    color: mix_color(theme.background, theme.foreground, 0.03),
                 });
             }
-            commands.push(DrawCommand::Text {
-                x: 4.0,
-                y: 2.0,
-                text: (index + 1).to_string(),
-                font_size: theme.font_sizes.small,
-                weight: 400,
-                color: theme.muted,
-                max_width: Some(gutter - 8.0),
-                alignment: TextAlignment::End,
-            });
-            let mut x = gutter + 6.0;
-            for token in tokenize_rust_line(line) {
-                if x >= width {
-                    break;
-                }
-                let token_width = measure_text_width(&token.text, theme.font_sizes.small);
-                let color = match token.kind {
-                    CodeTokenKind::Keyword => theme.accent,
-                    CodeTokenKind::String => Color::rgb(134, 239, 172),
-                    CodeTokenKind::Comment => theme.muted,
-                    CodeTokenKind::Number => Color::rgb(251, 191, 36),
-                    CodeTokenKind::Text => theme.foreground,
-                };
-                commands.push(DrawCommand::Text {
-                    x,
-                    y: 2.0,
-                    text: token.text,
-                    font_size: theme.font_sizes.small,
-                    weight: 400,
-                    color,
-                    max_width: Some((width - x).max(1.0)),
-                    alignment: TextAlignment::Start,
+            if active {
+                commands.push(DrawCommand::Rect {
+                    x: gutter,
+                    y: 0.0,
+                    width: (width - gutter).max(0.0),
+                    height: line_height,
+                    color: active_fill,
                 });
-                x += token_width;
+            }
+            // The line's indentation, in columns, as its guides are drawn
+            // at: a blank line takes the larger of the lines around it
+            // (`lineIndent` in `ui/editor/paint.go`).
+            let indent = line_indent(&lines, index, tab_size);
+            let guide_height = line_height;
+            for level in 0..(indent / tab_size) {
+                let x = (text_x + level as f32 * tab_size as f32 * char_width).round();
+                commands.push(DrawCommand::Rect {
+                    x,
+                    y: 0.0,
+                    width: 1.0,
+                    height: guide_height,
+                    color: guide_color,
+                });
+            }
+            if let Some(column) = options.wrap_guide {
+                let x = (text_x + column as f32 * char_width).round();
+                commands.push(DrawCommand::Rect {
+                    x,
+                    y: 0.0,
+                    width: 1.0,
+                    height: guide_height,
+                    color: wrap_guide_color,
+                });
+            }
+            // The number sits at the gutter's right edge, in the text color
+            // on the caret's line and the muted line-number color elsewhere
+            // (`paintGutter`).
+            let number = (index + 1).to_string();
+            let number_width = host_text_width_weighted(&number, code_size, false, true, 400)
+                .unwrap_or_else(|| measure_text_width(&number, code_size));
+            commands.push(DrawCommand::Text {
+                x: (number_right - number_width).max(0.0),
+                y: line_top,
+                text: number,
+                font_size: code_size,
+                italic: false,
+                mono: true,
+                family: None,
+                weight: 400,
+                color: if active {
+                    theme.foreground
+                } else {
+                    Color::rgba(theme.muted.r, theme.muted.g, theme.muted.b, 191)
+                },
+                max_width: Some(number_width.max(1.0)),
+                alignment: TextAlignment::Start,
+            });
+            // Tabs advance to the next stop, as MyGo expands them before
+            // laying a line out (`view.go` expand).
+            let mut x = text_x;
+            let mut column = 0_usize;
+            for (token_text, token_kind) in go_token_kinds(line) {
+                let color = match token_kind {
+                    CodeColor::Keyword | CodeColor::Operator => Color::rgb(207, 34, 46),
+                    CodeColor::Type => Color::rgb(149, 56, 0),
+                    CodeColor::Constant => Color::rgb(5, 80, 174),
+                    CodeColor::Function => Color::rgb(130, 80, 223),
+                    CodeColor::Property | CodeColor::Number => Color::rgb(5, 80, 174),
+                    CodeColor::String => Color::rgb(10, 48, 105),
+                    CodeColor::Comment => Color::rgb(110, 119, 129),
+                    CodeColor::Text => theme.foreground,
+                };
+                let mut run = String::new();
+                let mut run_x = x;
+                for character in token_text.chars() {
+                    if character == '\t' {
+                        if !run.is_empty() {
+                            let run_width =
+                                host_text_width_weighted(&run, code_size, false, true, 400)
+                                    .unwrap_or_else(|| measure_text_width(&run, code_size));
+                            commands.push(DrawCommand::Text {
+                                x: run_x,
+                                y: line_top,
+                                text: std::mem::take(&mut run),
+                                font_size: code_size,
+                                italic: false,
+                                mono: true,
+                                family: None,
+                                weight: 400,
+                                color,
+                                max_width: Some(run_width.max(1.0)),
+                                alignment: TextAlignment::Start,
+                            });
+                        }
+                        let advance = tab_size - column % tab_size;
+                        column += advance;
+                        x += advance as f32 * char_width;
+                        run_x = x;
+                        continue;
+                    }
+                    column += 1;
+                    run.push(character);
+                }
+                if !run.is_empty() {
+                    let run_width = host_text_width_weighted(&run, code_size, false, true, 400)
+                        .unwrap_or_else(|| measure_text_width(&run, code_size));
+                    commands.push(DrawCommand::Text {
+                        x: run_x,
+                        y: line_top,
+                        text: run,
+                        font_size: code_size,
+                        italic: false,
+                        mono: true,
+                        family: None,
+                        weight: 400,
+                        color,
+                        max_width: Some(run_width.max(1.0)),
+                        alignment: TextAlignment::Start,
+                    });
+                }
+                x = text_x + column as f32 * char_width;
+            }
+            // Diagnostics rule a wavy line under their characters, two and a
+            // half pixels above the line box's bottom (`squiggle` in
+            // `ui/editor/paint.go`).
+            for diagnostic in options.diagnostics.iter().filter(|d| d.line == index) {
+                let start = diagnostic.start.min(line.chars().count());
+                let end = diagnostic.end.min(line.chars().count()).max(start);
+                let from = text_x + display_column(line, start, tab_size) as f32 * char_width;
+                let to = text_x + display_column(line, end, tab_size) as f32 * char_width;
+                let color = match diagnostic.severity {
+                    CodeSeverity::Error => Color::rgb(209, 36, 47),
+                    CodeSeverity::Warning => Color::rgb(154, 103, 0),
+                    CodeSeverity::Info => Color::rgb(9, 105, 218),
+                    CodeSeverity::Hint => Color::rgb(110, 119, 129),
+                };
+                commands.push(DrawCommand::SvgPath {
+                    x: 0.0,
+                    y: 0.0,
+                    width,
+                    height: line_height,
+                    path: squiggle_path(from, line_height - 2.5, (to - from).max(0.0)),
+                    fill: None,
+                    stroke: Some(color),
+                    stroke_width: 1.0,
+                });
             }
             self.register_access_node(
                 node,
-                Role::Button,
+                Role::Label,
                 format!("line {}", index + 1).as_str(),
                 Some(if selected { "selected" } else { "unselected" }),
                 false,
@@ -4648,9 +7345,15 @@ impl Context {
 
     /// Creates a 6x7 month calendar.
     pub fn calendar(&mut self, id: &str, state: &mut CalendarState) -> CalendarResponse {
+        // MyGo's Calendar (`ui/date.go`): a shrink-to-fit column with
+        // Space(0.5) between its rows, no background. A header row holds a
+        // chevron button either side of the month and year; then a row of
+        // weekday initials, then six rows of days, each cell Space(8) wide
+        // and Space(7) tall, centered, radius Radius. The chosen day fills
+        // with the accent and its text turns AccentText; the cursor day
+        // fills with the hover surface; today borders in the accent.
         let theme = self.theme.clone();
         state.month = state.month.clamp(1, 12);
-        let width = self.current_content_width();
         let days = days_in_month(state.year, state.month);
         if state.selected.is_none() {
             state.selected = Some(1);
@@ -4737,166 +7440,187 @@ impl Context {
             }
             state.selected = Some(selected);
         }
+        let cell_width = theme.spacing.base * 8.0;
+        let cell_height = theme.spacing.base * 7.0;
+        // The grid is seven cells wide, and every row stretches to it
+        // (`ui/date.go` calendarBox, calendarGrid).
+        let grid_width = cell_width * 7.0;
         let root = self.new_named_node(
             id,
             Style {
-                width: Some(width),
+                width: Some(grid_width),
                 flex_direction: FlexDirection::Column,
-                gap: theme.spacing.xs,
+                gap: theme.spacing.base * 0.5,
                 ..Style::default()
             },
         );
         self.register_interaction(root, id.to_string());
         self.register_focusable(root, id.to_string());
-        let mut root_commands = vec![DrawCommand::RoundedRect {
-            x: 0.0,
-            y: 0.0,
-            width,
-            height: 250.0,
-            radius: Radius::all(8.0),
-            color: theme.surface,
-        }];
-        if focused {
-            root_commands.extend(focus_ring(0.0, 0.0, width, 250.0, theme.accent));
-        }
-        self.nodes
-            .get_mut(&root)
-            .expect("calendar root exists")
-            .commands = root_commands;
         self.push_parent(root);
-        let header_height = 28.0;
         self.row()
-            .gap(theme.spacing.xs)
-            .height(header_height)
+            .gap(theme.spacing.base)
+            .height(20.0)
+            .align(AlignItems::Center)
             .children(|context| {
-                let nav = |context: &mut Context, key: &str, label: &str| {
+                // MyGo's chevron is a themed button, Space(1) padded above
+                // and below and Space(2.5) at the sides around a 1.5-by-2.5
+                // stroke, inside its one-pixel border: 28 by 20
+                // (`ui/date.go` monthChevron, `ui/widgets.go` styleButton).
+                let chevron = |context: &mut Context, key: &str, label: &str, back: bool| {
                     let button = context.new_named_node(
                         key,
                         Style {
-                            width: Some(24.0),
-                            height: Some(24.0),
+                            width: Some(theme.spacing.base * 7.0),
+                            height: Some(theme.spacing.base * 5.0),
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Center,
                             ..Style::default()
                         },
                     );
                     context.register_interaction(button, key.to_string());
+                    // MyGo's month chevron is a 1.5-wide, 2.5-tall stroke:
+                    // back points left, forth right (`ui/date.go`
+                    // monthChevron).
+                    let (tip, ends) = if back { (0.15_f32, 0.85_f32) } else { (0.85, 0.15) };
+                    let width = theme.spacing.base * 1.5;
+                    let height = theme.spacing.base * 2.5;
                     context
                         .nodes
                         .get_mut(&button)
-                        .expect("calendar nav exists")
+                        .expect("calendar chevron exists")
                         .commands = vec![
                         DrawCommand::RoundedRect {
-                            x: 0.0,
-                            y: 0.0,
-                            width: 24.0,
-                            height: 24.0,
-                            radius: Radius::all(4.0),
+                            x: 1.0,
+                            y: 1.0,
+                            width: theme.spacing.base * 7.0 - 2.0,
+                            height: theme.spacing.base * 5.0 - 2.0,
+                            radius: Radius::all(5.0),
                             color: theme.surface,
                         },
-                        DrawCommand::Text {
-                            x: 0.0,
-                            y: 3.0,
-                            text: label.to_string(),
-                            font_size: theme.font_sizes.small,
-                            weight: 600,
-                            color: theme.foreground,
-                            max_width: Some(24.0),
-                            alignment: TextAlignment::Center,
+                        rounded_ring(
+                            theme.spacing.base * 7.0,
+                            theme.spacing.base * 5.0,
+                            6.0,
+                            1.0,
+                            theme.border,
+                        ),
+                        DrawCommand::SvgPath {
+                            x: (theme.spacing.base * 7.0 - width) / 2.0,
+                            y: (theme.spacing.base * 5.0 - height) / 2.0,
+                            width,
+                            height,
+                            path: format!(
+                                "M{} {}L{} {}L{} {}",
+                                width * ends,
+                                height * 0.1,
+                                width * tip,
+                                height * 0.5,
+                                width * ends,
+                                height * 0.9
+                            ),
+                            fill: None,
+                            stroke: Some(theme.foreground),
+                            stroke_width: 1.5,
                         },
                     ];
                     context.register_access_node(button, Role::Button, label, None, false);
                 };
-                nav(context, &previous_key, "<");
+                chevron(context, &previous_key, "Previous month", true);
+                // The title takes what the chevrons leave and centers in
+                // it (`ui/date.go` calendarGrid: coreText(title).Grow(1)
+                // .TextAlign(Center)).
+                let title_width = grid_width - theme.spacing.base * 14.0 - theme.spacing.base * 2.0;
                 context
-                    .text(&format!(
-                        "{} {}",
-                        month_name(state.month),
-                        state.year
-                    ))
-                    .font_size(theme.font_sizes.body)
-                    .weight(600)
+                    .text(&format!("{} {}", month_name(state.month), state.year))
+                    .bold()
                     .color(theme.foreground)
-                    .max_width(width - 56.0);
-                nav(context, &next_key, ">");
+                    .align(TextAlignment::Center)
+                    .max_width(title_width)
+                    .width(title_width);
+                chevron(context, &next_key, "Next month", false);
             });
-        let cell_width = ((width - theme.spacing.xs * 6.0) / 7.0).max(1.0);
-        let weekday_row = self.new_named_node(
-            &format!("{id}:weekdays"),
-            Style {
-                width: Some(width),
-                height: Some(18.0),
-                ..Style::default()
-            },
-        );
-        let mut weekday_commands = Vec::new();
-        for (index, label) in ["M", "T", "W", "T", "F", "S", "S"].iter().enumerate() {
-            weekday_commands.push(DrawCommand::Text {
-                x: index as f32 * (cell_width + theme.spacing.xs),
-                y: 1.0,
-                text: (*label).to_string(),
-                font_size: 13.0,
-                weight: 400,
-                color: theme.muted,
-                max_width: Some(cell_width),
-                alignment: TextAlignment::Center,
-            });
-        }
-        self.nodes
-            .get_mut(&weekday_row)
-            .expect("calendar weekdays exist")
-            .commands = weekday_commands;
+        // MyGo prints CLDR's short weekday names, "Mo" through "Su"
+        // (`i18n/cldr.go` Weekdays with Short, `website/docs-demo/dates.go`).
+        self.row().height(15.0).children(|context| {
+            for (index, label) in ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].iter().enumerate() {
+                let _ = index;
+                // MyGo gives each weekday cell Space(8) of width and
+                // centers its text (`ui/date.go` calendarGrid).
+                context
+                    .text(label)
+                    .font_size(theme.font_sizes.body - 2.0)
+                    .color(theme.muted)
+                    .align(TextAlignment::Center)
+                    .max_width(cell_width)
+                    .width(cell_width);
+            }
+        });
         let leading = weekday_monday(state.year, state.month, 1) as usize;
         let days = days_in_month(state.year, state.month);
+        // MyGo fills the six weeks around the month, so the days of the
+        // months either side show too, muted (`ui/date.go` calendarGrid).
+        let previous_days = {
+            let (year, month) = move_month(state.year, state.month, -1);
+            days_in_month(year, month)
+        };
+        let next_days = {
+            let (year, month) = move_month(state.year, state.month, 1);
+            days_in_month(year, month)
+        };
         for row in 0..6 {
-            self.row().gap(theme.spacing.xs).children(|context| {
+            self.row().height(cell_height).children(|context| {
                 for column in 0..7 {
                     let position = row * 7 + column;
-                    let day = position - leading as i32 + 1;
-                    if day < 1 || day > days as i32 {
-                        context.container().size(cell_width, 24.0);
-                        continue;
-                    }
-                    let day = day as u32;
-                    let key = format!("{id}:day:{day}");
+                    let offset = position as i32 - leading as i32;
+                    // The day's number, and whether it belongs to a month
+                    // other than the one shown.
+                    let (day, outside) = if offset < 0 {
+                        (previous_days as i32 + offset + 1, true)
+                    } else if offset >= days as i32 {
+                        (offset - days as i32 + 1, true)
+                    } else {
+                        (offset + 1, false)
+                    };
+                    let key = if outside {
+                        format!("{id}:outside:{position}")
+                    } else {
+                        format!("{id}:day:{day}")
+                    };
                     let node = context.new_named_node(
                         &key,
                         Style {
                             width: Some(cell_width),
-                            height: Some(24.0),
+                            height: Some(cell_height),
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Center,
                             ..Style::default()
                         },
                     );
-                    context.register_interaction(node, key.clone());
-                    let hovered = context.pointer_in_previous(&key);
-                    let selected = state.selected == Some(day);
+                    if !outside {
+                        context.register_interaction(node, key.clone());
+                    }
+                    let hovered = !outside && context.pointer_in_previous(&key);
+                    let selected = !outside && state.selected == Some(day as u32);
                     let mut commands = Vec::new();
-                    if selected || hovered {
+                    if selected {
                         commands.push(DrawCommand::RoundedRect {
                             x: 0.0,
                             y: 0.0,
                             width: cell_width,
-                            height: 24.0,
-                            radius: Radius::all(4.0),
-                            color: if selected {
-                                theme.accent
-                            } else {
-                                mix_color(theme.surface, theme.foreground, 0.08)
-                            },
+                            height: cell_height,
+                            radius: Radius::all(6.0),
+                            color: theme.accent,
+                        });
+                    } else if hovered {
+                        commands.push(DrawCommand::RoundedRect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: cell_width,
+                            height: cell_height,
+                            radius: Radius::all(6.0),
+                            color: theme.surface_hover,
                         });
                     }
-                    commands.push(DrawCommand::Text {
-                        x: 0.0,
-                        y: 4.0,
-                        text: day.to_string(),
-                        font_size: theme.font_sizes.small,
-                        weight: if selected { 600 } else { 400 },
-                        color: if selected {
-                            theme.on_accent
-                        } else {
-                            theme.foreground
-                        },
-                        max_width: Some(cell_width),
-                        alignment: TextAlignment::Center,
-                    });
                     context.register_access_node(
                         node,
                         Role::Button,
@@ -4909,6 +7633,15 @@ impl Context {
                         .get_mut(&node)
                         .expect("calendar day exists")
                         .commands = commands;
+                    context.push_parent(node);
+                    context.text(&day.to_string()).color(if selected {
+                        theme.on_accent
+                    } else if outside {
+                        theme.muted
+                    } else {
+                        theme.foreground
+                    });
+                    context.pop_parent();
                 }
             });
         }
@@ -4940,7 +7673,10 @@ impl Context {
         }
     }
 
-    /// Creates an ISO date input with a calendar overlay.
+    /// Creates a date input showing the date in the locale's short form,
+    /// with a calendar icon at its end that opens a calendar, as MyGo's
+    /// `coreDateInput` (`ui/date.go`): a button styled field, its text at
+    /// the start and the icon at the end.
     pub fn date_input(
         &mut self,
         id: &str,
@@ -4948,73 +7684,123 @@ impl Context {
         state: &mut DateInputState,
     ) -> DateInputResponse {
         let theme = self.theme.clone();
-        let width = self.current_content_width();
-        let field_height = measured_text_height(theme.font_sizes.body) + theme.spacing.sm * 2.0;
-        let input_id = format!("{id}:input");
-        let toggle_key = format!("{id}:toggle");
-        let popup_id = format!("{id}:popup");
-        let input_width = (width - 30.0 - theme.spacing.xs).max(1.0);
+        let space = theme.spacing.base;
+        let font_size = theme.font_sizes.body;
+        let label = format_date(text, Locale::EnUs, DateStyle::Short).unwrap_or_else(|_| text.clone());
+        let text_size = estimated_text_size(&label, font_size, None);
+        // MyGo's `coreDateInput` is a button: `Padding(Space(1.5),
+        // Space(3.5))` inside a 1 DIP border, its `MinWidth(Space(32.5))`
+        // spreading the text and the icon apart.
+        let icon_size = space * 3.5;
+        let min_width = space * 32.5;
+        let vertical = space * 1.5;
+        let horizontal = space * 3.5;
+        let inner_width = (text_size.width + icon_size + space * 3.0).max(min_width - horizontal * 2.0 - 2.0);
+        let width = inner_width + horizontal * 2.0 + 2.0;
+        let height = text_size.height.max(icon_size) + vertical * 2.0 + 2.0;
         let root = self.new_named_node(
             id,
             Style {
                 width: Some(width),
-                height: Some(field_height),
-                flex_direction: FlexDirection::Row,
-                gap: theme.spacing.xs,
-                align_items: AlignItems::Center,
+                height: Some(height),
                 ..Style::default()
             },
         );
-        self.push_parent(root);
-        let mut field_changed = false;
-        let mut field_focused = false;
-        self.container().width(input_width).children(|context| {
-            let field = context.text_field(&input_id, text);
-            field_changed = field.changed;
-            field_focused = field.focused;
-        });
-        let toggle = self.new_named_node(
-            &toggle_key,
-            Style {
-                width: Some(30.0),
-                height: Some(24.0),
-                ..Style::default()
-            },
-        );
-        self.register_interaction(toggle, toggle_key.clone());
-        let toggle_hovered = self.pointer_in_previous(&toggle_key);
-        let toggle_clicked = self.clicked_in_previous(&toggle_key);
-        self.nodes
-            .get_mut(&toggle)
-            .expect("date toggle exists")
-            .commands = vec![
+        self.register_interaction(root, id.to_string());
+        self.register_focusable(root, id.to_string());
+        let hovered = self.pointer_in_previous(id);
+        let pressed = hovered && self.input.pointer_down;
+        let clicked = self.clicked_in_previous(id);
+        let focused = self.focused_id.as_deref() == Some(id);
+        let activated = clicked || (focused && (self.key_pressed(Key::Enter) || self.key_pressed(Key::Space)));
+        if pressed || activated {
+            self.focused_id = Some(id.to_string());
+        }
+        let focused = self.focused_id.as_deref() == Some(id);
+        let hover_progress = self.animate(&format!("{id}:hover"), if hovered { 1.0 } else { 0.0 });
+        let face = mix_color(theme.surface, theme.surface_hover, hover_progress.clamp(0.0, 1.0));
+        let border = if self.shows_focus_ring(focused) {
+            theme.accent
+        } else {
+            theme.border
+        };
+        let mut commands = vec![
             DrawCommand::RoundedRect {
                 x: 0.0,
                 y: 0.0,
-                width: 30.0,
-                height: 24.0,
-                radius: Radius::all(4.0),
-                color: if toggle_hovered {
-                    mix_color(theme.surface, theme.foreground, 0.08)
-                } else {
-                    theme.surface
-                },
+                width,
+                height,
+                radius: Radius::all(6.0),
+                color: border,
+            },
+            DrawCommand::RoundedRect {
+                x: 1.0,
+                y: 1.0,
+                width: (width - 2.0).max(1.0),
+                height: (height - 2.0).max(1.0),
+                radius: Radius::all(5.0),
+                color: face,
             },
             DrawCommand::Text {
-                x: 0.0,
-                y: 3.0,
-                text: "v".to_string(),
-                font_size: theme.font_sizes.small,
-                weight: 600,
+                x: horizontal + 1.0,
+                y: vertical + 1.0,
+                text: label.clone(),
+                font_size,
+                weight: 400,
+                italic: false,
+                mono: false,
+                family: None,
                 color: theme.foreground,
-                max_width: Some(30.0),
-                alignment: TextAlignment::Center,
+                max_width: Some(inner_width),
+                alignment: TextAlignment::Start,
             },
         ];
-        self.register_access_node(toggle, Role::Button, "calendar", None, false);
-        self.pop_parent();
+        // The calendar icon: a page rounded 2, stroked 1.2 inside (1, 2),
+        // with a 1.2-high rule 5 down it, as MyGo's `coreDateInput` draws
+        // with `Stroke` and `Fill` (`ui/date.go`).
+        let icon_x = width - horizontal - 1.0 - icon_size;
+        // MyGo's button centers its children in the content box, which
+        // starts past the border and the padding.
+        let icon_y = 1.0 + (height - 2.0 - icon_size) / 2.0;
+        let page_width = (icon_size - 2.0).max(1.0);
+        let page_height = (icon_size - 3.0).max(1.0);
+        // MyGo's `Painter.Stroke` fills its rectangle's border inward, a
+        // whole device pixel wide (`ui/paint.go` borders: round(1.2*2) at
+        // scale 2), so the ring is two filled rects one DIP apart, its
+        // inside the field's own surface.
+        commands.push(DrawCommand::RoundedRect {
+            x: icon_x + 1.0,
+            y: icon_y + 2.0,
+            width: page_width,
+            height: page_height,
+            radius: Radius::all(2.0),
+            color: theme.muted,
+        });
+        commands.push(DrawCommand::RoundedRect {
+            x: icon_x + 2.0,
+            y: icon_y + 3.0,
+            width: (page_width - 2.0).max(1.0),
+            height: (page_height - 2.0).max(1.0),
+            radius: Radius::all(1.0),
+            color: theme.surface,
+        });
+        commands.push(DrawCommand::Rect {
+            x: icon_x + 1.0,
+            y: icon_y + 5.0,
+            width: page_width,
+            height: 1.2,
+            color: theme.muted,
+        });
+        if self.shows_focus_ring(focused) {
+            commands.extend(focus_ring(0.0, 0.0, width, height, theme.accent));
+        }
+        self.nodes.get_mut(&root).expect("date node").commands = commands;
+        self.register_access_node(root, Role::Button, &label, None, focused);
+        if activated {
+            state.open = !state.open;
+        }
         let parsed = parse_iso_date(text);
-        let mut changed = field_changed;
+        let mut changed = false;
         let mut submitted = false;
         if let Some((year, month, day)) = parsed {
             if state.calendar.year != year
@@ -5026,31 +7812,15 @@ impl Context {
                 state.calendar.selected = Some(day);
                 changed = true;
             }
-            if field_focused && self.key_pressed(Key::Enter) {
-                submitted = true;
-                state.open = false;
-                self.focused_id = Some(input_id.clone());
-            }
         }
-        if toggle_clicked {
-            state.open = !state.open;
-            if state.open {
-                if let Some((year, month, day)) = parsed {
-                    state.calendar.year = year;
-                    state.calendar.month = month;
-                    state.calendar.selected = Some(day);
-                }
-            } else {
-                self.focused_id = Some(input_id.clone());
-            }
-        }
-        let input_bounds = self
+        let anchor = self
             .previous_regions
-            .get(&input_id)
+            .get(id)
             .map(|region| region.bounds);
+        let popup_id = format!("{id}:popup");
         let mut calendar_changed = false;
         if state.open {
-            if let Some(anchor) = input_bounds {
+            if let Some(anchor) = anchor {
                 let mut overlay_state = OverlayState::new(true);
                 let mut calendar_response = None;
                 let response = self.overlay(&popup_id, &mut overlay_state, anchor, |context| {
@@ -5070,22 +7840,22 @@ impl Context {
                     if calendar.clicked.is_some() {
                         state.open = false;
                         self.close_overlay_runtime(&popup_id);
-                        self.focused_id = Some(input_id.clone());
+                        self.focused_id = Some(id.to_string());
+                        submitted = true;
                     }
                 }
                 if !state.open {
-                    self.focused_id = Some(input_id.clone());
+                    self.focused_id = Some(id.to_string());
                 }
             }
         }
         let valid = parse_iso_date(text).is_some();
-        self.register_access_node(root, Role::Group, id, None, false);
         DateInputResponse {
             open: state.open,
             valid,
             changed: changed || calendar_changed,
             submitted,
-            focused: field_focused,
+            focused,
         }
     }
 
@@ -5093,8 +7863,8 @@ impl Context {
     pub fn link(&mut self, id: &str, label: &str) -> LinkState {
         let theme = self.theme.clone();
         let font_size = theme.font_sizes.body;
-        let width = measure_text_width(label, font_size) + theme.spacing.xs * 2.0;
-        let height = measured_text_height(font_size) + theme.spacing.xs * 2.0;
+        let width = measure_text_width(label, font_size);
+        let height = measured_text_height(font_size);
         let node = self.new_named_node(
             id,
             Style {
@@ -5113,30 +7883,33 @@ impl Context {
         let focused = self.focused_id.as_deref() == Some(id);
         let clicked = self.clicked_in_previous(id) || (focused && self.key_pressed(Key::Enter));
         let mut commands = vec![DrawCommand::Text {
-            x: theme.spacing.xs,
-            y: theme.spacing.xs,
+            x: 0.0,
+            y: 0.0,
             text: label.to_string(),
             font_size,
-            weight: 500,
+            italic: false,
+            mono: false,
+            family: None,
+            weight: 400,
             color: if hovered || focused {
                 theme.foreground
             } else {
                 theme.accent
             },
-            max_width: Some(width - theme.spacing.xs * 2.0),
+            max_width: Some(width),
             alignment: TextAlignment::Start,
         }];
         if hovered || focused {
             commands.push(DrawCommand::Line {
-                x1: theme.spacing.xs,
-                y1: height - theme.spacing.xs,
-                x2: width - theme.spacing.xs,
-                y2: height - theme.spacing.xs,
+                x1: 0.0,
+                y1: font_size + 3.0,
+                x2: width,
+                y2: font_size + 3.0,
                 width: 1.0,
                 color: theme.accent,
             });
         }
-        if focused {
+        if self.shows_focus_ring(focused) {
             commands.extend(focus_ring(0.0, 0.0, width, height, theme.accent));
         }
         self.register_access_node(node, Role::Button, label, Some("link"), focused);
@@ -5202,11 +7975,18 @@ impl Context {
         size: f32,
         shape: AvatarShape,
     ) -> AvatarState {
+        // MyGo's Avatar (`ui/indicators.go` coreAvatar): FontSize * 2.25
+        // across, radius half of it, clipped and centered. An image covers
+        // it; otherwise the fill is the hue of the name's FNV-1a hash at 45%
+        // saturation and 55% lightness, and the initials of its first and
+        // last words sit at 600 weight and 0.4 of the size in white.
         let theme = self.theme.clone();
+        // MyGo's avatar is `FontSize * 2.25` across (`ui/indicators.go`
+        // coreAvatar); a size of zero asks for that, as this demo does.
         let size = if size.is_finite() && size > 0.0 {
             size
         } else {
-            0.0
+            theme.font_sizes.body * 2.25
         };
         let node = self.new_named_node(
             id,
@@ -5219,22 +7999,24 @@ impl Context {
         let mut commands = Vec::new();
         let mut drawn = false;
         if size > 0.0 {
-            commands.push(match shape {
-                AvatarShape::Circle => DrawCommand::Circle {
-                    x: size / 2.0,
-                    y: size / 2.0,
-                    radius: size / 2.0,
-                    color: mix_color(theme.surface, theme.accent, 0.25),
-                },
-                AvatarShape::Rounded => DrawCommand::RoundedRect {
+            let fill = if data.is_some() {
+                None
+            } else {
+                Some(hsl_color(fnv1a_hue(label), 0.45, 0.55))
+            };
+            if let Some(color) = fill {
+                // MyGo's avatar is a box rounded by half its size, which
+                // `Painter.snap` rounds out to whole device pixels; a canvas
+                // arc would leave half-covered rim pixels the source lacks.
+                commands.push(DrawCommand::RoundedRect {
                     x: 0.0,
                     y: 0.0,
                     width: size,
                     height: size,
-                    radius: Radius::all(size * 0.25),
-                    color: mix_color(theme.surface, theme.accent, 0.25),
-                },
-            });
+                    radius: Radius::all(size / 2.0),
+                    color,
+                });
+            }
             if let Some(data) = data {
                 let (columns, rows) = scaled_rgba_commands(
                     data,
@@ -5242,20 +8024,33 @@ impl Context {
                     size,
                     size,
                     shape == AvatarShape::Circle,
+                    self.pixel_scale,
                 );
                 drawn = columns > 0 && rows > 0;
             }
-            if let Some(initials) = initials {
-                let font_size = (size * 0.4).clamp(10.0, 32.0);
-                let text_width = measure_text_width(initials, font_size);
+            // MyGo returns an image avatar as soon as it builds the image
+            // (`ui/indicators.go` coreAvatar), so initials show only over
+            // the colored fill.
+            if data.is_none() {
+                // MyGo derives the initials from the name itself, so a caller
+                // need not supply them; an explicit pair still wins.
+                let text = initials
+                    .map(str::to_string)
+                    .unwrap_or_else(|| avatar_initials(label));
+                let font_size = size * 0.4;
+                // The box centers the text across its width; the alignment
+                // offset is applied once, when the command is serialized.
                 commands.push(DrawCommand::Text {
-                    x: (size - text_width) / 2.0,
+                    x: 0.0,
                     y: (size - measured_text_height(font_size)) / 2.0,
-                    text: initials.to_string(),
+                    text,
                     font_size,
-                    weight: 700,
-                    color: theme.foreground,
-                    max_width: Some((size * 0.8).max(1.0)),
+                    italic: false,
+                    mono: false,
+                    family: None,
+                    weight: 600,
+                    color: Color::WHITE,
+                    max_width: Some(size.max(1.0)),
                     alignment: TextAlignment::Center,
                 });
             }
@@ -5280,6 +8075,108 @@ impl Context {
             shape,
             has_image: data.is_some(),
             drawn,
+        }
+    }
+
+    /// Creates a three-tone quantity meter whose thresholds name their
+    /// sides, as MyGo's `Meter(c, v, lo, hi, &MeterLevels{Warning, Critical})`
+    /// does: Warning and Critical are values of the same range, and a
+    /// Critical below Warning makes low values the bad ones, as a battery's
+    /// charge is. Both `None` shows the success color throughout.
+    pub fn meter_levels(
+        &mut self,
+        id: &str,
+        value: f32,
+        min: f32,
+        max: f32,
+        warning: Option<f32>,
+        critical: Option<f32>,
+    ) -> MeterState {
+        let theme = self.theme.clone();
+        let (min, max) = if min <= max { (min, max) } else { (max, min) };
+        let value = if value.is_finite() {
+            value.clamp(min, max)
+        } else {
+            min
+        };
+        let clamp = |threshold: Option<f32>| {
+            threshold.filter(|t| t.is_finite()).map(|t| t.clamp(min, max))
+        };
+        let (warning, critical) = (clamp(warning), clamp(critical));
+        let fraction = if max > min {
+            ((value - min) / (max - min)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        // MyGo's levels (`ui/indicators.go` coreMeter): with Critical below
+        // Warning, a value at or below Critical is the danger and one at or
+        // below Warning the warning; otherwise the same the other way up.
+        // Equal thresholds name no levels at all.
+        let tone = match (warning, critical) {
+            (Some(warning), Some(critical)) if warning != critical => {
+                let low = critical < warning;
+                if (!low && value >= critical) || (low && value <= critical) {
+                    MeterTone::High
+                } else if (!low && value >= warning) || (low && value <= warning) {
+                    MeterTone::Medium
+                } else {
+                    MeterTone::Low
+                }
+            }
+            _ => MeterTone::Low,
+        };
+        let width = self.current_content_width();
+        // `Height(Space(2))` with `Radius(Space(1))`, its 20-Space minimum
+        // width left to the caller's column.
+        let height = 8.0;
+        let node = self.new_named_node(
+            id,
+            Style {
+                width: Some(width),
+                height: Some(height),
+                ..Style::default()
+            },
+        );
+        let tone_color = match tone {
+            MeterTone::Low => theme.success(),
+            MeterTone::Medium => theme.warning(),
+            MeterTone::High => theme.danger(),
+        };
+        let mut commands = vec![DrawCommand::RoundedRect {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
+            radius: Radius::all(4.0),
+            color: theme.border,
+        }];
+        if fraction > 0.0 {
+            commands.push(DrawCommand::RoundedRect {
+                x: 0.0,
+                y: 0.0,
+                width: (width * fraction).max(2.0),
+                height,
+                radius: Radius::all(4.0),
+                color: tone_color,
+            });
+        }
+        self.nodes
+            .get_mut(&node)
+            .expect("meter node exists")
+            .commands = commands;
+        self.register_access_node(
+            node,
+            Role::ProgressBar,
+            "meter",
+            Some(format!("{:.2}/{}", value, max).as_str()),
+            false,
+        );
+        MeterState {
+            value,
+            fraction,
+            tone,
+            min,
+            max,
         }
     }
 
@@ -5320,6 +8217,10 @@ impl Context {
         } else {
             0.0
         };
+        // MyGo's levels (`ui/indicators.go` coreMeter): the meter is green
+        // at Success until the value passes Warning, and Danger past
+        // Critical, counting down instead when Critical is the lower bound,
+        // as a battery's charge is.
         let tone = if value < low {
             MeterTone::Low
         } else if value < high {
@@ -5328,7 +8229,9 @@ impl Context {
             MeterTone::High
         };
         let width = self.current_content_width();
-        let height = 10.0;
+        // `Height(Space(2))` with `Radius(Space(1))`, its 20-Space minimum
+        // width left to the caller's column.
+        let height = 8.0;
         let node = self.new_named_node(
             id,
             Style {
@@ -5337,17 +8240,20 @@ impl Context {
                 ..Style::default()
             },
         );
+        // The levels are passed lowest first, so a value at or past the
+        // high threshold is the danger and one past the low is the warning;
+        // anything below stays the success color.
         let tone_color = match tone {
-            MeterTone::Low => theme.muted,
-            MeterTone::Medium => theme.accent,
-            MeterTone::High => theme.warn(),
+            MeterTone::Low => theme.success(),
+            MeterTone::Medium => theme.warning(),
+            MeterTone::High => theme.danger(),
         };
         let mut commands = vec![DrawCommand::RoundedRect {
             x: 0.0,
             y: 0.0,
             width,
             height,
-            radius: Radius::all(5.0),
+            radius: Radius::all(4.0),
             color: theme.border,
         }];
         if fraction > 0.0 {
@@ -5356,7 +8262,7 @@ impl Context {
                 y: 0.0,
                 width: (width * fraction).max(2.0),
                 height,
-                radius: Radius::all(5.0),
+                radius: Radius::all(4.0),
                 color: tone_color,
             });
         }
@@ -5404,7 +8310,9 @@ impl Context {
         let previous_low = state.low;
         let previous_high = state.high;
         let width = self.current_content_width();
-        let height = 28.0;
+        // As MyGo's RangeSlider: a 20-high track band with two 20×16
+        // capsules, each half inside the padding (`ui/indicators.go`).
+        let height = 20.0;
         let root = self.new_named_node(
             id,
             Style {
@@ -5493,12 +8401,14 @@ impl Context {
         } else {
             1.0
         };
-        let low_x = low_fraction * (width - 16.0) + 8.0;
-        let high_x = high_fraction * (width - 16.0) + 8.0;
+        let low_x = low_fraction * (width - 20.0) + 10.0;
+        let high_x = high_fraction * (width - 20.0) + 10.0;
+        let cy = 10.0;
+        let track_y = cy - 3.0;
         let mut commands = vec![
             DrawCommand::RoundedRect {
                 x: 0.0,
-                y: height / 2.0 - 3.0,
+                y: track_y,
                 width,
                 height: 6.0,
                 radius: Radius::all(3.0),
@@ -5506,42 +8416,48 @@ impl Context {
             },
             DrawCommand::RoundedRect {
                 x: low_x,
-                y: height / 2.0 - 3.0,
+                y: track_y,
                 width: (high_x - low_x).max(0.0),
                 height: 6.0,
                 radius: Radius::all(3.0),
                 color: theme.accent,
             },
-            DrawCommand::Circle {
-                x: low_x,
-                y: height / 2.0,
-                radius: if state.active == RangeKnob::Low {
-                    8.0
-                } else {
-                    7.0
-                },
-                color: if state.active == RangeKnob::Low {
-                    theme.accent
-                } else {
-                    mix_color(theme.accent, theme.surface, 0.45)
-                },
-            },
-            DrawCommand::Circle {
-                x: high_x,
-                y: height / 2.0,
-                radius: if state.active == RangeKnob::High {
-                    8.0
-                } else {
-                    7.0
-                },
-                color: if state.active == RangeKnob::High {
-                    theme.accent
-                } else {
-                    mix_color(theme.accent, theme.surface, 0.45)
-                },
-            },
         ];
-        if focused {
+        // White capsules lifted by the tight edge and soft shadows MyGo's
+        // paintKnob casts, as the single slider's knob.
+        for x in [low_x, high_x] {
+            commands.push(DrawCommand::Shadow {
+                x: x - 10.0,
+                y: cy - 8.0,
+                width: 20.0,
+                height: 16.0,
+                radius: 8.0,
+                offset_x: 0.0,
+                offset_y: 0.5,
+                blur: 1.0,
+                color: Color::rgba(0, 0, 0, 20),
+            });
+            commands.push(DrawCommand::Shadow {
+                x: x - 10.0,
+                y: cy - 8.0,
+                width: 20.0,
+                height: 16.0,
+                radius: 8.0,
+                offset_x: 0.0,
+                offset_y: 1.5,
+                blur: 7.0,
+                color: Color::rgba(0, 0, 0, 26),
+            });
+            commands.push(DrawCommand::RoundedRect {
+                x: x - 10.0,
+                y: cy - 8.0,
+                width: 20.0,
+                height: 16.0,
+                radius: Radius::all(8.0),
+                color: Color::rgb(255, 255, 255),
+            });
+        }
+        if self.shows_focus_ring(focused) {
             commands.extend(focus_ring(0.0, 0.0, width, height, theme.accent));
         }
         self.register_access_node(
@@ -5569,10 +8485,12 @@ impl Context {
     /// Creates a star rating from zero through `max`.
     pub fn rating(&mut self, id: &str, value: &mut u32, max: u32) -> RatingState {
         let theme = self.theme.clone();
-        let width = self.current_content_width();
         *value = (*value).min(max);
-        let star_size = 26.0;
-        let gap = theme.spacing.xs;
+        // As MyGo: stars a body font size and a quarter big, two apart
+        // (`ui/indicators.go` coreRating).
+        let star_size = theme.font_sizes.body * 1.25;
+        let gap = 2.0;
+        let width = star_size * max as f32 + gap * (max.saturating_sub(1)) as f32;
         let height = star_size;
         let root = self.new_named_node(
             id,
@@ -5620,8 +8538,11 @@ impl Context {
             self.pointer_in_previous(&key).then_some(index + 1)
         });
         let filled = hover_preview.unwrap_or(*value);
+        // MyGo's stars glow in the theme's Warning, dimmed while the pointer
+        // picks a count (`ui/indicators.go` coreRating).
+        let warning = theme.warning();
         let mut root_commands = Vec::new();
-        if focused {
+        if self.shows_focus_ring(focused) {
             root_commands.extend(focus_ring(0.0, 0.0, width, height, theme.accent));
         }
         self.nodes
@@ -5645,46 +8566,30 @@ impl Context {
                 self.focused_id = Some(id.to_string());
             }
             let selected = index < filled;
-            let star_color = if selected {
-                theme.accent
-            } else if hovered {
-                theme.foreground
+            let star_color = if hover_preview.is_some() {
+                Color::rgba(warning.r, warning.g, warning.b, 153)
+            } else if selected {
+                warning
             } else {
                 theme.muted
             };
-            let mut commands = vec![
-                DrawCommand::TransformPush {
-                    transform: Transform {
-                        translation: Point::new(0.0, 0.0),
-                        scale: Point::new(star_size / 24.0, star_size / 24.0),
-                        rotation: 0.0,
-                    },
-                },
-                DrawCommand::SvgPath {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 24.0,
-                    height: 24.0,
-                    path: STAR_PATH.to_string(),
-                    fill: selected.then_some(star_color),
-                    stroke: (!selected).then_some(star_color),
-                    stroke_width: 1.4,
-                },
-                DrawCommand::TransformPop,
-            ];
-            if hovered {
-                commands.insert(
-                    0,
-                    DrawCommand::RoundedRect {
-                        x: 0.0,
-                        y: 0.0,
-                        width: star_size,
-                        height: star_size,
-                        radius: Radius::all(4.0),
-                        color: mix_color(theme.surface, theme.accent, 0.16),
-                    },
-                );
-            }
+            // MyGo draws a star as a path of the node's own box
+            // (`ui/indicators.go` starPath), not as an icon scaled from a
+            // view box: the outer points reach 0.48 of the width, the inner
+            // 0.2, around a center a twenty-fifth of the height low, and the
+            // path keeps the box's fractional position as FillPath does.
+            let commands = vec![DrawCommand::SvgPath {
+                x: 0.0,
+                y: 0.0,
+                width: star_size,
+                height: star_size,
+                path: star_path(star_size),
+                fill: selected.then_some(star_color),
+                stroke: (!selected).then_some(star_color),
+                // MyGo strokes the star's outline 1.2 DIPs wide
+                // (`ui/indicators.go` coreRating).
+                stroke_width: 1.2,
+            }];
             self.register_access_node(
                 node,
                 Role::Button,
@@ -5726,19 +8631,27 @@ impl Context {
         let (min, max) = if min <= max { (min, max) } else { (max, min) };
         let step = step.max(1);
         *value = (*value).clamp(min, max);
-        let width = self.current_content_width();
+        // MyGo's stepper is a compact two-arrow column: 20 wide, two
+        // 14-high arrow boxes over a 1px border and surface fill
+        // (`ui/indicators.go` coreStepper).
+        let width = 20.0;
+        let row_height = 14.0;
         let height = 30.0;
+        let radius = 6.0;
         let root = self.new_named_node(
             id,
             Style {
                 width: Some(width),
                 height: Some(height),
-                padding: Edges::symmetric(theme.spacing.xs, theme.spacing.xs),
-                gap: theme.spacing.xs,
-                align_items: AlignItems::Center,
+                padding: Edges::all(1.0),
+                flex_direction: FlexDirection::Column,
                 ..Style::default()
             },
         );
+        if let Some(node) = self.nodes.get_mut(&root) {
+            node.fill = Some((theme.surface, Radius::all(radius)));
+            node.stroke = Some((theme.border, Radius::all(radius)));
+        }
         self.register_interaction(root, id.to_string());
         self.register_focusable(root, id.to_string());
         let hovered = self.pointer_in_previous(id);
@@ -5760,95 +8673,90 @@ impl Context {
             self.focused_id = Some(id.to_string());
         }
         let changed = *value != previous;
-        let mut root_commands = vec![DrawCommand::RoundedRect {
-            x: 0.0,
-            y: 0.0,
-            width,
-            height,
-            radius: Radius::all(6.0),
-            color: theme.surface,
-        }];
-        if focused {
-            root_commands.extend(focus_ring(0.0, 0.0, width, height, theme.accent));
-        }
-        self.nodes
-            .get_mut(&root)
-            .expect("stepper root exists")
-            .commands = root_commands;
         self.push_parent(root);
-        let button_width = 28.0;
-        for (key, label, delta) in [
-            (decrease_key.as_str(), "-", -1_i64),
-            (increase_key.as_str(), "+", 1_i64),
-        ] {
+        let box_width = width - 2.0;
+        for (key, up) in [(increase_key.as_str(), true), (decrease_key.as_str(), false)] {
             let node = self.new_named_node(
                 key,
                 Style {
-                    width: Some(button_width),
-                    height: Some(22.0),
+                    width: Some(box_width),
+                    height: Some(row_height),
                     ..Style::default()
                 },
             );
             self.register_interaction(node, key.to_string());
-            let hovered = self.pointer_in_previous(key);
-            let mut commands = vec![
-                DrawCommand::RoundedRect {
+            self.register_access_node(
+                node,
+                Role::Button,
+                if up { "increase" } else { "decrease" },
+                None,
+                false,
+            );
+            let arrow_hovered = self.pointer_in_previous(key);
+            let pressed = arrow_hovered && self.input.pointer_down;
+            let can = if up { *value < max } else { *value > min };
+            let mut commands = Vec::new();
+            if pressed {
+                commands.push(DrawCommand::Rect {
                     x: 0.0,
                     y: 0.0,
-                    width: button_width,
-                    height: 22.0,
-                    radius: Radius::all(4.0),
-                    color: if hovered {
-                        mix_color(theme.surface, theme.accent, 0.35)
-                    } else {
-                        mix_color(theme.surface, theme.border, 0.6)
-                    },
-                },
-                DrawCommand::Text {
-                    x: 0.0,
-                    y: 3.0,
-                    text: label.to_string(),
-                    font_size: theme.font_sizes.body,
-                    weight: 600,
-                    color: theme.foreground,
-                    max_width: Some(button_width),
-                    alignment: TextAlignment::Center,
-                },
-            ];
-            if delta < 0 && *value <= min {
-                commands[0] = DrawCommand::RoundedRect {
+                    width: box_width,
+                    height: row_height,
+                    color: theme.surface_pressed,
+                });
+            } else if arrow_hovered {
+                commands.push(DrawCommand::Rect {
                     x: 0.0,
                     y: 0.0,
-                    width: button_width,
-                    height: 22.0,
-                    radius: Radius::all(4.0),
-                    color: theme.surface,
-                };
+                    width: box_width,
+                    height: row_height,
+                    color: theme.surface_hover,
+                });
             }
-            self.register_access_node(node, Role::Button, label, None, false);
+            let cx = box_width / 2.0;
+            let cy = row_height / 2.0;
+            let d = row_height * 0.22;
+            let path = if up {
+                format!(
+                    "M{:.2} {:.2}L{:.2} {:.2}L{:.2} {:.2}",
+                    cx - d,
+                    cy + d / 2.0,
+                    cx,
+                    cy - d / 2.0,
+                    cx + d,
+                    cy + d / 2.0
+                )
+            } else {
+                format!(
+                    "M{:.2} {:.2}L{:.2} {:.2}L{:.2} {:.2}",
+                    cx - d,
+                    cy - d / 2.0,
+                    cx,
+                    cy + d / 2.0,
+                    cx + d,
+                    cy - d / 2.0
+                )
+            };
+            let color = if can {
+                theme.foreground
+            } else {
+                Color::rgba(theme.muted.r, theme.muted.g, theme.muted.b, 128)
+            };
+            commands.push(DrawCommand::SvgPath {
+                x: 0.0,
+                y: 0.0,
+                width: d * 2.0,
+                height: d,
+                path,
+                fill: None,
+                stroke: Some(color),
+                stroke_width: 1.5,
+            });
             self.nodes
                 .get_mut(&node)
-                .expect("stepper button exists")
+                .expect("stepper arrow exists")
                 .commands = commands;
         }
-        let value_width = (width - button_width * 2.0 - theme.spacing.xs * 2.0).max(1.0);
-        let text_node = self.new_named_node(
-            &format!("{id}:value"),
-            Style {
-                width: Some(value_width),
-                height: Some(22.0),
-                ..Style::default()
-            },
-        );
-        self.update_text(
-            text_node,
-            &value.to_string(),
-            theme.font_sizes.body,
-            600,
-            theme.foreground,
-            Some(value_width),
-            TextAlignment::Center,
-        );
         self.pop_parent();
         self.register_access_node(
             root,
@@ -5902,7 +8810,7 @@ impl Context {
             }
         }
         let filter = move |raw: &str| filter_numeric_text(raw, allow_negative, decimals);
-        let field = self.text_field_impl(id, text, Some(&filter), false);
+        let field = self.text_field_impl(id, text, Some(&filter), false, None, false);
         let value = if text.is_empty() {
             None
         } else {
@@ -5926,7 +8834,7 @@ impl Context {
         let decimals = options.decimals.min(18);
         let allow_negative = options.allow_negative;
         let filter = move |raw: &str| filter_numeric_text(raw, allow_negative, decimals);
-        let field = self.text_field_impl(id, text, Some(&filter), false);
+        let field = self.text_field_impl(id, text, Some(&filter), false, None, false);
         let units = parse_decimal_units(text, decimals);
         DecimalInputState {
             changed: field.changed,
@@ -5978,9 +8886,18 @@ impl Context {
             self.widget_states
                 .insert(id.to_string(), WidgetState::Checkbox);
         }
-        let height = measured_text_height(font_size).max(22.0);
-        let width = self.current_content_width();
+        // MyGo's check box row is as tall as its line of text: the 16-pixel
+        // box fits in the 17-pixel line.
+        let height = measured_text_height(font_size).max(16.0);
         let box_size = 16.0;
+        let label_width = label
+            .map(|text| measure_text_width(text, font_size))
+            .unwrap_or(0.0);
+        let width = if label.is_some() {
+            box_size + 8.0 + label_width
+        } else {
+            box_size
+        };
         let node_id = self.new_named_node(
             id,
             Style {
@@ -6009,10 +8926,14 @@ impl Context {
             }
         }
         let mut commands = Vec::new();
+        // MyGo centers the box in the row, which is a pixel taller than it
+        // is: half a pixel down, where its edges fall on whole device
+        // pixels at a scale of two (`ui/feedback.go` paintCheckbox).
+        let box_top = (height - box_size) / 2.0;
         if *checked || indeterminate {
             commands.push(DrawCommand::RoundedRect {
                 x: 0.0,
-                y: (height - box_size) / 2.0,
+                y: box_top,
                 width: box_size,
                 height: box_size,
                 radius: Radius::all(4.0),
@@ -6021,61 +8942,65 @@ impl Context {
         } else {
             commands.push(DrawCommand::RoundedRect {
                 x: 0.0,
-                y: (height - box_size) / 2.0,
+                y: box_top,
                 width: box_size,
                 height: box_size,
                 radius: Radius::all(4.0),
-                color: theme.border,
+                color: mix_color(theme.border, theme.foreground, 0.25),
             });
             commands.push(DrawCommand::RoundedRect {
                 x: 1.0,
-                y: (height - box_size) / 2.0 + 1.0,
+                y: box_top + 1.0,
                 width: box_size - 2.0,
                 height: box_size - 2.0,
                 radius: Radius::all(3.0),
-                color: theme.surface,
+                color: theme.background,
             });
         }
-        commands.push(DrawCommand::Text {
-            x: 26.0,
-            y: (height - measured_text_height(font_size)) / 2.0,
-            text: label
-                .map(str::to_string)
-                .unwrap_or_else(|| if *checked { "checked" } else { "unchecked" }.to_string()),
-            font_size,
-            weight: 400,
-            color: theme.foreground,
-            max_width: None,
-            alignment: TextAlignment::Start,
-        });
+        if let Some(label) = label {
+            commands.push(DrawCommand::Text {
+                x: 24.0,
+                y: 0.0,
+                text: label.to_string(),
+                font_size,
+                italic: false,
+                mono: false,
+                family: None,
+                weight: 400,
+                color: theme.foreground,
+                max_width: None,
+                alignment: TextAlignment::Start,
+            });
+        }
         if indeterminate {
             commands.push(DrawCommand::RoundedRect {
-                x: 4.0,
-                y: height / 2.0 - 1.0,
-                width: 8.0,
+                x: box_size * 0.25,
+                y: box_top + box_size / 2.0 - 1.0,
+                width: box_size * 0.5,
                 height: 2.0,
                 radius: Radius::all(1.0),
                 color: theme.on_accent,
             });
         } else if *checked {
+            // MyGo's check path, through the box (`checkPath`).
             commands.push(DrawCommand::Line {
-                x1: 4.0,
-                y1: height / 2.0,
-                x2: 7.0,
-                y2: height / 2.0 + 2.5,
+                x1: box_size * 0.22,
+                y1: box_top + box_size * 0.52,
+                x2: box_size * 0.42,
+                y2: box_top + box_size * 0.71,
                 width: 2.0,
                 color: theme.on_accent,
             });
             commands.push(DrawCommand::Line {
-                x1: 7.0,
-                y1: height / 2.0 + 2.5,
-                x2: 12.0,
-                y2: height / 2.0 - 3.0,
+                x1: box_size * 0.42,
+                y1: box_top + box_size * 0.71,
+                x2: box_size * 0.78,
+                y2: box_top + box_size * 0.31,
                 width: 2.0,
                 color: theme.on_accent,
             });
         }
-        if focused {
+        if self.shows_focus_ring(focused) {
             commands.extend(focus_ring(0.0, 0.0, width, height, theme.accent));
         }
         self.register_access_node(
@@ -6105,15 +9030,49 @@ impl Context {
 
     /// Creates a horizontal slider controlled by drag or focused arrow keys.
     pub fn slider(&mut self, id: &str, value: &mut f32, min: f32, max: f32) -> SliderState {
+        // As MyGo, a slider is the stepped one without ticks: one track
+        // and knob, 20 high.
+        self.slider_impl(id, value, min, max, 0.0)
+    }
+
+    /// Creates a stepped slider with tick marks, as MyGo's StepSlider.
+    ///
+    /// Values snap to `min` plus multiples of `step` up to `max`, and arrow
+    /// keys move by exactly one step. A ticked slider is taller to make room
+    /// for the marks below its track (`ui/widgets.go` slider).
+    pub fn slider_stepped(
+        &mut self,
+        id: &str,
+        value: &mut f32,
+        min: f32,
+        max: f32,
+        step: f32,
+    ) -> SliderState {
+        self.slider_impl(id, value, min, max, step)
+    }
+
+    fn slider_impl(
+        &mut self,
+        id: &str,
+        value: &mut f32,
+        min: f32,
+        max: f32,
+        step: f32,
+    ) -> SliderState {
         let theme = self.theme.clone();
         let min = min.min(max);
         let max = max.max(min);
+        let step = if step.is_finite() { step.max(0.0) } else { 0.0 };
         *value = value.clamp(min, max);
+        if step > 0.0 {
+            *value = snap_slider_value(*value, min, max, step);
+        }
         if !matches!(self.widget_states.get(id), Some(WidgetState::Slider { .. })) {
             self.widget_states
                 .insert(id.to_string(), WidgetState::Slider { dragging: false });
         }
-        let height = 28.0;
+        let tick_count = slider_tick_count(min, max, step);
+        let height = if tick_count > 0 { 28.0 } else { 20.0 };
         let width = self.current_content_width();
         let node_id = self.new_named_node(
             id,
@@ -6148,7 +9107,7 @@ impl Context {
                         let fraction = ((pointer.x - region.bounds.x)
                             / region.bounds.width.max(1.0))
                         .clamp(0.0, 1.0);
-                        let next = min + (max - min) * fraction;
+                        let next = snap_slider_value(min + (max - min) * fraction, min, max, step);
                         if (*value - next).abs() > f32::EPSILON {
                             *value = next;
                             changed = true;
@@ -6158,7 +9117,7 @@ impl Context {
                 if !pointer_down {
                     *dragging = false;
                 }
-                let keyboard_step = (max - min) / 100.0;
+                let keyboard_step = if step > 0.0 { step } else { (max - min) / 100.0 };
                 if keyboard_right {
                     *value = (*value + keyboard_step).clamp(min, max);
                     changed = true;
@@ -6177,37 +9136,81 @@ impl Context {
             0.0
         };
         let knob_x = fraction * (width - 20.0) + 10.0;
-        let mut commands = vec![
+        // The track sits Spaces(2.5) from the top and spans the whole node,
+        // its knob half inside the padding; ticks hang below it. MyGo keeps
+        // that top band fixed when a stepped slider grows for its ticks.
+        let cy = 10.0;
+        let track_y = cy - 3.0;
+        let mut commands = Vec::new();
+        if tick_count > 0 {
+            let tick_color =
+                Color::rgba(theme.muted.r, theme.muted.g, theme.muted.b, 153);
+            let n = tick_count as f32;
+            for i in 0..tick_count {
+                let x = 10.0 + (width - 20.0) * i as f32 / (n - 1.0).max(1.0);
+                commands.push(DrawCommand::RoundedRect {
+                    x: x - 0.5,
+                    y: 22.0,
+                    width: 1.0,
+                    height: 6.0,
+                    radius: Radius::all(0.0),
+                    color: tick_color,
+                });
+            }
+        }
+        commands.extend_from_slice(&[
             DrawCommand::RoundedRect {
                 x: 0.0,
-                y: height / 2.0 - 2.5,
-                width,
-                height: 5.0,
-                radius: Radius::all(2.5),
+                y: track_y,
+                width: width.max(1.0),
+                height: 6.0,
+                radius: Radius::all(3.0),
                 color: theme.border,
             },
             DrawCommand::RoundedRect {
                 x: 0.0,
-                y: height / 2.0 - 2.5,
-                width: knob_x,
-                height: 5.0,
-                radius: Radius::all(2.5),
+                y: track_y,
+                width: knob_x.max(1.0),
+                height: 6.0,
+                radius: Radius::all(3.0),
                 color: theme.accent,
             },
-            DrawCommand::Circle {
-                x: knob_x,
-                y: height / 2.0,
-                radius: 10.0,
-                color: if focused || dragging { theme.accent } else { theme.border },
+            // A white capsule edged by a dark rim, lifted by the tight edge
+            // and soft shadows MyGo's paintKnob casts with it.
+            DrawCommand::Shadow {
+                x: knob_x - 10.0,
+                y: cy - 8.0,
+                width: 20.0,
+                height: 16.0,
+                radius: 8.0,
+                offset_x: 0.0,
+                offset_y: 0.5,
+                blur: 1.0,
+                color: Color::rgba(0, 0, 0, 20),
             },
-            DrawCommand::Circle {
-                x: knob_x,
-                y: height / 2.0,
-                radius: 9.0,
-                color: Color::rgb(244, 244, 245),
+            DrawCommand::Shadow {
+                x: knob_x - 10.0,
+                y: cy - 8.0,
+                width: 20.0,
+                height: 16.0,
+                radius: 8.0,
+                offset_x: 0.0,
+                offset_y: 1.5,
+                blur: 7.0,
+                color: Color::rgba(0, 0, 0, 26),
             },
-        ];
-        if focused {
+            // MyGo's knob at rest is a plain white capsule: no rim, only
+            // the shadows above lift it off the track.
+            DrawCommand::RoundedRect {
+                x: knob_x - 10.0,
+                y: cy - 8.0,
+                width: 20.0,
+                height: 16.0,
+                radius: Radius::all(8.0),
+                color: Color::rgb(255, 255, 255),
+            },
+        ]);
+        if self.shows_focus_ring(focused) {
             commands.extend(focus_ring(0.0, 0.0, width, height, theme.accent));
         }
         let value_text = format!("{value:.2}");
@@ -6240,9 +9243,31 @@ impl Context {
         viewport_height: f32,
         content: impl FnOnce(&mut Context),
     ) -> ScrollState {
+        self.scroll_view_styled(id, viewport_height, ScrollStyle::default(), content)
+    }
+
+    /// Creates a scroll view with a face and padding, as MyGo's Scroll takes
+    /// Background, Border, Radius and Padding.
+    pub fn scroll_view_styled(
+        &mut self,
+        id: &str,
+        viewport_height: f32,
+        style: ScrollStyle,
+        content: impl FnOnce(&mut Context),
+    ) -> ScrollState {
         let theme = self.theme.clone();
         let viewport_height = viewport_height.max(1.0);
         let width = self.current_content_width();
+        // MyGo's border takes layout room (`ui/layout.go` padX = pad +
+        // border), so the content sits one pixel further in than the fill's
+        // own padding would put it.
+        let edge = if style.border.is_some() { 1.0 } else { 0.0 };
+        let padding = Edges::new(
+            style.padding.top + edge,
+            style.padding.right + edge,
+            style.padding.bottom + edge,
+            style.padding.left + edge,
+        );
         if !matches!(
             self.widget_states.get(id),
             Some(WidgetState::ScrollView { .. })
@@ -6261,6 +9286,8 @@ impl Context {
                 width: Some(width),
                 height: Some(viewport_height),
                 flex_direction: FlexDirection::Column,
+                gap: style.gap,
+                padding,
                 ..Style::default()
             },
         );
@@ -6268,8 +9295,23 @@ impl Context {
         self.push_parent(node_id);
         content(self);
         self.pop_parent();
-        let content_height = self.estimated_content_height(node_id, width);
+        let inner_width = (width - padding.horizontal()).max(1.0);
+        // MyGo's content height is the content box plus both paddings and
+        // borders (`ui/layout.go` contentH = max(uh, ch) + padY, padY being
+        // padding and border); the layout places the children inside the top
+        // padding, so only the bottom edge is left to add.
+        let content_height = self.estimated_content_height(node_id, inner_width) + padding.bottom;
         let max_scroll = (content_height - viewport_height).max(0.0);
+        // A view that starts at its end, as MyGo's log does with its
+        // `TrackScroll` state at `math.MaxFloat32`.
+        if let Some(initial) = style.initial_offset {
+            if let Some(WidgetState::ScrollView { offset, .. }) = self.widget_states.get_mut(id) {
+                if *offset == 0.0 {
+                    *offset = if initial.is_finite() { initial } else { max_scroll }
+                        .clamp(0.0, max_scroll);
+                }
+            }
+        }
         let hovered = self.pointer_in_previous(id);
         let local_pointer = self.local_pointer_in_previous(id);
         let mut changed = false;
@@ -6317,33 +9359,43 @@ impl Context {
         } else {
             0.0
         };
+        let _ = (theme, thumb_height, thumb_y);
         let node = self.nodes.get_mut(&node_id).expect("scroll node exists");
-        node.commands = vec![DrawCommand::RoundedRect {
-            x: 0.0,
-            y: 0.0,
-            width,
-            height: viewport_height,
-            radius: Radius::all(6.0),
-            color: theme.surface,
-        }];
-        node.overlay_commands = vec![
-            DrawCommand::RoundedRect {
-                x: width - 7.0,
-                y: 0.0,
-                width: 5.0,
-                height: viewport_height,
-                radius: Radius::all(2.5),
-                color: theme.border,
-            },
-            DrawCommand::RoundedRect {
-                x: width - 8.0,
-                y: thumb_y,
-                width: 7.0,
-                height: thumb_height,
-                radius: Radius::all(3.5),
-                color: theme.muted,
-            },
-        ];
+        // MyGo's Scroll draws a face when it has one, its border outside the
+        // face as a control's is; the browser's scrollbar is an overlay that
+        // stays out of the picture until the pointer moves.
+        let mut commands = Vec::new();
+        if let Some(color) = style.background {
+            if let Some(border) = style.border {
+                commands.push(DrawCommand::RoundedRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width,
+                    height: viewport_height,
+                    radius: Radius::all(style.radius),
+                    color: border,
+                });
+                commands.push(DrawCommand::RoundedRect {
+                    x: 1.0,
+                    y: 1.0,
+                    width: (width - 2.0).max(0.0),
+                    height: (viewport_height - 2.0).max(0.0),
+                    radius: Radius::all((style.radius - 1.0).max(0.0)),
+                    color,
+                });
+            } else {
+                commands.push(DrawCommand::RoundedRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width,
+                    height: viewport_height,
+                    radius: Radius::all(style.radius),
+                    color,
+                });
+            }
+        }
+        node.commands = commands;
+        node.overlay_commands = Vec::new();
         node.scroll = Some(ScrollNode {
             offset,
             viewport_height,
@@ -6409,6 +9461,9 @@ impl Context {
             }
             UiEvent::PointerPressed { x, y, button } => {
                 self.input.pointer = Some(Point::new(x, y));
+                // A press focuses what it hits without drawing a ring, as
+                // MyGo's input clears `focusVisible` (`ui/input.go`).
+                self.focus_visible = false;
                 if button == crate::event::PointerButton::Left {
                     self.input.pointer_down = true;
                     self.input.released = None;
@@ -6433,8 +9488,10 @@ impl Context {
             UiEvent::Key { key } => {
                 if key == Key::Tab {
                     self.cycle_focus(false);
+                    self.focus_visible = true;
                 } else if key == Key::ShiftTab {
                     self.cycle_focus(true);
+                    self.focus_visible = true;
                 }
                 self.input.keys.push(key);
             }
@@ -6618,6 +9675,12 @@ impl Context {
         let mut node = Node::new(id)
             .with_style(pending.style)
             .with_content_size(pending.content_size);
+        if let Some(baseline) = pending.first_baseline {
+            node = node.with_first_baseline(baseline);
+        }
+        if let Some((ascent, descent)) = pending.text_metrics {
+            node = node.with_text_metrics(ascent, descent);
+        }
         for child in &pending.children {
             if let Some(child_node) = self.build_node(*child) {
                 node.children.push(child_node);
@@ -6646,7 +9709,96 @@ impl Context {
         };
         let result = layout.iter().find(|result| result.id == id).copied();
         if let Some(result) = result {
-            let mut local = DisplayList::from_commands(pending.commands.clone());
+            let mut painted = Vec::new();
+            if let Some((color, radius)) = pending.fill {
+                if color.a == 0 {
+                    // A transparent face with a border is a stroke only; an
+                    // opaque inner face would hide the node's surroundings.
+                    if let Some((border, border_radius)) = pending.stroke {
+                        painted.push(stroked_rounded_rect(
+                            result.width,
+                            result.height,
+                            border_radius.top_left,
+                            border,
+                        ));
+                    }
+                } else if color.a < 255 {
+                    // A translucent face over a border: paint the edge, then
+                    // the face over whatever is behind it, as MyGo's
+                    // Background(alpha).Border(1) does.
+                    if let Some((border, border_radius)) = pending.stroke {
+                        painted.push(stroked_rounded_rect(
+                            result.width,
+                            result.height,
+                            border_radius.top_left,
+                            border,
+                        ));
+                    }
+                    painted.push(DrawCommand::RoundedRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: result.width,
+                        height: result.height,
+                        radius,
+                        color,
+                    });
+                } else if let Some((border, border_radius)) = pending.stroke {
+                    painted.push(DrawCommand::RoundedRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: result.width,
+                        height: result.height,
+                        radius: border_radius,
+                        color: border,
+                    });
+                    if result.width > 2.0 && result.height > 2.0 {
+                        painted.push(DrawCommand::RoundedRect {
+                            x: 1.0,
+                            y: 1.0,
+                            width: result.width - 2.0,
+                            height: result.height - 2.0,
+                            radius: Radius::all((radius.top_left - 1.0).max(0.0)),
+                            color,
+                        });
+                    }
+                } else {
+                    painted.push(DrawCommand::RoundedRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: result.width,
+                        height: result.height,
+                        radius,
+                        color,
+                    });
+                }
+            } else if let Some((border, radius)) = pending.stroke {
+                painted.push(stroked_rounded_rect(
+                    result.width,
+                    result.height,
+                    radius.top_left,
+                    border,
+                ));
+            }
+            if let Some(color) = pending.top_border {
+                painted.push(DrawCommand::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: result.width,
+                    height: 1.0,
+                    color,
+                });
+            }
+            if let Some(color) = pending.bottom_border {
+                painted.push(DrawCommand::Rect {
+                    x: 0.0,
+                    y: result.height - 1.0,
+                    width: result.width,
+                    height: 1.0,
+                    color,
+                });
+            }
+            painted.extend(pending.commands.clone());
+            let mut local = DisplayList::from_commands(painted);
             if pending.transform != Transform::identity() {
                 local.commands.insert(
                     0,
@@ -6670,6 +9822,12 @@ impl Context {
                 display.push(DrawCommand::TransformPush {
                     transform: Transform::translate(Point::new(0.0, -scroll.offset)),
                 });
+            } else if pending.clip {
+                // A clip is the node's own box: only a Scroll insets its
+                // content inside the border it paints (`ui/paint.go`).
+                display.push(DrawCommand::ScissorPush {
+                    rect: Rect::new(result.x, result.y, result.width, result.height),
+                });
             }
         }
         for child in &pending.children {
@@ -6678,12 +9836,26 @@ impl Context {
         if pending.scroll.is_some() {
             display.push(DrawCommand::TransformPop);
             display.push(DrawCommand::ScissorPop);
+        } else if pending.clip && result.is_some() {
+            display.push(DrawCommand::ScissorPop);
         }
         if let Some(result) = result {
             let mut overlay = DisplayList::from_commands(pending.overlay_commands.clone());
             overlay.translate(Point::new(result.x, result.y));
             display.extend(overlay.commands);
         }
+    }
+
+    /// Returns the width the children of `node_id` ask for, so that a
+    /// panel sizes to the column it holds rather than to its trigger.
+    fn estimated_content_width(&self, node_id: u64) -> f32 {
+        let Some(node) = self.build_node(node_id) else {
+            return 0.0;
+        };
+        // What the content asks for, as the layout's own intrinsic size
+        // measures it: a column with a width of its own reports that, and
+        // one without reports the widest row it holds.
+        super::layout::intrinsic_size(&node).width
     }
 
     fn estimated_content_height(&self, node_id: u64, width: f32) -> f32 {
@@ -6719,7 +9891,7 @@ impl Context {
         }
     }
 
-    fn new_node(&mut self, style: Style) -> u64 {
+    pub(crate) fn new_node(&mut self, style: Style) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         let key = self.explicit_id.take();
@@ -6734,6 +9906,13 @@ impl Context {
             layer: self.current_layer,
             transform: self.current_transform,
             rtl: self.direction.is_rtl(),
+            fill: None,
+            stroke: None,
+            clip: false,
+            top_border: None,
+            bottom_border: None,
+            first_baseline: None,
+            text_metrics: None,
         };
         self.nodes.insert(id, pending);
         if let Some(parent) = self.parent_stack.last().copied() {
@@ -6758,29 +9937,171 @@ impl Context {
         color: Color,
         max_width: Option<f32>,
         alignment: TextAlignment,
+        offset_y: f32,
+        single_line: bool,
+        mono: bool,
+        family: Option<&str>,
     ) {
-        let size = estimated_text_size(text, font_size, max_width);
+        // MyGo's SingleLine keeps one line and ends what does not fit with
+        // an ellipsis (`ui/element.go` SingleLine, Ellipsis).
+        let mut truncated = false;
+        let text = if single_line {
+            match max_width {
+                Some(width) if width > 0.0 => {
+                    let cut = truncate_with_ellipsis(text, font_size, width);
+                    truncated = cut != text;
+                    cut
+                }
+                _ => text.to_string(),
+            }
+        } else {
+            text.to_string()
+        };
+        let mut size = estimated_text_size_styled(
+            &text,
+            font_size,
+            if single_line { None } else { max_width },
+            mono,
+            weight,
+            family,
+        );
+        // A node measures its text by its whole, untruncated width, and a
+        // line that does not fit takes the width it has
+        // (`ui/layout.go` measureIntrinsic; `ui/layoutcache.go`
+        // textWidths measures at width 0). Its glyphs then start at the
+        // content origin rather than centering in the room left over.
+        if truncated {
+            if let Some(width) = max_width {
+                size.width = width;
+            }
+        }
+        // MyGo lines a form field's row up on the baseline of its first line
+        // of text (`ui/form.go` alignBaselines): the line box's top plus the
+        // font's ascent, which is where the renderer puts the baseline.
+        let ascent = host_text_ascent(font_size, false, mono, weight >= 600)
+            .or_else(|| default_font().map(|font| font.ascent(font_size)))
+            .unwrap_or(font_size * 0.93);
+        // A text node draws inside its own padding, as MyGo's text does: its
+        // line box starts at the content origin (`ui/paint.go` textLayout
+        // takes `e.contentX()`, `e.contentY()`).
+        let (pad_left, pad_top) = self
+            .nodes
+            .get(&id)
+            .map(|node| (node.style.padding.left, node.style.padding.top))
+            .unwrap_or((0.0, 0.0));
         let Some(node) = self.nodes.get_mut(&id) else {
             return;
         };
         node.content_size = size;
+        node.first_baseline = Some(pad_top + offset_y + ascent);
+        node.text_metrics = Some((
+            ascent,
+            host_text_descent(font_size, false, mono, weight >= 600)
+                .or_else(|| default_font().map(|font| font.descent(font_size)))
+                .unwrap_or(font_size * 0.25),
+        ));
         node.commands = vec![DrawCommand::Text {
-            x: 0.0,
-            y: 0.0,
-            text: text.to_string(),
+            x: pad_left,
+            y: pad_top + offset_y,
+            text,
             font_size,
             weight,
+            italic: false,
+            mono,
+            family: family.map(str::to_string),
             color,
             max_width,
-            alignment,
+            // A cut line starts at the content origin, as MyGo's does in
+            // the full width its node takes.
+            alignment: if truncated {
+                TextAlignment::Start
+            } else {
+                alignment
+            },
         }];
     }
 
-    fn push_parent(&mut self, id: u64) {
+    /// Clips a node the caller created with [`Self::new_node`] to its box.
+    pub(crate) fn set_node_clip(&mut self, id: u64, clip: bool) {
+        if let Some(node) = self.nodes.get_mut(&id) {
+            node.clip = clip;
+        }
+    }
+
+    /// Fills a node the caller created with [`Self::new_node`].
+    pub(crate) fn set_node_fill(&mut self, id: u64, color: Color, radius: f32) {
+        if let Some(node) = self.nodes.get_mut(&id) {
+            node.fill = Some((color, Radius::all(radius)));
+        }
+    }
+
+    /// Replaces a node's commands, as the chart marks paint their paths.
+    pub(crate) fn set_node_commands(&mut self, id: u64, commands: Vec<DrawCommand>) {
+        if let Some(node) = self.nodes.get_mut(&id) {
+            node.commands = commands;
+        }
+    }
+
+    /// Paints a one-pixel border around a node the caller created with
+    /// [`Self::new_node`], as [`FlexBuilder::border`] does.
+    pub(crate) fn set_node_border(&mut self, id: u64, color: Color, radius: f32) {
+        if let Some(node) = self.nodes.get_mut(&id) {
+            node.stroke = Some((color, Radius::all(radius)));
+        }
+    }
+
+    /// Paints a one-pixel rule along a node's top edge, as MyGo's
+    /// `BorderWidth(1, 0, 0, 0)` draws a section's divider.
+    pub(crate) fn set_node_bottom_border(&mut self, id: u64, color: Color) {
+        if let Some(node) = self.nodes.get_mut(&id) {
+            node.bottom_border = Some(color);
+        }
+    }
+
+    pub(crate) fn set_node_top_border(&mut self, id: u64, color: Color) {
+        if let Some(node) = self.nodes.get_mut(&id) {
+            node.top_border = Some(color);
+        }
+    }
+
+    /// Names a node the caller created with [`Self::new_node`].
+    pub(crate) fn set_node_key(&mut self, id: u64, key: &str) {
+        if let Some(node) = self.nodes.get_mut(&id) {
+            node.key = Some(key.to_string());
+        }
+    }
+
+    /// Sets a node's single line of text, as [`TextBuilder`] does.
+    pub(crate) fn set_node_text(
+        &mut self,
+        id: u64,
+        text: &str,
+        font_size: f32,
+        color: Color,
+        max_width: Option<f32>,
+        alignment: TextAlignment,
+        offset_y: f32,
+    ) {
+        self.update_text(
+            id,
+            text,
+            font_size,
+            400,
+            color,
+            max_width,
+            alignment,
+            offset_y,
+            false,
+            false,
+            None,
+        );
+    }
+
+    pub(crate) fn push_parent(&mut self, id: u64) {
         self.parent_stack.push(id);
     }
 
-    fn pop_parent(&mut self) {
+    pub(crate) fn pop_parent(&mut self) {
         self.parent_stack.pop();
     }
 
@@ -6820,18 +10141,24 @@ impl Context {
             .unwrap_or_else(|| format!("widget-{node_id}"))
     }
 
-    fn current_content_width(&self) -> f32 {
-        let parent = self.parent_stack.last().and_then(|id| self.nodes.get(id));
-        let width = parent
-            .and_then(|node| node.style.width)
-            .unwrap_or(self.available_size.width);
-        let padding = parent
-            .map(|node| node.style.padding.horizontal())
-            .unwrap_or(0.0);
-        (width - padding).max(1.0)
+    pub(crate) fn current_content_width(&self) -> f32 {
+        // Walk out to the nearest ancestor whose width is known: a widget's
+        // content width is that ancestor's width less the padding between
+        // them, as a nested column's content is its parent's.
+        let mut extra_padding = 0.0;
+        for id in self.parent_stack.iter().rev() {
+            let Some(node) = self.nodes.get(id) else {
+                continue;
+            };
+            if let Some(width) = node.style.width {
+                return (width - extra_padding - node.style.padding.horizontal()).max(1.0);
+            }
+            extra_padding += node.style.padding.horizontal();
+        }
+        (self.available_size.width - extra_padding).max(1.0)
     }
 
-    fn current_content_height(&self) -> f32 {
+    pub(crate) fn current_content_height(&self) -> f32 {
         let parent = self.parent_stack.last().and_then(|id| self.nodes.get(id));
         let height = parent
             .and_then(|node| node.style.height)
@@ -6861,6 +10188,12 @@ impl Context {
 
     fn key_pressed(&self, key: Key) -> bool {
         !self.widgets_disabled && self.input.keys.contains(&key)
+    }
+
+    /// Whether a focused widget draws its focus ring: MyGo shows one only
+    /// while the keyboard moved the focus (`ui/input.go` FocusVisible).
+    fn shows_focus_ring(&self, focused: bool) -> bool {
+        focused && self.focus_visible
     }
 
     /// Whether a widget on `layer` may observe pointer input this frame.
@@ -7008,25 +10341,19 @@ impl Context {
         let layer = self.allocate_overlay_layer();
         let previous_layer = self.current_layer;
         self.current_layer = layer;
-        let width = anchor
-            .width
-            .max(220.0 + theme.spacing.sm * 2.0)
-            .min(self.available_size.width.max(220.0));
-        let x = anchor
-            .x
-            .clamp(0.0, (self.available_size.width - width).max(0.0));
+        // MyGo's `stylePanel`: Space(1) of padding inside a one-pixel
+        // border, which takes layout space there and does not here
+        // (`ui/widgets.go`). The panel is as wide as its content asks and
+        // no narrower than its trigger, as `MinWidth(anchor.Bounds().W)`
+        // lets it grow.
+        let inset = theme.spacing.base + 1.0;
         let gap = theme.spacing.xs;
-        let mut y = anchor.y + anchor.height + gap;
         let saved_parents = std::mem::take(&mut self.parent_stack);
         self.explicit_id = Some(id.to_string());
         let node_id = self.new_node(Style {
-            width: Some(width),
             position: Position::Absolute,
-            left: Some(x),
-            top: Some(y),
             flex_direction: FlexDirection::Column,
-            padding: Edges::all(theme.spacing.sm),
-            gap: theme.spacing.xs,
+            padding: Edges::all(inset),
             ..Style::default()
         });
         self.push_parent(node_id);
@@ -7035,17 +10362,35 @@ impl Context {
         self.parent_stack = saved_parents;
         self.current_layer = previous_layer;
 
+        // `intrinsic_size` already counts the panel's own padding.
+        let content_width = self.estimated_content_width(node_id);
+        let width = content_width
+            .max(anchor.width)
+            .max(160.0)
+            .min(self.available_size.width.max(160.0));
+        // MyGo's `stylePanel` lifts the panel Space(1) off its trigger's
+        // bottom edge (`ui/widgets.go`), which is where the 4px gap comes
+        // from rather than the theme's own spacing.
+        let x = anchor
+            .x
+            .clamp(0.0, (self.available_size.width - width).max(0.0));
+        let mut y = anchor.y + anchor.height + theme.spacing.base;
         let max_height = (self.available_size.height - 8.0).max(36.0);
-        let height = (self.estimated_content_height(node_id, width) + theme.spacing.sm * 2.0)
-            .max(36.0)
-            .min(max_height);
+        let content_height = self.estimated_content_height(node_id, width) + inset;
+        let height = content_height.max(36.0).min(max_height);
         if y + height > self.available_size.height && anchor.y - height - gap >= 0.0 {
             y = anchor.y - height - gap;
         }
+        // A panel scrolls only when its content outgrows the window, as a
+        // select's list of options does; one that fits is left whole
+        // (`ui/widgets.go` stylePanel, `ui/base.go` popover).
+        let scrolls = content_height > max_height;
         let node = self.nodes.get_mut(&node_id).expect("overlay node exists");
+        node.style.width = Some(width);
+        node.style.left = Some(x);
         node.style.top = Some(y);
         node.style.height = Some(height);
-        node.scroll = Some(ScrollNode {
+        node.scroll = scrolls.then_some(ScrollNode {
             offset: 0.0,
             viewport_height: height,
         });
@@ -7060,29 +10405,18 @@ impl Context {
             }]
         } else {
             vec![
-                DrawCommand::RoundedRect {
-                    x: -2.0,
-                    y: 8.0,
-                    width: width + 4.0,
-                    height: height + 4.0,
-                    radius: Radius::all(12.0),
-                    color: Color::rgba(0, 0, 0, 18),
-                },
-                DrawCommand::RoundedRect {
+                // MyGo's `stylePanel` shadow: 6 down, 20 of blur, 18% black
+                // (`ui/widgets.go`).
+                DrawCommand::Shadow {
                     x: 0.0,
-                    y: 4.0,
+                    y: 0.0,
                     width,
                     height,
-                    radius: Radius::all(10.0),
-                    color: Color::rgba(0, 0, 0, 32),
-                },
-                DrawCommand::RoundedRect {
-                    x: 1.0,
-                    y: 2.0,
-                    width: (width - 2.0).max(1.0),
-                    height,
-                    radius: Radius::all(9.0),
-                    color: Color::rgba(0, 0, 0, 40),
+                    radius: 8.0,
+                    offset_x: 0.0,
+                    offset_y: 6.0,
+                    blur: 20.0,
+                    color: Color::rgba(0, 0, 0, 46),
                 },
                 DrawCommand::RoundedRect {
                     x: 0.0,
@@ -7092,13 +10426,15 @@ impl Context {
                     radius: Radius::all(8.0),
                     color: theme.border,
                 },
+                // MyGo's `stylePanel` fills the panel with the page's own
+                // background, not the raised surface (`ui/widgets.go`).
                 DrawCommand::RoundedRect {
                     x: 1.0,
                     y: 1.0,
                     width: (width - 2.0).max(1.0),
                     height: (height - 2.0).max(1.0),
                     radius: Radius::all(7.0),
-                    color: theme.surface,
+                    color: theme.background,
                 },
             ]
         };
@@ -7136,8 +10472,10 @@ impl Context {
     /// Creates an on/off switch controlled by click or focused Enter/Space.
     pub fn switch(&mut self, id: &str, checked: &mut bool) -> SwitchState {
         let theme = self.theme.clone();
-        let width = 40.0;
-        let height = 24.0;
+        // MyGo's switch: 36 by 20, a 16-pixel white knob inset 2
+        // (`ui/widgets.go` coreSwitch).
+        let width = 36.0;
+        let height = 20.0;
         let node_id = self.new_named_node(
             id,
             Style {
@@ -7160,17 +10498,14 @@ impl Context {
             *checked = !*checked;
         }
         let progress = self.animate(&format!("{id}:switch"), if *checked { 1.0 } else { 0.0 });
-        let track = if *checked {
-            theme.accent
+        let off = mix_color(theme.border, theme.foreground, 0.15);
+        let track = if progress > 0.0 {
+            mix_color(off, theme.accent, progress)
         } else {
-            mix_color(theme.surface, theme.border, 0.4)
+            off
         };
-        let knob = if *checked {
-            theme.on_accent
-        } else {
-            mix_color(theme.foreground, theme.muted, 0.3)
-        };
-        let center_x = 12.0 + progress * 16.0;
+        let knob_size = height - 4.0;
+        let knob_x = 2.0 + progress * (width - height);
         let mut commands = vec![
             DrawCommand::RoundedRect {
                 x: 0.0,
@@ -7180,14 +10515,26 @@ impl Context {
                 radius: Radius::all(height / 2.0),
                 color: track,
             },
+            // MyGo shadows the knob (0, 1, blur 3, 25% black).
+            DrawCommand::Shadow {
+                x: knob_x,
+                y: 2.0,
+                width: knob_size,
+                height: knob_size,
+                radius: knob_size / 2.0,
+                offset_x: 0.0,
+                offset_y: 1.0,
+                blur: 3.0,
+                color: Color::rgba(0, 0, 0, 64),
+            },
             DrawCommand::Circle {
-                x: center_x,
+                x: knob_x + knob_size / 2.0,
                 y: height / 2.0,
-                radius: 10.0,
-                color: knob,
+                radius: knob_size / 2.0,
+                color: Color::rgb(255, 255, 255),
             },
         ];
-        if focused {
+        if self.shows_focus_ring(focused) {
             commands.extend(focus_ring(0.0, 0.0, width, height, theme.accent));
         }
         self.register_access_node(
@@ -7303,6 +10650,9 @@ impl Context {
                 y: (row_height - measured_text_height(font_size)) / 2.0,
                 text: option.to_string(),
                 font_size,
+                italic: false,
+                mono: false,
+                family: None,
                 weight: 400,
                 color: text_color,
                 max_width: Some((width - 24.0).max(1.0)),
@@ -7352,7 +10702,7 @@ impl Context {
             }
         }
         let mut commands = Vec::new();
-        if focused {
+        if self.shows_focus_ring(focused) {
             commands.extend(focus_ring(0.0, 0.0, width, height, theme.accent));
         }
         self.register_access_node(node_id, Role::RadioGroup, id, None, focused);
@@ -7370,11 +10720,38 @@ impl Context {
 
     /// Creates a drop-down select. The list is an overlay above the view.
     pub fn select(&mut self, id: &str, selected: &mut usize, options: &[&str]) -> SelectState {
+        self.select_impl(id, selected, options, None)
+    }
+
+    /// Creates a select as wide as `width`, as MyGo's `Width` makes one
+    /// fill a field's column (`ui/widgets.go` coreSelect).
+    pub fn select_sized(
+        &mut self,
+        id: &str,
+        selected: &mut usize,
+        options: &[&str],
+        width: f32,
+    ) -> SelectState {
+        self.select_impl(id, selected, options, Some(width))
+    }
+
+    fn select_impl(
+        &mut self,
+        id: &str,
+        selected: &mut usize,
+        options: &[&str],
+        fixed_width: Option<f32>,
+    ) -> SelectState {
         let theme = self.theme.clone();
         let font_size = theme.font_sizes.body;
-        let width = self.current_content_width();
-        let padding_x = theme.spacing.sm;
-        let padding_y = theme.spacing.xs;
+        // MyGo's select is a button 140 wide at least, its label left and
+        // its chevron right (`ui/widgets.go` coreSelect).
+        let padding_x = 15.0;
+        let padding_y = 7.0;
+        let label_width =
+            measure_text_width(options.get(*selected).copied().unwrap_or(""), font_size);
+        let width = fixed_width
+            .unwrap_or((padding_x * 2.0 + label_width + 6.0 + 10.0).max(140.0));
         let height = measured_text_height(font_size) + padding_y * 2.0;
         if !options.is_empty() {
             *selected = (*selected).min(options.len() - 1);
@@ -7438,44 +10815,53 @@ impl Context {
             }
         }
         let selected_label = options.get(*selected).copied().unwrap_or("");
+        let face = if pressed {
+            theme.surface_pressed
+        } else if hovered {
+            theme.surface_hover
+        } else {
+            theme.surface
+        };
+        if let Some(node) = self.nodes.get_mut(&node_id) {
+            node.fill = Some((face, Radius::all(6.0)));
+            node.stroke = Some((theme.border, Radius::all(6.0)));
+        }
         let mut commands = vec![
-            DrawCommand::RoundedRect {
-                x: 0.0,
-                y: 0.0,
-                width,
-                height,
-                radius: Radius::all(6.0),
-                color: theme.surface,
-            },
             DrawCommand::Text {
                 x: padding_x,
-                y: padding_y,
+                y: (height - measured_text_height(font_size)) / 2.0,
                 text: selected_label.to_string(),
                 font_size,
+                italic: false,
+                mono: false,
+                family: None,
                 weight: 400,
                 color: theme.foreground,
-                max_width: Some((width - padding_x * 2.0 - 12.0).max(1.0)),
+                max_width: Some((width - padding_x * 2.0 - 16.0).max(1.0)),
                 alignment: TextAlignment::Start,
             },
         ];
-        let arrow_y = height / 2.0;
-        commands.push(DrawCommand::Line {
-            x1: width - padding_x - 8.0,
-            y1: arrow_y - 2.0,
-            x2: width - padding_x - 3.0,
-            y2: arrow_y + 3.0,
-            width: 1.5,
-            color: if open { theme.accent } else { theme.muted },
+        let chevron_x = width - padding_x - 10.0;
+        let chevron_y = (height - 10.0) / 2.0;
+        commands.push(DrawCommand::SvgPath {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+            path: format!(
+                "M{:.2} {:.2}L{:.2} {:.2}L{:.2} {:.2}",
+                chevron_x + 1.0,
+                chevron_y + 3.0,
+                chevron_x + 5.0,
+                chevron_y + 7.0,
+                chevron_x + 9.0,
+                chevron_y + 3.0
+            ),
+            fill: None,
+            stroke: Some(theme.muted),
+            stroke_width: 1.5,
         });
-        commands.push(DrawCommand::Line {
-            x1: width - padding_x - 3.0,
-            y1: arrow_y + 3.0,
-            x2: width - padding_x + 2.0,
-            y2: arrow_y - 2.0,
-            width: 1.5,
-            color: if open { theme.accent } else { theme.muted },
-        });
-        if focused || open {
+        if open || self.shows_focus_ring(focused) {
             commands.extend(focus_ring(
                 0.0,
                 0.0,
@@ -7495,6 +10881,14 @@ impl Context {
             .get_mut(&node_id)
             .expect("select node exists")
             .commands = commands;
+        // The label is the select's first line of text, so a form's row
+        // lines the field's label up on its baseline (`ui/form.go` anchor).
+        let select_ascent = host_text_ascent(font_size, false, false, false)
+            .or_else(|| default_font().map(|font| font.ascent(font_size)))
+            .unwrap_or(font_size * 0.93);
+        if let Some(node) = self.nodes.get_mut(&node_id) {
+            node.first_baseline = Some((height - measured_text_height(font_size)) / 2.0 + select_ascent);
+        }
 
         if open {
             if let Some(anchor) = bounds {
@@ -7578,6 +10972,9 @@ impl Context {
                 y: theme.spacing.xs,
                 text: label.to_string(),
                 font_size,
+                italic: false,
+                mono: false,
+                family: None,
                 weight: if selected { 600 } else { 400 },
                 color: if selected {
                     theme.accent
@@ -7631,13 +11028,13 @@ impl Context {
         } else {
             *selected = 0;
         }
-        let height = measured_text_height(font_size) + theme.spacing.sm * 2.0;
+        let height = measured_text_height(font_size) + 16.0;
         let node_id = self.new_named_node(
             id,
             Style {
                 width: Some(width),
                 height: Some(height),
-                gap: theme.spacing.xs,
+                gap: 4.0,
                 ..Style::default()
             },
         );
@@ -7648,7 +11045,18 @@ impl Context {
         let mut clicked_index = None;
         for (index, label) in labels.iter().enumerate() {
             let key = format!("{id}:tab:{index}");
-            let tab_width = measure_text_width(label, font_size) + theme.spacing.md * 2.0;
+            let selected_tab = index == *selected;
+            // MyGo measures the chosen tab in the weight it shows it in,
+            // `FontWeight(600)` (`ui/tabs.go` coreTabs).
+            let label_width = host_text_width_weighted(
+                label,
+                font_size,
+                false,
+                false,
+                if selected_tab { 600 } else { 400 },
+            )
+            .unwrap_or_else(|| measure_text_width(label, font_size));
+            let tab_width = label_width + 24.0;
             let node = self.new_named_node(
                 &key,
                 Style {
@@ -7669,30 +11077,34 @@ impl Context {
                 clicked_index = Some(index);
                 self.focused_id = Some(id.to_string());
             }
-            let selected_tab = index == *selected;
             let color = if selected_tab {
-                theme.accent
+                theme.foreground
             } else if tab_hovered {
-                mix_color(theme.muted, theme.foreground, 0.5)
+                theme.foreground
             } else {
                 theme.muted
             };
             let mut commands = vec![DrawCommand::Text {
-                x: theme.spacing.md,
-                y: theme.spacing.sm,
+                x: 12.0,
+                y: 8.0,
                 text: label.to_string(),
                 font_size,
+                italic: false,
+                mono: false,
+                family: None,
                 weight: if selected_tab { 600 } else { 400 },
                 color,
-                max_width: Some((tab_width - theme.spacing.md * 2.0).max(1.0)),
-                alignment: TextAlignment::Center,
+                max_width: Some((tab_width - 24.0).max(1.0)),
+                alignment: TextAlignment::Start,
             }];
             if selected_tab {
-                commands.push(DrawCommand::Rect {
-                    x: 0.0,
-                    y: height - 3.0,
-                    width: tab_width,
-                    height: 3.0,
+                // MyGo draws the chosen tab's line inside the tab's padding.
+                commands.push(DrawCommand::RoundedRect {
+                    x: 6.0,
+                    y: height - 2.0,
+                    width: tab_width - 12.0,
+                    height: 2.0,
+                    radius: Radius::all(1.0),
                     color: theme.accent,
                 });
             }
@@ -7734,7 +11146,7 @@ impl Context {
             }
         }
         let mut commands = Vec::new();
-        if focused {
+        if self.shows_focus_ring(focused) {
             commands.extend(focus_ring(0.0, 0.0, width, height, theme.accent));
         }
         self.register_access_node(node_id, Role::TabList, id, None, focused);
@@ -7754,7 +11166,10 @@ impl Context {
     pub fn progress(&mut self, id: &str, value: f32, max: f32) -> ProgressState {
         let theme = self.theme.clone();
         let width = self.current_content_width();
-        let height = 5.0;
+        // MyGo's progress bar is `Height(Space(1.5))` with `Space(0.75)`
+        // corners (`ui/widgets.go` coreProgress).
+        let height = theme.spacing.base * 1.5;
+        let radius = theme.spacing.base * 0.75;
         let max = if max.is_finite() && max > 0.0 {
             max
         } else {
@@ -7779,7 +11194,7 @@ impl Context {
             y: 0.0,
             width,
             height,
-            radius: Radius::all(2.5),
+            radius: Radius::all(radius),
             color: theme.border,
         }];
         if fraction > 0.0 {
@@ -7788,7 +11203,7 @@ impl Context {
                 y: 0.0,
                 width: (width * fraction).max(2.0),
                 height,
-                radius: Radius::all(2.5),
+                radius: Radius::all(radius),
                 color: theme.accent,
             });
         }
@@ -7814,15 +11229,19 @@ impl Context {
     pub fn progress_indeterminate(&mut self, id: &str) -> ProgressState {
         let theme = self.theme.clone();
         let width = self.current_content_width();
-        let height = 5.0;
-        let phase = if self.reduce_motion {
-            0.0
-        } else {
-            (self.frame_serial as f32 * 0.02) % 1.0
-        };
+        let height = theme.spacing.base * 1.5;
+        let radius = theme.spacing.base * 0.75;
         if !self.reduce_motion {
             self.request_animation_frame();
         }
+        // MyGo moves a segment 0.3 of the bar wide from a full width left of
+        // it to a full width past it, on a 1400ms period, clipped to the bar
+        // so it slides in and out (`ui/widgets.go` coreProgress).
+        let phase = if self.reduce_motion {
+            0.0
+        } else {
+            (self.frame_time.elapsed().as_secs_f32() * 1000.0 % 1400.0) / 1400.0
+        };
         let node_id = self.new_named_node(
             id,
             Style {
@@ -7831,8 +11250,8 @@ impl Context {
                 ..Style::default()
             },
         );
-        let segment = (width * 0.3).max(8.0);
-        let x = phase * (width - segment).max(0.0);
+        let segment = width * 0.3;
+        let x = -segment + (width + segment) * phase;
         self.register_access_node(
             node_id,
             Role::ProgressBar,
@@ -7849,17 +11268,21 @@ impl Context {
                 y: 0.0,
                 width,
                 height,
-                radius: Radius::all(4.0),
+                radius: Radius::all(radius),
                 color: theme.border,
+            },
+            DrawCommand::ScissorPush {
+                rect: Rect::new(0.0, 0.0, width, height),
             },
             DrawCommand::RoundedRect {
                 x,
                 y: 0.0,
                 width: segment,
                 height,
-                radius: Radius::all(2.5),
+                radius: Radius::all(radius),
                 color: theme.accent,
             },
+            DrawCommand::ScissorPop,
         ];
         ProgressState {
             value: 0.0,
@@ -7871,7 +11294,12 @@ impl Context {
     /// Creates a spinner that requests animation frames while visible.
     pub fn spinner(&mut self, id: &str) -> SpinnerState {
         let theme = self.theme.clone();
-        let size = 18.0;
+        // MyGo's spinner is a box `FontSize * 1.25` square that strokes 12
+        // spokes a twelfth of a turn apart, each fading 0.85 of the way out
+        // behind the one leading (`ui/indicators.go` coreSpinner). Its color
+        // is the text color, so the spokes fade into the page, not to the
+        // accent.
+        let size = theme.font_sizes.body * 1.25;
         let node_id = self.new_named_node(
             id,
             Style {
@@ -7881,25 +11309,38 @@ impl Context {
             },
         );
         let spinner_active = !self.reduce_motion;
-        let angle = if spinner_active {
+        if spinner_active {
             self.request_animation_frame();
-            (self.frame_serial as f32) * 0.15
-        } else {
-            0.0
-        };
+        }
+        // A spoke a twelfth of a turn on every twelfth of 0.9s, as MyGo's
+        // frame clock shows them.
+        const SPOKES: usize = 12;
+        let turn = 900.0_f32;
+        let ms = self.frame_time.elapsed().as_secs_f32() * 1000.0 % turn;
+        let lead = (ms * SPOKES as f32 / turn).floor() as usize % SPOKES;
+        let inner = size * 0.22;
+        let outer = size * 0.46;
+        let stroke = size * 0.09;
+        let center = size / 2.0;
         let mut commands = Vec::new();
-        for index in 0..8 {
-            let spoke = angle + index as f32 * std::f32::consts::TAU / 8.0;
-            let inner = 2.0;
-            let outer = 8.0;
-            let alpha = 0.2 + 0.8 * (index as f32 / 7.0);
+        for index in 0..SPOKES {
+            // Spoke 0 points up, and each next one a twelfth clockwise.
+            let angle = -std::f32::consts::FRAC_PI_2
+                + index as f32 * std::f32::consts::TAU / SPOKES as f32;
+            let age = (lead + SPOKES - index) % SPOKES;
+            let alpha = 1.0 - age as f32 / SPOKES as f32 * 0.85;
             commands.push(DrawCommand::Line {
-                x1: size / 2.0 + spoke.cos() * inner,
-                y1: size / 2.0 + spoke.sin() * inner,
-                x2: size / 2.0 + spoke.cos() * outer,
-                y2: size / 2.0 + spoke.sin() * outer,
-                width: 2.0,
-                color: mix_color(theme.muted, theme.accent, alpha),
+                x1: center + angle.cos() * inner,
+                y1: center + angle.sin() * inner,
+                x2: center + angle.cos() * outer,
+                y2: center + angle.sin() * outer,
+                width: stroke,
+                color: Color::rgba(
+                    theme.muted.r,
+                    theme.muted.g,
+                    theme.muted.b,
+                    (alpha * 255.0).round().clamp(0.0, 255.0) as u8,
+                ),
             });
         }
         self.register_access_node(
@@ -7914,19 +11355,25 @@ impl Context {
             .expect("spinner node exists")
             .commands = commands;
         SpinnerState {
-            angle,
+            // The turn the lead spoke has made, in radians.
+            angle: (lead as f32) * std::f32::consts::TAU / SPOKES as f32,
             spinning: spinner_active,
         }
     }
 
     /// Creates a short text pill.
     pub fn badge(&mut self, label: &str) -> BadgeState {
+        // MyGo's Badge (`ui/sidebar.go` coreBadge): a pill padded
+        // Space(1.5) at the sides with no vertical padding, radius 999,
+        // filled with the text color at 10% over what is behind it, its
+        // label FontSize - 2 on a single line.
         let theme = self.theme.clone();
-        let font_size = theme.font_sizes.small;
+        let font_size = theme.font_sizes.body - 2.0;
         let text_width = measure_text_width(label, font_size);
         let text_height = measured_text_height(font_size);
-        let width = text_width + theme.spacing.sm * 2.0;
-        let height = (text_height + theme.spacing.xs * 2.0).max(18.0);
+        let padding = theme.spacing.base * 1.5;
+        let width = text_width + padding * 2.0;
+        let height = text_height;
         let node_id = self.new_node(Style {
             width: Some(width),
             height: Some(height),
@@ -7942,16 +11389,19 @@ impl Context {
                 y: 0.0,
                 width,
                 height,
-                radius: Radius::all(height / 2.0),
-                color: theme.accent,
+                radius: Radius::all(999.0),
+                color: Color::rgba(theme.foreground.r, theme.foreground.g, theme.foreground.b, 26),
             },
             DrawCommand::Text {
-                x: theme.spacing.sm,
-                y: (height - text_height) / 2.0,
+                x: padding,
+                y: 0.0,
                 text: label.to_string(),
                 font_size,
-                weight: 600,
-                color: theme.on_accent,
+                italic: false,
+                mono: false,
+                family: None,
+                weight: 400,
+                color: theme.foreground,
                 max_width: Some(text_width),
                 alignment: TextAlignment::Center,
             },
@@ -7967,10 +11417,28 @@ impl Context {
         title: &str,
         content: impl FnOnce(&mut Context),
     ) -> CollapsibleState {
+        // MyGo's Collapsible (`ui/collapsible.go` coreCollapsible): a column
+        // holding the trigger, a row padded Space(1) = 4 down, Space(2) = 8
+        // after and Space(0.5) = 2 before, gap Space(1) = 4, radius 6, whose
+        // hovered fill is the hovered surface. A Space(4) = 16 arrow stroked
+        // 1.5 in the muted color points right when closed and turns 90
+        // degrees as it opens, then the label. The panel below is padded
+        // Space(1) = 4 down, Space(5.5) = 22 before, gap Space(2) = 8.
         let theme = self.theme.clone();
         let font_size = theme.font_sizes.body;
         let width = self.current_content_width();
-        let header_height = measured_text_height(font_size).max(20.0) + theme.spacing.xs * 2.0;
+        let space = theme.spacing.base;
+        let arrow = space * 4.0;
+        let pad_v = space;
+        let pad_start = space * 0.5;
+        let pad_end = space * 2.0;
+        let gap = space;
+        let text_height = measured_text_height(font_size);
+        // The trigger is as high as its tallest child, the label's line box,
+        // plus Space(1) = 4 of padding either side.
+        let trigger_height = arrow.max(text_height) + pad_v * 2.0;
+        let label_width = measure_text_width(title, font_size);
+        let trigger_width = (pad_start + arrow + gap + label_width + pad_end).min(width);
         let root = self.new_named_node(
             id,
             Style {
@@ -7984,8 +11452,8 @@ impl Context {
         let header = self.new_named_node(
             &header_key,
             Style {
-                width: Some(width),
-                height: Some(header_height),
+                width: Some(trigger_width),
+                height: Some(trigger_height),
                 ..Style::default()
             },
         );
@@ -8002,54 +11470,199 @@ impl Context {
         if toggled {
             *open = !*open;
         }
-        let mut commands = vec![DrawCommand::Text {
-            x: 18.0,
-            y: theme.spacing.xs,
-            text: title.to_string(),
-            font_size,
-            weight: 600,
-            color: theme.foreground,
-            max_width: Some((width - 18.0).max(1.0)),
-            alignment: TextAlignment::Start,
-        }];
-        let center = header_height / 2.0;
-        if *open {
-            commands.push(DrawCommand::Line {
-                x1: 6.0,
-                y1: center - 3.0,
-                x2: 10.0,
-                y2: center + 1.0,
-                width: 2.0,
-                color: theme.muted,
-            });
-            commands.push(DrawCommand::Line {
-                x1: 10.0,
-                y1: center + 1.0,
-                x2: 14.0,
-                y2: center - 3.0,
-                width: 2.0,
-                color: theme.muted,
-            });
-        } else {
-            commands.push(DrawCommand::Line {
-                x1: 7.0,
-                y1: center - 4.0,
-                x2: 11.0,
-                y2: center,
-                width: 2.0,
-                color: theme.muted,
-            });
-            commands.push(DrawCommand::Line {
-                x1: 11.0,
-                y1: center,
-                x2: 7.0,
-                y2: center + 4.0,
-                width: 2.0,
-                color: theme.muted,
+        let mut commands = Vec::new();
+        if hovered {
+            commands.push(DrawCommand::RoundedRect {
+                x: 0.0,
+                y: 0.0,
+                width: trigger_width,
+                height: trigger_height,
+                radius: Radius::all(6.0),
+                color: theme.surface_hover,
             });
         }
-        if focused {
-            commands.extend(focus_ring(0.0, 0.0, width, header_height, theme.accent));
+        // The arrow is a chevron pointing right, turned clockwise as the
+        // disclosure opens (`disclosurePath`): its arms run from
+        // (-d, -2d) through (d, 0) to (-d, 2d) around its box's center.
+        let cx = pad_start + arrow / 2.0;
+        let cy = trigger_height / 2.0;
+        let d = arrow / 8.0;
+        let degrees = if *open { 90.0_f32 } else { 0.0 };
+        let (sin, cos) = (degrees * std::f32::consts::PI / 180.0).sin_cos();
+        let at = |x: f32, y: f32| (cx + x * cos - y * sin, cy + x * sin + y * cos);
+        let (ax, ay) = at(-d, -2.0 * d);
+        let (bx, by) = at(d, 0.0);
+        let (ex, ey) = at(-d, 2.0 * d);
+        commands.push(DrawCommand::SvgPath {
+            x: 0.0,
+            y: 0.0,
+            width: trigger_width,
+            height: trigger_height,
+            path: format!("M{ax} {ay}L{bx} {by}L{ex} {ey}"),
+            fill: None,
+            stroke: Some(theme.muted),
+            stroke_width: 1.5,
+        });
+        commands.push(DrawCommand::Text {
+            x: pad_start + arrow + gap,
+            y: (trigger_height - text_height) / 2.0,
+            text: title.to_string(),
+            font_size,
+            italic: false,
+            mono: false,
+            family: None,
+            weight: 400,
+            color: theme.foreground,
+            max_width: Some(label_width.max(1.0)),
+            alignment: TextAlignment::Start,
+        });
+        if self.shows_focus_ring(focused) {
+            commands.extend(focus_ring(0.0, 0.0, trigger_width, trigger_height, theme.accent));
+        }
+        self.register_access_node(
+            header,
+            Role::Disclosure,
+            title,
+            Some(if *open { "expanded" } else { "collapsed" }),
+            focused,
+        );
+        self.nodes
+            .get_mut(&header)
+            .expect("collapsible header exists")
+            .commands = commands;
+        if *open {
+            // `Padding(v, h)` pads both edges of the axis, so the panel is
+            // padded Space(1) = 4 above and below.
+            column(self)
+                .padding_each(pad_v, 0.0, pad_v, space * 5.5)
+                .gap(space * 2.0)
+                .children(content);
+        }
+        self.pop_parent();
+        self.register_access_node(root, Role::Group, id, None, false);
+        CollapsibleState {
+            changed: toggled,
+            open: *open,
+            focused,
+            hovered,
+        }
+    }
+
+    /// Creates a disclosure whose trigger the caller draws, as MyGo's
+    /// `CollapsibleBase`: a chevron and the label, the chevron turning as
+    /// the panel opens. `content` builds the panel.
+    pub fn collapsible_custom(
+        &mut self,
+        id: &str,
+        open: &mut bool,
+        title: &str,
+        content: impl FnOnce(&mut Context),
+    ) -> CollapsibleState {
+        // MyGo's `CollapsibleBase` with the demo's own trigger
+        // (`ui/collapsible.go`, `website/docs-demo/containers.go`): a row
+        // gap Space(1.5) = 6 holding a chevron icon that turns 90 degrees as
+        // the panel opens, then the label; the panel is padded
+        // Space(1) = 4 down and Space(5.5) = 22 before, with a gap of
+        // Space(2) = 8.
+        let theme = self.theme.clone();
+        let font_size = theme.font_sizes.body;
+        let width = self.current_content_width();
+        let space = theme.spacing.base;
+        let gap = space * 1.5;
+        // MyGo's chevron is an Icon at the theme's font size, an em
+        // (`website/docs-demo/containers.go` containersChevron).
+        let arrow = font_size;
+        let text_height = measured_text_height(font_size);
+        let label_width = measure_text_width(title, font_size);
+        let trigger_width = (arrow + gap + label_width).min(width);
+        let trigger_height = arrow.max(text_height);
+        let root = self.new_named_node(
+            id,
+            Style {
+                width: Some(width),
+                flex_direction: FlexDirection::Column,
+                ..Style::default()
+            },
+        );
+        self.push_parent(root);
+        let header_key = format!("{id}:header");
+        let header = self.new_named_node(
+            &header_key,
+            Style {
+                width: Some(trigger_width),
+                height: Some(trigger_height),
+                ..Style::default()
+            },
+        );
+        self.register_interaction(header, header_key.clone());
+        self.register_focusable(header, header_key.clone());
+        let hovered = self.pointer_in_previous(&header_key);
+        if hovered && self.input.pointer_down {
+            self.focused_id = Some(header_key.clone());
+        }
+        let focused = self.focused_id.as_deref() == Some(header_key.as_str());
+        let toggled = self.clicked_in_previous(&header_key)
+            || (focused && (self.key_pressed(Key::Enter) || self.key_pressed(Key::Space)));
+        if toggled {
+            *open = !*open;
+        }
+        // The chevron is MyGo's own path, `m9 18 6-6-6-6` in a 24-unit
+        // view box, scaled into the icon's em and turned by 90 degrees as
+        // the panel opens (`Icon.Rotate(90 * p.Progress())`).
+        let degrees = if *open { 90.0_f32 } else { 0.0 };
+        let em_scale = arrow / 24.0;
+        // A rotation about the view box's middle: the affine applies the
+        // rotation before its translation, so the translation is the
+        // middle less where the rotation puts it.
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        let middle = 12.0_f32;
+        let translation = Point::new(
+            middle - (cos * middle - sin * middle),
+            middle - (sin * middle + cos * middle),
+        );
+        let mut commands = vec![
+            DrawCommand::TransformPush {
+                transform: Transform {
+                    translation: Point::new(0.0, 0.0),
+                    scale: Point::new(em_scale, em_scale),
+                    rotation: 0.0,
+                },
+            },
+            DrawCommand::TransformPush {
+                transform: Transform {
+                    translation,
+                    scale: Point::new(1.0, 1.0),
+                    rotation: degrees.to_radians(),
+                },
+            },
+            DrawCommand::SvgPath {
+                x: 0.0,
+                y: 0.0,
+                width: 24.0,
+                height: 24.0,
+                path: "M9 18 15 12 9 6".to_string(),
+                fill: None,
+                stroke: Some(theme.foreground),
+                stroke_width: 2.0,
+            },
+            DrawCommand::TransformPop,
+            DrawCommand::TransformPop,
+        ];
+        commands.push(DrawCommand::Text {
+            x: arrow + gap,
+            y: (trigger_height - text_height) / 2.0,
+            text: title.to_string(),
+            font_size,
+            italic: false,
+            mono: false,
+            family: None,
+            weight: 400,
+            color: theme.foreground,
+            max_width: Some(label_width.max(1.0)),
+            alignment: TextAlignment::Start,
+        });
+        if self.shows_focus_ring(focused) {
+            commands.extend(focus_ring(0.0, 0.0, trigger_width, trigger_height, theme.accent));
         }
         self.register_access_node(
             header,
@@ -8064,8 +11677,8 @@ impl Context {
             .commands = commands;
         if *open {
             column(self)
-                .padding(theme.spacing.sm)
-                .gap(theme.spacing.xs)
+                .padding_each(space, 0.0, 0.0, space * 5.5)
+                .gap(space * 2.0)
                 .children(content);
         }
         self.pop_parent();
@@ -8079,6 +11692,97 @@ impl Context {
     }
 
     /// Creates a button that owns an anchored menu.
+    /// Draws MyGo's menu button trigger: a surface button with the label
+    /// left and the chevron that says it opens a menu right.
+    fn chevron_button(&mut self, id: &str, label: &str) -> ButtonState {
+        let theme = self.theme.clone();
+        let font_size = theme.font_sizes.body;
+        let label_width = measure_text_width(label, font_size);
+        let padding_x = 15.0;
+        let width = padding_x * 2.0 + label_width + 6.0 + 10.0;
+        let height = measured_text_height(font_size) + 14.0;
+        let node_id = self.new_named_node(
+            id,
+            Style {
+                width: Some(width),
+                height: Some(height),
+                ..Style::default()
+            },
+        );
+        self.register_interaction(node_id, id.to_string());
+        self.register_focusable(node_id, id.to_string());
+        let hovered = self.pointer_in_previous(id);
+        let pressed = hovered && self.input.pointer_down;
+        if pressed {
+            self.focused_id = Some(id.to_string());
+        }
+        let focused = self.focused_id.as_deref() == Some(id);
+        let clicked = self.clicked_in_previous(id)
+            || (focused && (self.key_pressed(Key::Enter) || self.key_pressed(Key::Space)));
+        let face = if pressed {
+            theme.surface_pressed
+        } else if hovered {
+            theme.surface_hover
+        } else {
+            theme.surface
+        };
+        if let Some(node) = self.nodes.get_mut(&node_id) {
+            node.fill = Some((face, Radius::all(6.0)));
+            node.stroke = Some((theme.border, Radius::all(6.0)));
+        }
+        let chevron_x = width - padding_x - 10.0;
+        let chevron_y = (height - 10.0) / 2.0;
+        let mut commands = vec![
+            DrawCommand::Text {
+                x: padding_x,
+                y: (height - measured_text_height(font_size)) / 2.0,
+                text: label.to_string(),
+                font_size,
+                italic: false,
+                mono: false,
+                family: None,
+                weight: 400,
+                color: theme.foreground,
+                max_width: Some(label_width.max(1.0)),
+                alignment: TextAlignment::Start,
+            },
+            DrawCommand::SvgPath {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+                path: format!(
+                    "M{:.2} {:.2}L{:.2} {:.2}L{:.2} {:.2}",
+                    chevron_x + 1.0,
+                    chevron_y + 3.0,
+                    chevron_x + 5.0,
+                    chevron_y + 7.0,
+                    chevron_x + 9.0,
+                    chevron_y + 3.0
+                ),
+                fill: None,
+                stroke: Some(theme.muted),
+                stroke_width: 1.5,
+            },
+        ];
+        if self.shows_focus_ring(focused) {
+            commands.extend(focus_ring(0.0, 0.0, width, height, theme.accent));
+        }
+        self.register_access_node(node_id, Role::Button, label, None, focused);
+        self.nodes
+            .get_mut(&node_id)
+            .expect("menu trigger exists")
+            .commands = commands;
+        ButtonState {
+            id: id.to_string(),
+            clicked,
+            pressed,
+            focused,
+            hovered,
+            bounds: self.previous_regions.get(id).map(|region| region.bounds),
+        }
+    }
+
     pub fn menu_button(
         &mut self,
         id: &str,
@@ -8086,7 +11790,7 @@ impl Context {
         state: &mut MenuState,
         items: &[&str],
     ) -> MenuButtonState {
-        let trigger = self.id(id).button(label);
+        let trigger = self.chevron_button(id, label);
         let menu_id = format!("{id}:menu");
         let was_open = state.open.open;
         if items.is_empty() {
@@ -8282,13 +11986,16 @@ impl Context {
                 y: theme.spacing.xs,
                 text: label.to_string(),
                 font_size,
+                italic: false,
+                mono: false,
+                family: None,
                 weight: if focused { 600 } else { 400 },
                 color: text_color,
                 max_width: Some((width - theme.spacing.sm * 2.0).max(1.0)),
                 alignment: TextAlignment::Start,
             },
         ];
-        if focused {
+        if self.shows_focus_ring(focused) {
             commands.extend(focus_ring(0.0, 0.0, width, height, theme.accent));
         }
         self.register_access_node(
@@ -8303,6 +12010,92 @@ impl Context {
             .expect("menu item node exists")
             .commands = commands;
         clicked
+    }
+
+    /// Creates an icon-only button that opens a menu.
+    pub fn menu_icon_button(
+        &mut self,
+        id: &str,
+        icon_name: &str,
+        state: &mut MenuState,
+        items: &[&str],
+    ) -> MenuButtonState {
+        let trigger = self.id(id).icon_button(icon_name);
+        self.menu_with_trigger(id, trigger, state, items)
+    }
+    fn menu_with_trigger(
+        &mut self,
+        id: &str,
+        trigger: ButtonState,
+        state: &mut MenuState,
+        items: &[&str],
+    ) -> MenuButtonState {
+        let menu_id = format!("{id}:menu");
+        let was_open = state.open.open;
+        if items.is_empty() {
+            if was_open {
+                self.close_overlay_runtime(&menu_id);
+            }
+            state.open.open = false;
+            return MenuButtonState {
+                open: false,
+                trigger_clicked: trigger.clicked,
+                selected: None,
+                closed: was_open,
+                focused: trigger.focused,
+                hovered: trigger.hovered,
+            };
+        }
+        let mut open = was_open;
+        if trigger.clicked {
+            open = !open;
+            state.highlight = 0;
+        }
+        state.open.open = open;
+        let mut selected = None;
+        let mut closed = false;
+        if open {
+            let anchor = trigger
+                .bounds
+                .unwrap_or_else(|| Rect::new(0.0, 0.0, 220.0, 0.0));
+            let (still_open, did_close, chosen) = self.anchored_menu(
+                &menu_id,
+                &mut state.open,
+                &mut state.highlight,
+                anchor,
+                items,
+                was_open,
+            );
+            selected = chosen;
+            closed = did_close;
+            open = still_open;
+        } else if was_open {
+            self.close_overlay_runtime(&menu_id);
+            closed = true;
+        }
+        MenuButtonState {
+            open,
+            trigger_clicked: trigger.clicked,
+            selected,
+            closed,
+            focused: trigger.focused,
+            hovered: trigger.hovered,
+        }
+    }
+    /// Opens a context menu over the previous-frame bounds of an
+    /// interactive node registered under `id`.
+    pub fn node_context_menu(
+        &mut self,
+        id: &str,
+        state: &mut ContextMenuState,
+        items: &[&str],
+    ) -> ContextMenuResponse {
+        let area = self
+            .previous_regions
+            .get(id)
+            .map(|region| region.bounds)
+            .unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
+        self.context_menu(id, state, area, items)
     }
 
     /// Creates a non-interactive tooltip after a hover or focus delay.
@@ -8408,6 +12201,9 @@ impl Context {
                     y: padding_y,
                     text: text.to_string(),
                     font_size,
+                    italic: false,
+                    mono: false,
+                    family: None,
                     weight: 400,
                     color: theme.foreground,
                     max_width: Some(text_width.max(1.0)),
@@ -8492,6 +12288,10 @@ impl Context {
                 theme.foreground,
                 Some(text_width),
                 TextAlignment::Start,
+                0.0,
+                false,
+                false,
+                None,
             );
             self.register_access_node(text_id, Role::Label, &toast.message, None, false);
             let mut dismissal = None;
@@ -8944,7 +12744,7 @@ impl Context {
                         },
                     });
                 }
-                if focused {
+                if self.shows_focus_ring(focused) {
                     commands.extend(focus_ring(0.0, 0.0, 20.0, row_height, theme.accent));
                 }
                 self.register_access_node(
@@ -9002,6 +12802,9 @@ impl Context {
                 y: theme.spacing.xs,
                 text: node.label.to_string(),
                 font_size: theme.font_sizes.body,
+                italic: false,
+                mono: false,
+                family: None,
                 weight: if selected { 600 } else { 400 },
                 color: if selected {
                     theme.on_accent
@@ -9013,7 +12816,7 @@ impl Context {
                 max_width: Some((row_width - theme.spacing.sm * 2.0).max(1.0)),
                 alignment: TextAlignment::Start,
             });
-            if focused {
+            if self.shows_focus_ring(focused) {
                 commands.extend(focus_ring(0.0, 0.0, row_width, row_height, theme.accent));
             }
             self.register_access_node(
@@ -9170,6 +12973,9 @@ impl Context {
                 y: theme.spacing.xs,
                 text: column.title.to_string(),
                 font_size: theme.font_sizes.body,
+                italic: false,
+                mono: false,
+                family: None,
                 weight: 600,
                 color: if sorted {
                     theme.accent
@@ -9189,13 +12995,16 @@ impl Context {
                     y: theme.spacing.xs,
                     text: glyph.to_string(),
                     font_size: theme.font_sizes.small,
+                    italic: false,
+                    mono: false,
+                    family: None,
                     weight: 400,
                     color: theme.accent,
                     max_width: Some(10.0),
                     alignment: TextAlignment::Start,
                 });
             }
-            if focused {
+            if self.shows_focus_ring(focused) {
                 commands.extend(focus_ring(0.0, 0.0, width, header_height, theme.accent));
             }
             self.register_access_node(
@@ -9285,6 +13094,10 @@ impl Context {
                     },
                     Some((width - theme.spacing.sm * 2.0 - icon_shift).max(1.0)),
                     TextAlignment::Start,
+                    0.0,
+                    false,
+                    false,
+                    None,
                 );
                 if let Some(icon_name) = icon_name {
                     let icon_color = if selected { theme.on_accent } else { theme.muted };
@@ -9318,7 +13131,7 @@ impl Context {
                 
             }
             self.pop_parent();
-            if focused {
+            if self.shows_focus_ring(focused) {
                 commands.extend(focus_ring(0.0, 0.0, total_width, row_height, theme.accent));
             }
             self.nodes
@@ -9461,6 +13274,9 @@ impl Context {
                     y: theme.spacing.xs,
                     text: row.label.to_string(),
                     font_size: theme.font_sizes.body,
+                    italic: false,
+                    mono: false,
+                    family: None,
                     weight: if selected { 600 } else { 400 },
                     color: if selected {
                         theme.on_accent
@@ -9478,6 +13294,9 @@ impl Context {
                         y: theme.spacing.xs,
                         text: detail.to_string(),
                         font_size: theme.font_sizes.small,
+                        italic: false,
+                        mono: false,
+                        family: None,
                         weight: 400,
                         color: if selected { theme.on_accent } else { theme.muted },
                         max_width: Some(detail_width.max(1.0)),
@@ -9614,12 +13433,15 @@ impl Context {
                 y: theme.spacing.xs,
                 text: section.title.to_string(),
                 font_size,
+                italic: false,
+                mono: false,
+                family: None,
                 weight: if open { 600 } else { 400 },
                 color: theme.foreground,
                 max_width: Some((width - 32.0).max(1.0)),
                 alignment: TextAlignment::Start,
             });
-            if focused {
+            if self.shows_focus_ring(focused) {
                 commands.extend(focus_ring(0.0, 0.0, width, header_height, theme.accent));
             }
             self.register_access_node(
@@ -9649,19 +13471,221 @@ impl Context {
         }
     }
 
-    /// Creates a row of clickable breadcrumb links.
-    pub fn breadcrumbs(&mut self, id: &str, items: &[BreadcrumbItem<'_>]) -> BreadcrumbsResponse {
+    /// Starts MyGo's `Accordion`: a column of sections in one bordered,
+    /// clipped box, each built with [`Self::accordion_item`]
+    /// (`ui/collapsible.go` coreAccordion).
+    pub fn accordion_group(&mut self, id: &str, build: impl FnOnce(&mut Context)) {
         let theme = self.theme.clone();
         let width = self.current_content_width();
-        let font_size = theme.font_sizes.body;
-        let item_height = measured_text_height(font_size) + theme.spacing.xs * 2.0;
         let root = self.new_named_node(
             id,
             Style {
                 width: Some(width),
+                flex_direction: FlexDirection::Column,
+                ..Style::default()
+            },
+        );
+        // MyGo's border takes layout space and its radius clips the
+        // sections' own backgrounds to the box.
+        // MyGo's border takes layout space — `padX() = pad + border` — so
+        // the box around the sections is inset by the border it draws
+        // (`ui/layout.go`, `ui/collapsible.go` coreAccordion).
+        self.set_node_fill(root, Color::rgba(0, 0, 0, 0), 6.0);
+        self.set_node_border(root, theme.border, 6.0);
+        self.set_node_clip(root, true);
+        if let Some(node) = self.nodes.get_mut(&root) {
+            node.style.padding = Edges::all(1.0);
+        }
+        self.push_parent(root);
+        build(self);
+        self.pop_parent();
+    }
+
+    /// Adds one section to an [`Self::accordion_group`]: a header showing
+    /// `title` that a click, Enter or Space opens and closes, and below it
+    /// what `content` builds while it is open (`ui/collapsible.go`
+    /// coreAccordionItem).
+    pub fn accordion_item(
+        &mut self,
+        id: &str,
+        title: &str,
+        open: &mut bool,
+        content: impl FnOnce(&mut Context),
+    ) -> CollapsibleState {
+        let theme = self.theme.clone();
+        let width = self.current_content_width();
+        let font_size = theme.font_sizes.body;
+        let space = theme.spacing.base;
+        let item = self.new_named_node(
+            id,
+            Style {
+                width: Some(width),
+                flex_direction: FlexDirection::Column,
+                ..Style::default()
+            },
+        );
+        // Every section but the first draws its top border, as MyGo's
+        // `BorderWidth(1, 0, 0, 0)` does. The parent already holds this
+        // node, so a single child means this is the first.
+        let first = self
+            .parent_stack
+            .last()
+            .and_then(|parent| self.nodes.get(parent))
+            .is_none_or(|parent| parent.children.len() <= 1);
+        if !first {
+            self.set_node_top_border(item, theme.border);
+            // MyGo's border takes layout space, so the line pushes the
+            // section down by the pixel it occupies (`ui/layout.go`).
+            if let Some(node) = self.nodes.get_mut(&item) {
+                node.style.padding.top = 1.0;
+            }
+        }
+        self.push_parent(item);
+        let header_key = format!("{id}:header");
+        // MyGo's header is a row that its padding sizes: Space(2.5) above
+        // and below the title, Space(3) at the ends, and Space(2) between
+        // the title and the arrow (`ui/collapsible.go` coreAccordionItem).
+        let header = self.new_named_node(
+            &header_key,
+            Style {
+                width: Some(width),
                 flex_direction: FlexDirection::Row,
                 align_items: AlignItems::Center,
-                gap: theme.spacing.xs,
+                gap: space * 2.0,
+                padding: Edges::symmetric(space * 2.5, space * 3.0),
+                ..Style::default()
+            },
+        );
+        self.register_interaction(header, header_key.clone());
+        self.register_focusable(header, header_key.clone());
+        let hovered = self.pointer_in_previous(&header_key);
+        if hovered && self.input.pointer_down {
+            self.focused_id = Some(header_key.clone());
+        }
+        let focused = self.focused_id.as_deref() == Some(header_key.as_str());
+        let toggled = self.clicked_in_previous(&header_key)
+            || (focused && (self.key_pressed(Key::Enter) || self.key_pressed(Key::Space)));
+        if toggled {
+            *open = !*open;
+        }
+        if hovered {
+            self.set_node_fill(header, theme.surface_hover, 0.0);
+        }
+        self.register_access_node(
+            header,
+            Role::Disclosure,
+            title,
+            Some(if *open { "expanded" } else { "collapsed" }),
+            focused,
+        );
+        // The title grows and the arrow keeps its Space(4) box, as MyGo's
+        // header row does.
+        self.push_parent(header);
+        // MyGo's `coreText(c, title).Grow(1)`: the title takes the row
+        // left over, which puts the arrow at the header's far edge.
+        let title_width = (width - space * 6.0 - space * 4.0 - space * 2.0).max(1.0);
+        self.text(title)
+            .weight(500)
+            .color(theme.foreground)
+            .width(title_width)
+            .max_width(title_width);
+        let arrow_size = space * 4.0;
+        let arrow = self.new_named_node(
+            &format!("{id}:arrow"),
+            Style {
+                width: Some(arrow_size),
+                height: Some(arrow_size),
+                ..Style::default()
+            },
+        );
+        let (cx, cy, d) = (arrow_size / 2.0, arrow_size / 2.0, arrow_size / 8.0);
+        // MyGo draws the arrow from `90 + 180*progress`: pointing down
+        // while closed and up while open (`ui/collapsible.go`).
+        let angle: f32 = if *open { 270.0_f32.to_radians() } else { 90.0_f32.to_radians() };
+        let rotate = |x: f32, y: f32| {
+            let (sin, cos) = angle.sin_cos();
+            Point::new(cx + x * cos - y * sin, cy + x * sin + y * cos)
+        };
+        let start = rotate(-d, -2.0 * d);
+        let middle = rotate(d, 0.0);
+        let end = rotate(-d, 2.0 * d);
+        self.set_node_commands(
+            arrow,
+            vec![DrawCommand::SvgPath {
+                x: 0.0,
+                y: 0.0,
+                width: arrow_size,
+                height: arrow_size,
+                path: format!(
+                    "M{} {}L{} {}L{} {}",
+                    start.x, start.y, middle.x, middle.y, end.x, end.y
+                ),
+                fill: None,
+                stroke: Some(theme.muted),
+                stroke_width: 1.5,
+            }],
+        );
+        self.pop_parent();
+        if *open {
+            let panel = self.new_named_node(
+                &format!("{id}:panel"),
+                Style {
+                    width: Some(width),
+                    flex_direction: FlexDirection::Column,
+                    gap: space * 2.0,
+                    padding: Edges::new(0.0, space * 3.0, space * 3.0, space * 3.0),
+                    ..Style::default()
+                },
+            );
+            self.push_parent(panel);
+            content(self);
+            self.pop_parent();
+        }
+        self.pop_parent();
+        CollapsibleState {
+            changed: toggled,
+            open: *open,
+            focused,
+            hovered,
+        }
+    }
+
+    /// Creates a row of clickable breadcrumb links.
+    pub fn breadcrumbs(&mut self, id: &str, items: &[BreadcrumbItem<'_>]) -> BreadcrumbsResponse {
+        // MyGo's Breadcrumbs (`ui/feedback.go` coreBreadcrumbs): a row of
+        // Space(0.5) = 2 gaps. Each link is a row padded Space(0.5) = 2 down
+        // and Space(1.5) = 6 across, radius 6, at least Space(6) = 24 wide,
+        // its text in the muted color; the last item, where the path is, is
+        // plain text at weight 500 in the text color. Between items a
+        // Space(3) = 12 box holds a chevron stroked 1.2 in the muted color.
+        let theme = self.theme.clone();
+        let font_size = theme.font_sizes.body;
+        let text_height = measured_text_height(font_size);
+        let gap = theme.spacing.base * 0.5;
+        let item_pad_v = theme.spacing.base * 0.5;
+        let item_pad_h = theme.spacing.base * 1.5;
+        let item_height = text_height + item_pad_v * 2.0;
+        // A row shrinks to its items, as MyGo's `coreRow` does without Grow
+        // or Fill, so the preview centers the path rather than stretching it.
+        // Its gap falls between every pair of children: a separator sits
+        // between two items, so each costs a gap on either side.
+        let separator = theme.spacing.base * 3.0;
+        let mut content_width = 0.0;
+        for (index, item) in items.iter().enumerate() {
+            if index > 0 {
+                content_width += gap + separator + gap;
+            }
+            // Every item is the same row, the last one only losing its link
+            // behavior and taking weight 500, which measures wider.
+            content_width += crumb_width(item.label, font_size, index + 1 == items.len(), item_pad_h);
+        }
+        let root = self.new_named_node(
+            id,
+            Style {
+                width: Some(content_width),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                gap,
                 ..Style::default()
             },
         );
@@ -9669,19 +13693,77 @@ impl Context {
         let mut clicked = None;
         for (index, item) in items.iter().enumerate() {
             if index > 0 {
-                self.text("/")
-                    .font_size(theme.font_sizes.small)
-                    .color(theme.muted);
+                // A chevron points right, along the path: a Space(3) box with
+                // a 1.2-stroked path from its left quarter to its right.
+                let separator = theme.spacing.base * 3.0;
+                let node = self.new_named_node(
+                    &format!("{id}:separator:{index}"),
+                    Style {
+                        width: Some(separator),
+                        height: Some(separator),
+                        ..Style::default()
+                    },
+                );
+                let cx = separator / 2.0;
+                let cy = separator / 2.0;
+                let d = separator / 6.0;
+                self.nodes
+                    .get_mut(&node)
+                    .expect("breadcrumb separator exists")
+                    .commands = vec![DrawCommand::SvgPath {
+                    x: 0.0,
+                    y: 0.0,
+                    width: separator,
+                    height: separator,
+                    path: format!(
+                        "M{} {}L{} {}L{} {}",
+                        cx - d,
+                        cy - 2.0 * d,
+                        cx + d,
+                        cy,
+                        cx - d,
+                        cy + 2.0 * d
+                    ),
+                    fill: None,
+                    stroke: Some(theme.muted),
+                    stroke_width: 1.2,
+                }];
             }
             let last = index + 1 == items.len();
+            let key = format!("{id}:crumb:{index}");
+            // A link is at least Space(6) = 24 across, its text padded
+            // Space(1.5) = 6 either side; the last item, where the path is,
+            // keeps the padding but takes no minimum.
+            let item_width = crumb_width(item.label, font_size, last, item_pad_h);
             if last {
-                self.text(item.label)
-                    .font_size(font_size)
-                    .color(theme.foreground);
+                // Where the path is: no link, but the current page.
+                let node = self.new_named_node(
+                    &key,
+                    Style {
+                        width: Some(item_width),
+                        height: Some(item_height),
+                        ..Style::default()
+                    },
+                );
+                self.nodes
+                    .get_mut(&node)
+                    .expect("breadcrumb current page exists")
+                    .commands = vec![DrawCommand::Text {
+                    x: item_pad_h,
+                    y: item_pad_v,
+                    text: item.label.to_string(),
+                    font_size,
+                    italic: false,
+                    mono: false,
+                    family: None,
+                    weight: 500,
+                    color: theme.foreground,
+                    max_width: Some((item_width - item_pad_h * 2.0).max(1.0)),
+                    alignment: TextAlignment::Start,
+                }];
+                self.register_access_node(node, Role::Label, item.label, Some("current"), false);
                 continue;
             }
-            let key = format!("{id}:crumb:{index}");
-            let item_width = measure_text_width(item.label, font_size) + theme.spacing.sm * 2.0;
             let node = self.new_named_node(
                 &key,
                 Style {
@@ -9701,31 +13783,31 @@ impl Context {
                 self.focused_id = Some(key);
             }
             let mut commands = Vec::new();
-            if hovered || focused {
+            if hovered {
+                // A hovered link fills with the hovered surface.
                 commands.push(DrawCommand::RoundedRect {
                     x: 0.0,
                     y: 0.0,
                     width: item_width,
                     height: item_height,
-                    radius: Radius::all(4.0),
-                    color: mix_color(theme.surface, theme.foreground, 0.08),
+                    radius: Radius::all(6.0),
+                    color: theme.surface_hover,
                 });
             }
             commands.push(DrawCommand::Text {
-                x: theme.spacing.sm,
-                y: theme.spacing.xs,
+                x: item_pad_h,
+                y: item_pad_v,
                 text: item.label.to_string(),
                 font_size,
-                weight: if focused { 600 } else { 400 },
-                color: if hovered || focused {
-                    theme.foreground
-                } else {
-                    theme.accent
-                },
-                max_width: Some((item_width - theme.spacing.sm * 2.0).max(1.0)),
+                italic: false,
+                mono: false,
+                family: None,
+                weight: 400,
+                color: theme.muted,
+                max_width: Some((item_width - item_pad_h * 2.0).max(1.0)),
                 alignment: TextAlignment::Start,
             });
-            if focused {
+            if self.shows_focus_ring(focused) {
                 commands.extend(focus_ring(0.0, 0.0, item_width, item_height, theme.accent));
             }
             self.register_access_node(node, Role::Button, item.label, Some(item.id), focused);
@@ -9746,10 +13828,25 @@ impl Context {
         selected: &mut String,
         sections: &[SidebarSection<'_>],
     ) -> SidebarResponse {
+        // MyGo's Sidebar (`ui/sidebar.go` coreSidebar, coreSidebarItem):
+        // a scroll container padded Space(2.5) = 10 with Space(0.5) = 2
+        // between its sections, on the surface. Each section heads with a
+        // Space(1)/Space(2)-padded row whose title is FontSize - 1 at weight
+        // 600 in the muted color, and spaces Space(3) = 12 above itself when
+        // another section precedes it. An item is a row padded Space(1.5) =
+        // 6 vertically and Space(2) = 8 across, gap Space(2) = 8, radius 6:
+        // its icon 16px, its label taking the rest on one line, and the
+        // chosen item filling with the pressed surface (the accent while the
+        // sidebar has the focus).
         let theme = self.theme.clone();
         let width = self.current_content_width();
         let font_size = theme.font_sizes.body;
-        let item_height = (measured_text_height(font_size) + theme.spacing.xs * 2.0).max(32.0);
+        let padding = theme.spacing.base * 2.5;
+        let item_gap = theme.spacing.base * 2.0;
+        let item_padding_v = theme.spacing.base * 1.5;
+        let item_padding_h = theme.spacing.base * 2.0;
+        let item_height = measured_text_height(font_size) + item_padding_v * 2.0;
+        let icon_size = 16.0_f32;
         let mut selected_index: Option<usize> = None;
         let mut first_id = None;
         let mut total: usize = 0;
@@ -9778,7 +13875,8 @@ impl Context {
             Style {
                 width: Some(width),
                 flex_direction: FlexDirection::Column,
-                gap: theme.spacing.xs,
+                gap: theme.spacing.base * 0.5,
+                padding: Edges::all(padding),
                 ..Style::default()
             },
         );
@@ -9815,21 +13913,58 @@ impl Context {
         }
         let mut hovered = root_hovered;
         let mut clicked_id = None;
+        let inner_width = (width - padding * 2.0).max(1.0);
         self.push_parent(root);
         let mut flat_index = 0;
-        for section in sections {
-            self.text(section.title)
-                .font_size(theme.font_sizes.small)
-                .weight(700)
-                .color(theme.muted)
-                .max_width(width);
+        for (section_index, section) in sections.iter().enumerate() {
+            let mut head = self.new_node(Style {
+                width: Some(inner_width),
+                height: Some(measured_text_height(font_size - 1.0) + theme.spacing.base * 2.0),
+                padding: Edges::new(
+                    theme.spacing.base,
+                    theme.spacing.base * 2.0,
+                    theme.spacing.base,
+                    theme.spacing.base * 2.0,
+                ),
+                align_items: AlignItems::Center,
+                ..Style::default()
+            });
+            if section_index > 0 {
+                // Another section above spaces Space(3) over this one.
+                let node = self.nodes.get_mut(&head).expect("sidebar head exists");
+                node.style.margin.top = theme.spacing.base * 3.0;
+            }
+            self.nodes.get_mut(&head).expect("sidebar head exists").commands = vec![
+                DrawCommand::Text {
+                    x: theme.spacing.base * 2.0,
+                    y: theme.spacing.base,
+                    text: section.title.to_string(),
+                    font_size: font_size - 1.0,
+                    italic: false,
+                    mono: false,
+                    family: None,
+                    weight: 600,
+                    color: theme.muted,
+                    max_width: Some(inner_width - theme.spacing.base * 4.0),
+                    alignment: TextAlignment::Start,
+                },
+            ];
+            let _ = &mut head;
             for item in section.items {
                 let key = format!("{id}:item:{flat_index}");
                 let node = self.new_named_node(
                     &key,
                     Style {
-                        width: Some(width),
+                        width: Some(inner_width),
                         height: Some(item_height),
+                        padding: Edges::new(
+                            item_padding_v,
+                            item_padding_h,
+                            item_padding_v,
+                            item_padding_h,
+                        ),
+                        gap: item_gap,
+                        align_items: AlignItems::Center,
                         ..Style::default()
                     },
                 );
@@ -9845,77 +13980,118 @@ impl Context {
                     clicked_id = Some(item.id.to_string());
                 }
                 let item_selected = selected_index == Some(flat_index);
-                let item_color = if item_selected || item_hovered {
-                    theme.foreground
+                let item_color = if item_selected && focused {
+                    theme.on_accent
                 } else {
-                    theme.muted
+                    theme.foreground
                 };
                 let mut commands = Vec::new();
-                if item_selected || item_hovered {
+                if item_selected {
                     commands.push(DrawCommand::RoundedRect {
                         x: 0.0,
                         y: 0.0,
-                        width,
+                        width: inner_width,
                         height: item_height,
                         radius: Radius::all(6.0),
-                        color: if item_selected {
-                            mix_color(theme.surface, theme.foreground, 0.12)
+                        color: if focused {
+                            theme.accent
                         } else {
-                            mix_color(theme.surface, theme.foreground, 0.05)
+                            theme.surface_pressed
                         },
                     });
+                } else if item_hovered {
+                    commands.push(DrawCommand::RoundedRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: inner_width,
+                        height: item_height,
+                        radius: Radius::all(6.0),
+                        color: theme.surface_hover,
+                    });
                 }
-                let mut text_x = theme.spacing.sm;
+                let icon_color = if item_selected && focused {
+                    theme.on_accent
+                } else {
+                    theme.accent
+                };
+                let mut text_x = item_padding_h;
                 if let Some(name) = item.icon {
                     if let Some(icon) = Icon::builtin(name) {
-                        let icon_y = (item_height - 14.0) / 2.0;
+                        let icon_y = item_padding_v + (measured_text_height(font_size) - icon_size) / 2.0;
                         commands.push(DrawCommand::TransformPush {
                             transform: Transform {
-                                translation: Point::new(theme.spacing.sm, icon_y),
+                                translation: Point::new(item_padding_h, icon_y),
                                 scale: Point::new(1.0, 1.0),
                                 rotation: 0.0,
                             },
                         });
-                        commands.extend(icon.to_commands_with_direction(14.0, item_color, self.direction));
+                        commands.extend(icon.to_commands_with_direction(icon_size, icon_color, self.direction));
                         commands.push(DrawCommand::TransformPop);
-                        text_x = theme.spacing.sm + 14.0 + theme.spacing.sm;
+                        text_x = item_padding_h + icon_size + item_gap;
                     }
                 }
-                let badge_width = item.badge.map(|badge| {
-                    measure_text_width(badge, theme.font_sizes.small) + theme.spacing.sm
-                }).unwrap_or(0.0);
-                let text_width = (width - text_x - theme.spacing.sm - badge_width).max(1.0);
+                let badge_width = item
+                    .badge
+                    .map(|badge| {
+                        measure_text_width(badge, font_size - 2.0) + theme.spacing.base * 3.0
+                    })
+                    .unwrap_or(0.0);
+                let text_width =
+                    (inner_width - text_x - item_padding_h - badge_width).max(1.0);
                 commands.push(DrawCommand::Text {
                     x: text_x,
-                    y: theme.spacing.xs,
+                    y: item_padding_v,
                     text: item.label.to_string(),
                     font_size,
-                    weight: if item_selected { 600 } else { 400 },
+                    italic: false,
+                    mono: false,
+                    family: None,
+                    weight: 400,
                     color: item_color,
                     max_width: Some(text_width),
                     alignment: TextAlignment::Start,
                 });
                 if let Some(badge) = item.badge {
-                    let badge_height = 16.0;
-                    let badge_x = width - badge_width - theme.spacing.sm;
-                    let badge_y = (item_height - badge_height) / 2.0;
+                    // MyGo's badge (`ui/sidebar.go` coreBadge): Space(1.5) of
+                    // side padding around a Space(6) pill in the text color at
+                    // a tenth of an alpha, unless the caller fills it with
+                    // the accent instead.
+                    let badge_height = measured_text_height(font_size - 2.0);
+                    let badge_x = inner_width - badge_width - item_padding_h;
+                    let badge_y = item_padding_v + (measured_text_height(font_size) - badge_height) / 2.0;
+                    let (badge_fill, badge_text) = if item.badge_accent {
+                        (theme.accent, theme.on_accent)
+                    } else {
+                        (
+                            Color::rgba(
+                                theme.foreground.r,
+                                theme.foreground.g,
+                                theme.foreground.b,
+                                26,
+                            ),
+                            theme.foreground,
+                        )
+                    };
                     commands.push(DrawCommand::RoundedRect {
                         x: badge_x,
                         y: badge_y,
                         width: badge_width,
                         height: badge_height,
-                        radius: Radius::all(8.0),
-                        color: mix_color(theme.surface, theme.foreground, 0.12),
+                        radius: Radius::all(999.0),
+                        color: badge_fill,
                     });
                     commands.push(DrawCommand::Text {
-                        x: badge_x,
-                        y: badge_y + 2.0,
+                        x: badge_x + theme.spacing.base * 1.5,
+                        y: badge_y,
                         text: badge.to_string(),
-                        font_size: theme.font_sizes.small,
-                        weight: 600,
-                        color: theme.foreground,
+                        font_size: font_size - 2.0,
+                        italic: false,
+                        mono: false,
+                        family: None,
+                        weight: 400,
+                        color: badge_text,
                         max_width: Some(badge_width),
-                        alignment: TextAlignment::Center,
+                        alignment: TextAlignment::Start,
                     });
                 }
                 self.register_access_node(
@@ -10112,7 +14288,7 @@ impl Context {
                 color: theme.on_accent,
             });
         }
-        if focused {
+        if self.shows_focus_ring(focused) {
             divider_commands.extend(focus_ring(
                 0.0,
                 0.0,
@@ -10181,7 +14357,338 @@ impl Context {
         }
     }
 
+    /// Creates a split whose first pane keeps a DIP size, as MyGo's
+    /// `ui.Split` does (`ui/split.go`).
+    ///
+    /// The panes meet at a one-pixel line; the handle the pointer drags
+    /// spans `grip` DIPs over either pane. Dragging moves the divider from
+    /// the size it shows, the panes staying at least `min_pane` wide.
+    pub fn split_sized(
+        &mut self,
+        id: &str,
+        size: &mut f32,
+        orientation: SplitOrientation,
+        min_pane: f32,
+        grip: f32,
+        first: impl FnOnce(&mut Context),
+        second: impl FnOnce(&mut Context),
+    ) -> SplitViewResponse {
+        let theme = self.theme.clone();
+        let width = self.current_content_width();
+        let height = self.current_content_height();
+        let vertical = orientation == SplitOrientation::Vertical;
+        let total = if vertical { height } else { width };
+        let (handle_key, divider_key) = (format!("{id}:handle"), format!("{id}:divider"));
+        let root = self.new_named_node(
+            id,
+            Style {
+                width: Some(width),
+                height: Some(height),
+                flex_direction: if vertical {
+                    FlexDirection::Column
+                } else {
+                    FlexDirection::Row
+                },
+                align_items: AlignItems::Stretch,
+                ..Style::default()
+            },
+        );
+        self.register_interaction(root, id.to_string());
+        self.push_parent(root);
+
+        let (mut dragging, mut shown) = match self.widget_states.get(id) {
+            Some(WidgetState::SplitSized { dragging, shown }) => (*dragging, *shown),
+            _ => (false, *size),
+        };
+        // A size the room cannot show still stands: the pane takes it back
+        // when there is room again (`ui/split.go` fitSplit).
+        let fit = |value: f32| -> f32 {
+            let max = (total - 1.0 - min_pane).max(min_pane);
+            value.clamp(min_pane, max)
+        };
+        shown = if *size > min_pane { fit(*size) } else { shown };
+
+        let hovered = self.pointer_in_previous(&handle_key);
+        let pointer = self.local_pointer_in_previous(id);
+        let root_bounds = self.previous_regions.get(id).map(|region| region.bounds);
+        let mut changed = false;
+        if hovered && self.input.pointer_down {
+            dragging = true;
+            self.focused_id = Some(divider_key.clone());
+        }
+        if dragging {
+            if let Some(point) = pointer {
+                let offset = root_bounds
+                    .map(|bounds| {
+                        if vertical {
+                            point.y - bounds.y
+                        } else {
+                            point.x - bounds.x
+                        }
+                    })
+                    .unwrap_or(shown);
+                let next = fit(offset - 0.5);
+                if (next - shown).abs() > f32::EPSILON {
+                    shown = next;
+                    *size = next;
+                    changed = true;
+                }
+            }
+            if !self.input.pointer_down && self.input.released.is_some() {
+                dragging = false;
+            }
+        }
+        let focused = self.focused_id.as_deref() == Some(divider_key.as_str());
+        if focused {
+            let step = if self.key_pressed(Key::ArrowLeft) || self.key_pressed(Key::ArrowUp) {
+                Some(-theme.spacing.base * 2.5)
+            } else if self.key_pressed(Key::ArrowRight) || self.key_pressed(Key::ArrowDown) {
+                Some(theme.spacing.base * 2.5)
+            } else {
+                None
+            };
+            if let Some(step) = step {
+                let next = fit(shown + step);
+                if (next - shown).abs() > f32::EPSILON {
+                    shown = next;
+                    *size = next;
+                    changed = true;
+                }
+            }
+        }
+        self.widget_states
+            .insert(id.to_string(), WidgetState::SplitSized { dragging, shown });
+
+        // The panes are the split's own flex children: first keeps the DIP
+        // size, the one-pixel line follows, and second takes the rest.
+        let first_panel = self.new_named_node(
+            &format!("{id}:first"),
+            Style {
+                width: Some(if vertical { width } else { shown }),
+                height: Some(if vertical { shown } else { height }),
+                min_width: (!vertical).then_some(shown.min(min_pane)).unwrap_or(0.0),
+                min_height: vertical.then_some(shown.min(min_pane)).unwrap_or(0.0),
+                ..Style::default()
+            },
+        );
+        let _ = &first_panel;
+        self.push_parent(first_panel);
+        first(self);
+        self.pop_parent();
+
+        let divider = self.new_named_node(
+            &divider_key,
+            Style {
+                width: (!vertical).then_some(1.0),
+                height: vertical.then_some(1.0),
+                ..Style::default()
+            },
+        );
+        self.register_interaction(divider, divider_key.clone());
+        self.register_focusable(divider, divider_key.clone());
+        let line_color = if dragging || hovered {
+            theme.accent
+        } else {
+            theme.border
+        };
+        self.nodes.get_mut(&divider).expect("split divider exists").fill =
+            Some((line_color, Radius::all(0.0)));
+
+        let second_panel = self.new_named_node(
+            &format!("{id}:second"),
+            Style {
+                flex_grow: 1.0,
+                // The cross axis is the split's whole box: MyGo's panes
+                // stretch to it, and a nested split reads its own room from
+                // the box it is given.
+                width: Some(if vertical { width } else { (total - shown - 1.0).max(min_pane) }),
+                height: Some(if vertical { (total - shown - 1.0).max(min_pane) } else { height }),
+                min_width: (!vertical).then_some(min_pane).unwrap_or(0.0),
+                min_height: vertical.then_some(min_pane).unwrap_or(0.0),
+                ..Style::default()
+            },
+        );
+        let _ = &second_panel;
+        self.push_parent(second_panel);
+        second(self);
+        self.pop_parent();
+
+        // The handle spans the grip over the line, placed on the divider
+        // as the last frame laid it out (`ui/split.go` placeOn).
+        let divider_bounds = self
+            .previous_regions
+            .get(&divider_key)
+            .map(|region| region.bounds);
+        let handle = self.new_named_node(
+            &handle_key,
+            Style {
+                width: Some(if vertical { width } else { grip }),
+                height: Some(if vertical { grip } else { height }),
+                position: Position::Absolute,
+                left: Some(if vertical {
+                    0.0
+                } else {
+                    divider_bounds
+                        .map(|bounds| bounds.x - root_bounds.map(|r| r.x).unwrap_or(0.0))
+                        .unwrap_or(shown)
+                        - (grip - 1.0) / 2.0
+                }),
+                top: Some(if vertical {
+                    divider_bounds
+                        .map(|bounds| bounds.y - root_bounds.map(|r| r.y).unwrap_or(0.0))
+                        .unwrap_or(shown)
+                        - (grip - 1.0) / 2.0
+                } else {
+                    0.0
+                }),
+                ..Style::default()
+            },
+        );
+        self.register_interaction(handle, handle_key.clone());
+        if focused {
+            let ring = focus_ring(
+                0.0,
+                0.0,
+                if vertical { width } else { grip },
+                if vertical { grip } else { height },
+                theme.accent,
+            );
+            self.nodes.get_mut(&handle).expect("split handle exists").commands = ring.to_vec();
+        }
+
+        self.register_access_node(divider, Role::Slider, "split divider", None, focused);
+        self.pop_parent();
+        SplitViewResponse {
+            ratio: if total > 1.0 { shown / total } else { 0.0 },
+            changed,
+            dragging,
+            focused,
+            hovered,
+            divider_bounds,
+        }
+    }
+
     /// Lays out a labeled form field with description and error text.
+    /// Starts a form: a column of fields whose labels line up in one
+    /// column as wide as the widest, as MyGo's `Form` does
+    /// (`ui/form.go` coreForm, alignLabels).
+    pub fn form_group(&mut self, id: &str, build: impl FnOnce(&mut Context)) {
+        let theme = self.theme.clone();
+        let width = self.current_content_width();
+        let root = self.new_named_node(
+            id,
+            Style {
+                width: Some(width),
+                flex_direction: FlexDirection::Column,
+                gap: theme.spacing.base * 3.0,
+                ..Style::default()
+            },
+        );
+        // The label column is as wide as the widest label the fields hold,
+        // which the demo measures before the form is built.
+        let label_width = self.form_label_width.unwrap_or(0.0);
+        self.form_label_width = Some(label_width);
+        self.push_parent(root);
+        build(self);
+        self.pop_parent();
+        self.form_label_width = None;
+    }
+
+    /// Sets the width of the label column [`Self::form_group`] lays out.
+    pub fn set_form_label_width(&mut self, width: f32) {
+        self.form_label_width = Some(width);
+    }
+
+    /// Creates a field inside a [`Self::form_group`]: the label in a column
+    /// as wide as the form's widest, and the control filling the rest of
+    /// the row, as MyGo's `Field` does in a `Form` (`ui/form.go`).
+    pub fn form_row(
+        &mut self,
+        id: &str,
+        label: &str,
+        description: Option<&str>,
+        error: Option<&str>,
+        content: impl FnOnce(&mut Context),
+    ) -> FormFieldState {
+        let theme = self.theme.clone();
+        let width = self.current_content_width();
+        let has_error = error.is_some();
+        let label_width = self.form_label_width.unwrap_or(0.0);
+        let root = self.new_named_node(
+            id,
+            Style {
+                width: Some(width),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::FlexStart,
+                gap: theme.spacing.base * 3.0,
+                // MyGo lines a field's label up on the baseline of the
+                // control's first line, not on the row's top (`ui/form.go`
+                // coreField sets `f.baselines = true`).
+                baselines: true,
+                ..Style::default()
+            },
+        );
+        self.push_parent(root);
+        // The label sits at the end of its column, beside the control's
+        // first line.
+        let label_box = self.new_named_node(
+            &format!("{id}:label"),
+            Style {
+                width: Some(label_width.max(1.0)),
+                flex_direction: FlexDirection::Row,
+                justify_content: JustifyContent::FlexEnd,
+                ..Style::default()
+            },
+        );
+        self.push_parent(label_box);
+        // MyGo's field label keeps the theme's text color even while the
+        // field is invalid; only the message below turns (`ui/form.go`).
+        // It wraps to no width of its own: the column it sits in is as wide
+        // as the widest label (`ui/form.go` alignLabels).
+        self.text(label).color(theme.foreground);
+        self.pop_parent();
+        let content_width = (width - label_width - theme.spacing.base * 3.0).max(1.0);
+        let column = self.new_named_node(
+            &format!("{id}:content"),
+            Style {
+                width: Some(content_width),
+                flex_direction: FlexDirection::Column,
+                gap: theme.spacing.base * 1.5,
+                ..Style::default()
+            },
+        );
+        self.push_parent(column);
+        content(self);
+        // MyGo draws a field's description and message one point below the
+        // theme's body size (`ui/form.go` fieldText: `FontSize - 1`).
+        let field_text_size = theme.font_sizes.body - 1.0;
+        if let Some(description) = description {
+            self.text(description)
+                .font_size(field_text_size)
+                .color(theme.muted)
+                .max_width(content_width);
+        }
+        if let Some(error) = error {
+            self.text(error)
+                .font_size(field_text_size)
+                .color(theme.danger())
+                .max_width(content_width);
+        }
+        self.pop_parent();
+        self.pop_parent();
+        self.register_access_node(
+            root,
+            Role::Group,
+            label,
+            Some(if has_error { "error" } else { "valid" }),
+            false,
+        );
+        FormFieldState {
+            has_error,
+            has_description: description.is_some(),
+        }
+    }
+
     pub fn form_field(
         &mut self,
         id: &str,
@@ -10206,7 +14713,7 @@ impl Context {
         self.text(label)
             .weight(600)
             .color(if has_error {
-                theme.warn()
+                theme.danger()
             } else {
                 theme.foreground
             })
@@ -10221,7 +14728,7 @@ impl Context {
         if let Some(error) = error {
             self.text(error)
                 .font_size(theme.font_sizes.small)
-                .color(theme.warn())
+                .color(theme.danger())
                 .max_width(width);
         }
         self.pop_parent();
@@ -10291,6 +14798,26 @@ struct PendingNode {
     layer: u32,
     transform: Transform,
     rtl: bool,
+    /// Face painted in the node's final box, before its own commands.
+    fill: Option<(Color, Radius)>,
+    /// One-pixel border painted around the node's final box.
+    stroke: Option<(Color, Radius)>,
+    /// Clips this node's children to its final box, as a scroll view's
+    /// viewport does without scrolling.
+    clip: bool,
+    /// A one-pixel rule along the node's top edge, as MyGo's
+    /// `BorderWidth(1, 0, 0, 0)` draws a section divider.
+    top_border: Option<Color>,
+    /// A one-pixel rule along the node's bottom edge, as MyGo's
+    /// `BorderWidth(0, 0, 1, 0)` draws a find bar's rule.
+    bottom_border: Option<Color>,
+    /// Distance from the node's top to the baseline of its first line of
+    /// text, for rows that line their children up by it (`ui/form.go`
+    /// alignBaselines).
+    first_baseline: Option<f32>,
+    /// The ascent and descent of that line, which a row lines a control
+    /// without text up on (`ui/form.go` anchor).
+    text_metrics: Option<(f32, f32)>,
 }
 
 struct ScrollNode {
@@ -10306,6 +14833,114 @@ pub type RowBuilder<'a> = FlexBuilder<'a>;
 pub type ContainerBuilder<'a> = FlexBuilder<'a>;
 /// Builder for a grid container.
 pub type GridBuilder<'a> = FlexBuilder<'a>;
+
+/// Builder for a container that also takes pointer input, as a demo's own
+/// list rows and menu items do.
+pub struct ClickableBuilder<'a> {
+    builder: FlexBuilder<'a>,
+    /// Whether the pointer was over the container before this frame.
+    pub hovered: bool,
+    /// Whether the container was clicked before this frame.
+    pub clicked: bool,
+}
+
+impl<'a> ClickableBuilder<'a> {
+    /// Sets the gap between children.
+    pub fn gap(mut self, gap: f32) -> Self {
+        self.builder = self.builder.gap(gap);
+        self
+    }
+
+    /// Sets padding on all sides.
+    pub fn padding(mut self, padding: f32) -> Self {
+        self.builder = self.builder.padding(padding);
+        self
+    }
+
+    /// Sets horizontal padding only.
+    pub fn padding_x(mut self, padding: f32) -> Self {
+        self.builder = self.builder.padding_x(padding);
+        self
+    }
+
+    /// Sets vertical padding only.
+    pub fn padding_y(mut self, padding: f32) -> Self {
+        self.builder = self.builder.padding_y(padding);
+        self
+    }
+
+    /// Sets horizontal and vertical padding.
+    pub fn padding_xy(mut self, x: f32, y: f32) -> Self {
+        self.builder = self.builder.padding_xy(x, y);
+        self
+    }
+
+    /// Sets padding per edge, in top, right, bottom and left order.
+    pub fn padding_each(mut self, top: f32, right: f32, bottom: f32, left: f32) -> Self {
+        self.builder = self.builder.padding_each(top, right, bottom, left);
+        self
+    }
+
+    /// Sets the background and its corner radius.
+    pub fn background(mut self, color: Color, radius: f32) -> Self {
+        self.builder = self.builder.background(color, radius);
+        self
+    }
+
+    /// Sets a one-pixel border.
+    pub fn border(mut self, color: Color, radius: f32) -> Self {
+        self.builder = self.builder.border(color, radius);
+        self
+    }
+
+    /// Sets an explicit size.
+    pub fn size(mut self, width: f32, height: f32) -> Self {
+        self.builder = self.builder.size(width, height);
+        self
+    }
+
+    /// Sets the width.
+    pub fn width(mut self, width: f32) -> Self {
+        self.builder = self.builder.width(width);
+        self
+    }
+
+    /// Sets the height.
+    pub fn height(mut self, height: f32) -> Self {
+        self.builder = self.builder.height(height);
+        self
+    }
+
+    /// Aligns children across the row.
+    pub fn align(mut self, align: AlignItems) -> Self {
+        self.builder = self.builder.align(align);
+        self
+    }
+
+    /// Lays children out in a column instead of a row.
+    pub fn column(mut self) -> Self {
+        self.builder = self.builder.column();
+        self
+    }
+
+    /// Distributes children along the row.
+    pub fn justify(mut self, justify: JustifyContent) -> Self {
+        self.builder = self.builder.justify(justify);
+        self
+    }
+
+    /// Paints commands in the container's box.
+    pub fn draw(mut self, commands: impl IntoIterator<Item = DrawCommand>) -> Self {
+        self.builder = self.builder.draw(commands);
+        self
+    }
+
+    /// Builds children with this container as their parent scope.
+    pub fn children(mut self, build: impl FnOnce(&mut Context)) -> Self {
+        self.builder = self.builder.children(build);
+        self
+    }
+}
 
 /// Immediate-mode flex container builder.
 pub struct FlexBuilder<'a> {
@@ -10332,6 +14967,23 @@ impl<'a> FlexBuilder<'a> {
         self
     }
 
+    /// Takes the container out of the flow, placing it at the given offset
+    /// from its parent's content origin, as MyGo's `Absolute` and `Left`/
+    /// `Top` do for a chart mark.
+    pub fn absolute(mut self, left: f32, top: f32) -> Self {
+        let node = self.node();
+        node.style.position = Position::Absolute;
+        node.style.left = Some(left);
+        node.style.top = Some(top);
+        self
+    }
+
+    /// Lays children out in a column instead of a row.
+    pub fn column(mut self) -> Self {
+        self.node().style.flex_direction = FlexDirection::Column;
+        self
+    }
+
     /// Sets the grid column count and enables grid placement.
     pub fn columns(mut self, columns: usize) -> Self {
         let node = self.node();
@@ -10346,9 +14998,51 @@ impl<'a> FlexBuilder<'a> {
         self
     }
 
+    /// Sets horizontal padding only.
+    pub fn padding_x(mut self, padding: f32) -> Self {
+        let node = self.node();
+        node.style.padding.left = padding;
+        node.style.padding.right = padding;
+        self
+    }
+
+    /// Sets vertical padding only.
+    pub fn padding_y(mut self, padding: f32) -> Self {
+        let node = self.node();
+        node.style.padding.top = padding;
+        node.style.padding.bottom = padding;
+        self
+    }
+
+    /// Sets horizontal and vertical padding.
+    pub fn padding_xy(mut self, x: f32, y: f32) -> Self {
+        let node = self.node();
+        node.style.padding.left = x;
+        node.style.padding.right = x;
+        node.style.padding.top = y;
+        node.style.padding.bottom = y;
+        self
+    }
+
+    /// Sets padding per edge, in top, right, bottom and left order.
+    pub fn padding_each(mut self, top: f32, right: f32, bottom: f32, left: f32) -> Self {
+        let node = self.node();
+        node.style.padding.top = top;
+        node.style.padding.right = right;
+        node.style.padding.bottom = bottom;
+        node.style.padding.left = left;
+        self
+    }
+
     /// Sets equal margin.
     pub fn margin(mut self, margin: f32) -> Self {
         self.node().style.margin = super::layout::Edges::all(margin);
+        self
+    }
+
+    /// Sets margin per edge, in top, right, bottom and left order.
+    pub fn margin_each(mut self, top: f32, right: f32, bottom: f32, left: f32) -> Self {
+        self.node().style.margin = super::layout::Edges::new(top, right, bottom, left);
         self
     }
 
@@ -10381,6 +15075,19 @@ impl<'a> FlexBuilder<'a> {
         self
     }
 
+    /// Fills the parent's content box, as MyGo's `Fill` does.
+    ///
+    /// Unlike [`Self::fill`], which takes the window's size, this grows into
+    /// whatever room the parent lays out: the flex growth takes the main
+    /// axis and the default stretch alignment the cross axis.
+    pub fn fill_parent(mut self) -> Self {
+        let node = self.node();
+        node.style.flex_grow = 1.0;
+        node.style.width = None;
+        node.style.height = None;
+        self
+    }
+
     /// Centers children on both axes.
     pub fn center(mut self) -> Self {
         let node = self.node();
@@ -10395,9 +15102,43 @@ impl<'a> FlexBuilder<'a> {
         self
     }
 
+    /// Asks the parent to align this container across its axis instead of
+    /// the parent's own alignment, as MyGo's `AlignSelf`.
+    pub fn align_self(mut self, align: AlignItems) -> Self {
+        self.node().style.align_self = Some(align);
+        self
+    }
+
     /// Sets main-axis distribution.
     pub fn justify(mut self, justify: JustifyContent) -> Self {
         self.node().style.justify_content = justify;
+        self
+    }
+
+    /// Wraps this row's children onto more lines when they overflow,
+    /// centering each line as MyGo's `Wrap` does.
+    pub fn wrap(mut self) -> Self {
+        self.node().style.flex_wrap = true;
+        self
+    }
+
+    /// Registers this container as a hover/context-menu target under `id`.
+    pub fn interactive(self, stable: &str) -> Self {
+        self.ctx.register_interaction(self.id, stable.to_string());
+        self
+    }
+
+    /// Paints a face in this container's final layout box, before its
+    /// own drawing commands and children.
+    pub fn background(mut self, color: Color, radius: f32) -> Self {
+        self.node().fill = Some((color, Radius::all(radius)));
+        self
+    }
+
+    /// Paints a one-pixel border around this container's final box.
+    /// Requires [`Self::background`] for the inner face.
+    pub fn border(mut self, color: Color, radius: f32) -> Self {
+        self.node().stroke = Some((color, Radius::all(radius)));
         self
     }
 
@@ -10418,6 +15159,16 @@ impl<'a> FlexBuilder<'a> {
     /// Adds local drawing commands to this container.
     pub fn draw(mut self, commands: impl IntoIterator<Item = DrawCommand>) -> Self {
         self.node().commands.extend(commands);
+        self
+    }
+
+    /// Clips this container's children to its final box.
+    ///
+    /// MyGo's List is a Scroll: its rows scroll under a fixed viewport and
+    /// anything past the edge is cut. A demo that lays out MyGo's rows by
+    /// hand needs the same cut, without the wheel handling.
+    pub fn clip(self) -> Self {
+        self.ctx.nodes.get_mut(&self.id).expect("clip node exists").clip = true;
         self
     }
 
@@ -10445,6 +15196,17 @@ pub struct TextBuilder<'a> {
     color: Color,
     max_width: Option<f32>,
     alignment: TextAlignment,
+    underline: bool,
+    /// Height of the box the line sits in, its glyphs centered in it, as
+    /// MyGo's line() centers a line taller than its faces.
+    line_height: Option<f32>,
+    /// Whether the text stays on one line, as MyGo's SingleLine does,
+    /// instead of wrapping at its maximum width.
+    single_line: bool,
+    /// Whether the text uses the monospace family, as MyGo's `Font("monospace")`.
+    mono: bool,
+    /// Named font family, as MyGo's `Font(name)` takes it.
+    family: Option<String>,
 }
 
 impl TextBuilder<'_> {
@@ -10490,6 +15252,66 @@ impl TextBuilder<'_> {
         self
     }
 
+    /// Underlines the text with a one-pixel line beneath its ascent.
+    pub fn underline(mut self) -> Self {
+        self.underline = true;
+        self.sync();
+        self
+    }
+
+    /// Sets the height of the line the text sits in, centering its glyphs
+    /// as MyGo does in a row taller than its text.
+    pub fn line_height(mut self, height: f32) -> Self {
+        self.line_height = (height > 0.0).then_some(height);
+        self.sync();
+        self
+    }
+
+    /// Sets the monospace family, as MyGo's `Font("monospace")`.
+    pub fn mono(mut self) -> Self {
+        self.mono = true;
+        self.sync();
+        self
+    }
+
+    /// Names the font family, as MyGo's `Font(name)` takes it. The name is
+    /// resolved by the host canvas, so a system family such as "Georgia"
+    /// draws in that face.
+    pub fn font(mut self, family: impl Into<String>) -> Self {
+        let family = family.into();
+        self.mono = family.eq_ignore_ascii_case("monospace");
+        self.family = Some(family);
+        self.sync();
+        self
+    }
+
+    /// Keeps the text on one line, as MyGo's SingleLine does: its maximum
+    /// width bounds the line's box rather than wrapping it.
+    pub fn single_line(mut self) -> Self {
+        self.single_line = true;
+        self.sync();
+        self
+    }
+
+    /// Sets padding per edge, in top, right, bottom and left order.
+    pub fn padding_each(mut self, top: f32, right: f32, bottom: f32, left: f32) -> Self {
+        if let Some(node) = self.ctx.nodes.get_mut(&self.id) {
+            node.style.padding = super::layout::Edges::new(top, right, bottom, left);
+        }
+        self.sync();
+        self
+    }
+
+    /// Sets an explicit width, as MyGo's Width does for text that centers
+    /// in a wider column than its glyphs need.
+    pub fn width(mut self, width: f32) -> Self {
+        if let Some(node) = self.ctx.nodes.get_mut(&self.id) {
+            node.style.width = Some(width);
+        }
+        self.sync();
+        self
+    }
+
     /// Adds this text widget to keyboard focus traversal order.
     pub fn focusable(self) -> Self {
         let key = self.ctx.node_key(self.id);
@@ -10499,6 +15321,26 @@ impl TextBuilder<'_> {
     }
 
     fn sync(&mut self) {
+        // The line box sits inside the padding, so a fixed line height is
+        // measured without it, as MyGo's text is (`ui/element.go` Padding).
+        let padding_vertical = self
+            .ctx
+            .nodes
+            .get(&self.id)
+            .map(|node| node.style.padding.top + node.style.padding.bottom)
+            .unwrap_or(0.0);
+        let offset_y = self
+            .line_height
+            .map(|height| {
+                ((height - padding_vertical - measured_text_height(self.font_size)) / 2.0)
+                    .max(0.0)
+            })
+            .unwrap_or(0.0);
+        if let Some(height) = self.line_height {
+            if let Some(node) = self.ctx.nodes.get_mut(&self.id) {
+                node.style.height = Some(height);
+            }
+        }
         self.ctx.update_text(
             self.id,
             &self.text,
@@ -10507,7 +15349,27 @@ impl TextBuilder<'_> {
             self.color,
             self.max_width,
             self.alignment,
+            offset_y,
+            self.single_line,
+            self.mono,
+            self.family.as_deref(),
         );
+        if self.underline {
+            let width = measure_text_width(&self.text, self.font_size);
+            let ascent = default_font()
+                .map(|font| font.ascent(self.font_size))
+                .unwrap_or(self.font_size * 0.93);
+            if let Some(node) = self.ctx.nodes.get_mut(&self.id) {
+                node.commands.push(DrawCommand::Line {
+                    x1: 0.0,
+                    y1: ascent + 2.0,
+                    x2: width,
+                    y2: ascent + 2.0,
+                    width: 1.0,
+                    color: self.color,
+                });
+            }
+        }
     }
 }
 
@@ -10566,6 +15428,38 @@ pub struct CheckboxState {
 
 /// State returned by a slider for the current frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SegmentState {
+    /// Whether the segment was clicked or activated by Space.
+    pub clicked: bool,
+    /// Whether the pointer is over the segment.
+    pub hovered: bool,
+    /// Whether the pointer is held down on the segment.
+    pub pressed: bool,
+    /// Whether the segment owns keyboard focus.
+    pub focused: bool,
+}
+
+pub struct RadioState {
+    /// Whether the radio was clicked, choosing its value.
+    pub clicked: bool,
+    /// Whether the pointer is over the radio.
+    pub hovered: bool,
+    /// Whether the radio owns keyboard focus.
+    pub focused: bool,
+}
+
+pub enum SegmentFace {
+    /// A standalone toggle: Surface face with MyGo's 1px border, pressed
+    /// staying SurfacePressed.
+    Plain,
+    /// A segment in a toggle group or segmented track: transparent until
+    /// hovered, painting the theme background when chosen.
+    Segment,
+    /// A toolbar button: no face or border of its own until hovered, sunk
+    /// to SurfacePressed while on, as MyGo's toolbarButtons style.
+    Toolbar,
+}
+
 pub struct SliderState {
     /// Whether the value changed this frame.
     pub changed: bool,
@@ -10575,6 +15469,38 @@ pub struct SliderState {
     pub focused: bool,
     /// Whether the pointer is over the slider.
     pub hovered: bool,
+}
+
+/// The face of a scroll view, as MyGo's Scroll takes it: a background, its
+/// border and radius, and the padding and gap inside.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScrollStyle {
+    /// Fill color behind the content.
+    pub background: Option<Color>,
+    /// One-pixel border around the fill.
+    pub border: Option<Color>,
+    /// Corner radius of the fill and border.
+    pub radius: f32,
+    /// Space inside the edges.
+    pub padding: super::layout::Edges,
+    /// Space between children.
+    pub gap: f32,
+    /// Offset to scroll to on the first frame, as MyGo's
+    /// `TrackScroll` state's `Y` starts at its maximum: the log's end.
+    pub initial_offset: Option<f32>,
+}
+
+impl Default for ScrollStyle {
+    fn default() -> Self {
+        Self {
+            background: None,
+            border: None,
+            radius: 0.0,
+            padding: super::layout::Edges::default(),
+            gap: 0.0,
+            initial_offset: None,
+        }
+    }
 }
 
 /// State returned by a scroll view for the current frame.
@@ -10613,6 +15539,146 @@ pub fn row(context: &mut Context) -> RowBuilder<'_> {
 }
 
 /// Creates a neutral container.
+/// Expands the tabs of a line to the next multiple of four columns, as
+/// MyGo's editor does with its default `tabSize`.
+fn expand_tabs(line: &str) -> String {
+    if !line.contains('\t') {
+        return line.to_string();
+    }
+    let mut out = String::with_capacity(line.len() + 8);
+    let mut column = 0;
+    for c in line.chars() {
+        if c == '\t' {
+            let next = (column / 4 + 1) * 4;
+            for _ in column..next {
+                out.push(' ');
+            }
+            column = next;
+        } else {
+            out.push(c);
+            column += 1;
+        }
+    }
+    out
+}
+
+/// Expands the tabs of the prefix of `line` before byte `at`.
+fn expand_tabs_prefix(line: &str, at: usize) -> String {
+    let at = at.min(line.len());
+    let mut cut = at;
+    while cut > 0 && !line.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    expand_tabs(&line[..cut])
+}
+
+/// The tints and marks of MyGo's diff viewer: the changed lines' colors
+/// mixed in Oklab over white, and the bars and marks of the changes.
+const ADDED_LINE: Color = Color::rgb(233, 248, 234);
+const ADDED_GUTTER: Color = Color::rgb(238, 250, 239);
+const DELETED_LINE: Color = Color::rgb(255, 234, 232);
+const DELETED_GUTTER: Color = Color::rgb(255, 239, 238);
+const ADDED_BAR: Color = Color::rgb(13, 190, 78);
+const DELETED_BAR: Color = Color::rgb(255, 46, 63);
+const MODIFIED: Color = Color::rgb(9, 159, 255);
+const LINE_NUMBER: Color = Color::rgb(149, 149, 154);
+const DIVIDER: Color = Color::rgb(244, 244, 245);
+/// The look of one diff line: its tint, its gutter's, its change bar's,
+/// and its number's, as MyGo's `lineLook`.
+#[derive(Debug, Clone, Copy, Default)]
+struct LineLook {
+    bg: Option<Color>,
+    gutter: Option<Color>,
+    bar: Option<Color>,
+    striped: bool,
+    number: Option<Color>,
+}
+
+impl LineLook {
+    fn same() -> Self {
+        LineLook::default()
+    }
+
+    fn added() -> Self {
+        LineLook {
+            bg: Some(ADDED_LINE),
+            gutter: Some(ADDED_GUTTER),
+            bar: Some(ADDED_BAR),
+            striped: false,
+            number: Some(ADDED_BAR),
+        }
+    }
+
+    fn removed() -> Self {
+        LineLook {
+            bg: Some(DELETED_LINE),
+            gutter: Some(DELETED_GUTTER),
+            bar: Some(DELETED_BAR),
+            striped: true,
+            number: Some(DELETED_BAR),
+        }
+    }
+}
+
+/// The geometry every line of a diff is drawn at.
+#[derive(Debug, Clone, Copy)]
+struct DiffGeometry {
+    gutter: f32,
+    text_x: f32,
+    line_height: f32,
+    line_top: f32,
+    code_size: f32,
+    scrollbar: f32,
+}
+
+/// Draws the hatched filler of the rows a side of a split view lacks:
+/// stripes at -45 degrees, every 8 DIPs, as Pierre's diffs.
+fn push_filler(
+    commands: &mut Vec<DrawCommand>,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    gutter: f32,
+    color: Color,
+) {
+    let left = x + gutter;
+    let right = x + width;
+    if right <= left || height <= 0.0 {
+        return;
+    }
+    // The stripes are those of the whole block, anchored at its
+    // bottom-left corner, so that they run on across its rows as MyGo's
+    // do (`fillerStripes`).
+    let bottom = y + height;
+    let phase = left + bottom;
+    let mut s = phase + 8.0 * ((left + y - phase) / 8.0).floor() + 8.0;
+    while s < right + bottom {
+        // One line across the block, as MyGo strokes it
+        // (`ui/editor/diffside.go` fillerStripes): the visible rect's clip
+        // cuts it at the sides, and cutting it at each row instead would
+        // leave the seam of every butt cap showing.
+        // MyGo clips the filler to the text column, left of the gutter;
+        // the stripes cross that edge, so each piece starts where it
+        // enters and ends where it leaves.
+        let y0 = bottom.min(s - left);
+        let y1 = y.max(s - right);
+        let x0 = s - y0;
+        let x1 = s - y1;
+        if x1 > x0 {
+            commands.push(DrawCommand::Line {
+                x1: x0,
+                y1: y0,
+                x2: x1,
+                y2: y1,
+                width: 1.0,
+                color,
+            });
+        }
+        s += 8.0;
+    }
+}
+
 pub fn container(context: &mut Context) -> ContainerBuilder<'_> {
     context.container()
 }
@@ -10627,6 +15693,37 @@ pub fn button(context: &mut Context, label: &str) -> ButtonState {
     context.button(label)
 }
 
+/// Creates a button with explicit padding, as MyGo's `Padding` on a plain
+/// button makes a numeric input's − and + buttons.
+pub fn button_padded(
+    context: &mut Context,
+    id: &str,
+    label: &str,
+    horizontal: f32,
+    vertical: f32,
+    active: bool,
+) -> ButtonState {
+    context.button_padded(id, label, horizontal, vertical, active)
+}
+
+/// Creates a padded button that shows as unavailable when `disabled` is set.
+pub fn button_padded_disabled(
+    context: &mut Context,
+    id: &str,
+    label: &str,
+    horizontal: f32,
+    vertical: f32,
+    active: bool,
+    disabled: bool,
+) -> ButtonState {
+    context.button_padded_disabled(id, label, horizontal, vertical, active, disabled)
+}
+
+/// Creates a button that shows as unavailable when `disabled` is set.
+pub fn button_disabled(context: &mut Context, label: &str, disabled: bool) -> ButtonState {
+    context.button_disabled(label, disabled)
+}
+
 /// Creates a filled primary button.
 pub fn button_primary(context: &mut Context, label: &str) -> ButtonState {
     context.button_primary(label)
@@ -10636,6 +15733,7 @@ pub fn button_primary(context: &mut Context, label: &str) -> ButtonState {
 pub fn button_with_icon(context: &mut Context, label: &str, icon_name: &str) -> ButtonState {
     context.button_with_icon(label, icon_name)
 }
+
 
 /// Creates a 36×36 icon-only button.
 pub fn icon_button(context: &mut Context, icon_name: &str) -> ButtonState {
@@ -10657,6 +15755,16 @@ pub fn spacer(context: &mut Context) {
 }
 
 /// Creates a text field.
+pub fn text_field_invalid(
+    context: &mut Context,
+    id: &str,
+    value: &mut String,
+    invalid: bool,
+) -> TextFieldState {
+    context.text_field_invalid(id, value, invalid)
+}
+
+/// Creates a single-line text field.
 pub fn text_field(context: &mut Context, id: &str, value: &mut String) -> TextFieldState {
     context.text_field(id, value)
 }
@@ -10706,9 +15814,123 @@ pub fn checkbox_indeterminate(
     context.checkbox_indeterminate(id, label, checked, indeterminate)
 }
 
-/// Creates a slider.
 pub fn slider(context: &mut Context, id: &str, value: &mut f32, min: f32, max: f32) -> SliderState {
     context.slider(id, value, min, max)
+}
+
+/// Creates a button with a trailing, muted icon.
+pub fn button_with_icon_after(
+    context: &mut Context,
+    label: &str,
+    icon_name: &str,
+) -> ButtonState {
+    context.button_with_icon_after(label, icon_name)
+}
+
+/// Creates a text field that shows `placeholder` while empty.
+pub fn text_field_placeholder(
+    context: &mut Context,
+    id: &str,
+    value: &mut String,
+    placeholder: &str,
+) -> TextFieldState {
+    context.text_field_placeholder(id, value, placeholder)
+}
+
+/// Creates a masked field that shows `placeholder` while empty.
+pub fn text_field_password_placeholder(
+    context: &mut Context,
+    id: &str,
+    value: &mut String,
+    placeholder: &str,
+) -> TextFieldState {
+    context.text_field_password_placeholder(id, value, placeholder)
+}
+
+/// Creates a multiline text area that shows `placeholder` while empty.
+pub fn text_area_placeholder(
+    context: &mut Context,
+    id: &str,
+    value: &mut String,
+    visible_lines: usize,
+    placeholder: &str,
+) -> TextFieldState {
+    context.text_area_placeholder(id, value, visible_lines, placeholder)
+}
+
+/// Creates a multiline text area at least `min_height` tall.
+pub fn text_area_sized(
+    context: &mut Context,
+    id: &str,
+    value: &mut String,
+    visible_lines: usize,
+    min_height: f32,
+) -> TextFieldState {
+    context.text_area_sized(id, value, visible_lines, min_height)
+}
+
+/// Creates a multiline text area at least `min_height` tall that shows a
+/// placeholder while empty, as MyGo's `TextArea(...).Placeholder`.
+pub fn text_area_sized_placeholder(
+    context: &mut Context,
+    id: &str,
+    value: &mut String,
+    visible_lines: usize,
+    min_height: f32,
+    placeholder: &str,
+) -> TextFieldState {
+    context.text_area_sized_placeholder(id, value, visible_lines, min_height, placeholder)
+}
+
+/// Creates a monospace multiline text area, as MyGo's
+/// `TextAreaBuffer(...).Font("monospace")`.
+pub fn text_area_mono(
+    context: &mut Context,
+    id: &str,
+    value: &mut String,
+    visible_lines: usize,
+    min_height: f32,
+) -> TextFieldState {
+    context.text_area_mono(id, value, visible_lines, min_height)
+}
+
+/// Creates a stepped slider with tick marks, as MyGo's StepSlider.
+pub fn slider_stepped(
+    context: &mut Context,
+    id: &str,
+    value: &mut f32,
+    min: f32,
+    max: f32,
+    step: f32,
+) -> SliderState {
+    context.slider_stepped(id, value, min, max, step)
+}
+
+/// Creates a radio button reporting clicks without owning the choice.
+pub fn radio(
+    context: &mut Context,
+    id: &str,
+    label: &str,
+    selected: &mut usize,
+    value: usize,
+) -> RadioState {
+    context.radio(id, label, selected, value)
+}
+
+/// Creates a MyGo segment reporting clicks without owning the choice.
+#[allow(clippy::too_many_arguments)]
+pub fn segment(
+    context: &mut Context,
+    id: &str,
+    label: &str,
+    icon: Option<&str>,
+    selected: bool,
+    padding: Edges,
+    radius: f32,
+    face: SegmentFace,
+    disabled: bool,
+) -> SegmentState {
+    context.segment(id, label, icon, selected, padding, radius, face, disabled)
 }
 
 /// Creates a vertically scrollable region.
@@ -10721,6 +15943,123 @@ pub fn scroll_view(
     context.scroll_view(id, viewport_height, content)
 }
 
+/// Creates a scroll view with a face, as MyGo's Scroll takes Background,
+/// Border, Radius and Padding.
+pub fn scroll_view_styled(
+    context: &mut Context,
+    id: &str,
+    viewport_height: f32,
+    style: ScrollStyle,
+    content: impl FnOnce(&mut Context),
+) -> ScrollState {
+    context.scroll_view_styled(id, viewport_height, style, content)
+}
+
+fn snap_slider_value(value: f32, min: f32, max: f32, step: f32) -> f32 {
+    if step <= 0.0 {
+        return value;
+    }
+    let mut snapped = min + ((value - min) / step).round() * step;
+    if snapped > max {
+        snapped -= step;
+    }
+    snapped.clamp(min, max)
+}
+
+/// Counts the tick marks of a slider, 0 for no step or too many to tell
+/// apart, as MyGo's `tickCount`.
+fn slider_tick_count(min: f32, max: f32, step: f32) -> usize {
+    if step <= 0.0 || max <= min {
+        return 0;
+    }
+    let n = ((max - min) / step + 1e-9).floor() as usize + 1;
+    if n > 61 {
+        0
+    } else {
+        n
+    }
+}
+
+/// Returns a one-pixel border of a rounded box as one filled path: the
+/// box's outline with the outline a pixel inside it wound the other way, so
+/// the nonzero fill leaves only the band between them. MyGo draws a border
+/// the same way (`internal/scene` OpFill's Border), and unlike a stroked
+/// path it covers whole pixel cells with no half-pixel seam.
+fn rounded_ring(width: f32, height: f32, radius: f32, border: f32, color: Color) -> DrawCommand {
+    let inner_width = (width - border * 2.0).max(0.0);
+    let inner_height = (height - border * 2.0).max(0.0);
+    let inner_radius = (radius - border).clamp(0.0, inner_width.min(inner_height) / 2.0);
+    let outer_radius = radius.clamp(0.0, width.min(height) / 2.0);
+    let path = format!(
+        // The outer edge, clockwise.
+        "M{r} 0H{w1}A{r} {r} 0 0 1 {w} {r}V{h1}A{r} {r} 0 0 1 {w1} {h}H{r}\
+         A{r} {r} 0 0 1 0 {h1}V{r}A{r} {r} 0 0 1 {r} 0Z\
+         M{ix} {iy2}V{ih1}A{ir} {ir} 0 0 0 {ix2} {ih}H{iw1}\
+         A{ir} {ir} 0 0 0 {iw} {ih1}V{iy2}A{ir} {ir} 0 0 0 {iw1} {iy}\
+         H{ix2}A{ir} {ir} 0 0 0 {ix} {iy2}Z",
+        r = outer_radius,
+        w1 = width - outer_radius,
+        w = width,
+        h1 = height - outer_radius,
+        h = height,
+        // The inner edge, counterclockwise from its top-left arc's end.
+        ix = border,
+        iy = border,
+        iw = border + inner_width,
+        ih = border + inner_height,
+        ir = inner_radius,
+        ix2 = border + inner_radius,
+        iy2 = border + inner_radius,
+        iw1 = border + inner_width - inner_radius,
+        ih1 = border + inner_height - inner_radius,
+    );
+    DrawCommand::SvgPath {
+        x: 0.0,
+        y: 0.0,
+        width,
+        height,
+        path,
+        fill: Some(color),
+        stroke: None,
+        stroke_width: 0.0,
+    }
+}
+
+/// Returns how thick MyGo strikes text of a size: a fourteenth of it, at
+/// least a pixel (`internal/text/canvas_js.go` font, `thick`).
+fn strike_thickness(font_size: f32) -> f32 {
+    (font_size / 14.0).max(1.0)
+}
+
+
+fn stroked_rounded_rect(width: f32, height: f32, radius: f32, color: Color) -> DrawCommand {
+    // A one-pixel border fills the outermost pixel cells, as MyGo's filled
+    // borders do: the stroke center sits half a pixel in, so the ring covers
+    // [0, 1) rather than straddling the edge and blurring across two pixels.
+    let inset = 0.5_f32.min(width.min(height) / 2.0);
+    let inner_width = (width - inset * 2.0).max(0.0);
+    let inner_height = (height - inset * 2.0).max(0.0);
+    let r = (radius - inset).clamp(0.0, inner_width.min(inner_height) / 2.0);
+    let path = format!(
+        "M{r} 0H{w1}A{r} {r} 0 0 1 {w} {r}V{h1}A{r} {r} 0 0 1 {w1} {h}H{r}A{r} {r} 0 0 1 0 {h1}V{r}A{r} {r} 0 0 1 {r} 0Z",
+        r = r,
+        w1 = inner_width - r,
+        w = inner_width,
+        h1 = inner_height - r,
+        h = inner_height,
+    );
+    DrawCommand::SvgPath {
+        x: inset,
+        y: inset,
+        width: inner_width,
+        height: inner_height,
+        path,
+        fill: None,
+        stroke: Some(color),
+        stroke_width: 1.0,
+    }
+}
+
 fn button_commands(
     label: &str,
     font_size: f32,
@@ -10729,49 +16068,48 @@ fn button_commands(
     pressed_progress: f32,
     focused: bool,
     primary: bool,
+    disabled: bool,
 ) -> Vec<DrawCommand> {
     let size = estimated_text_size(label, font_size, None);
     let hover_progress = hover_progress.clamp(0.0, 1.0);
     let pressed_progress = pressed_progress.clamp(0.0, 1.0);
     let hover_background = if primary {
-        mix_color(mix_color(theme.accent, Color::WHITE, 0.12), Color::WHITE, 0.08)
+        theme.accent_hover
     } else {
-        mix_color(theme.surface, theme.accent, 0.65)
+        theme.surface_hover
     };
     let pressed_background = if primary {
-        mix_color(theme.accent, Color::WHITE, 0.22)
+        theme.accent_pressed
     } else {
-        theme.accent
+        theme.surface_pressed
     };
     let background = mix_color(
         mix_color(
-            if primary { mix_color(theme.accent, Color::WHITE, 0.12) } else { theme.surface },
+            if primary { theme.accent } else { theme.surface },
             hover_background,
             hover_progress,
         ),
         pressed_background,
         pressed_progress,
     );
-    let emphasis = hover_progress.max(pressed_progress);
     let text_color = if primary {
         theme.on_accent
     } else {
-        mix_color(theme.foreground, theme.on_accent, emphasis)
+        theme.foreground
     };
-    let horizontal = theme.spacing.md;
-    let vertical = ((28.0 - measured_text_height(font_size)) / 2.0).max(0.0);
+    let horizontal = if primary { 14.0 } else { 15.0 };
+    let vertical = if primary { 6.0 } else { 7.0 };
     let width = size.width + horizontal * 2.0;
     let height = size.height + vertical * 2.0;
     let mut commands = Vec::new();
     if !primary {
-        let border = mix_color(theme.border, theme.accent, 0.35 * hover_progress);
         commands.push(DrawCommand::RoundedRect {
             x: 0.0,
             y: 0.0,
             width,
             height,
             radius: Radius::all(6.0),
-            color: border,
+            color: theme.border,
         });
     }
     commands.push(DrawCommand::RoundedRect {
@@ -10787,7 +16125,12 @@ fn button_commands(
         y: vertical,
         text: label.to_string(),
         font_size,
-        weight: 500,
+        italic: false,
+        mono: false,
+        family: None,
+        // MyGo's buttons take the theme's text as it is: its `styleButton`
+        // only sets the color, so the label stays at weight 400.
+        weight: 400,
         color: text_color,
         max_width: None,
         alignment: TextAlignment::Start,
@@ -10801,11 +16144,137 @@ fn button_commands(
             theme.accent,
         ));
     }
+    if disabled {
+        // MyGo draws a disabled element and its contents into a layer at
+        // half opacity (`Opacity(0.5)`), so each color blends once with the
+        // page behind it.
+        let dim = |color: Color| mix_color(color, theme.background, 0.5);
+        for command in &mut commands {
+            match command {
+                DrawCommand::RoundedRect { color, .. }
+                | DrawCommand::Rect { color, .. }
+                | DrawCommand::Line { color, .. } => *color = dim(*color),
+                DrawCommand::Text { color, .. } => *color = dim(*color),
+                _ => {}
+            }
+        }
+    }
     commands
 }
 
-fn hsv_to_color(hue: f32, saturation: f32, value: f32) -> Color {
-    let hue = if hue.is_finite() {
+/// Returns a circle's outline as a ring of the given stroke width, drawn
+/// with the painter's own geometry: a filled disc and a hole.
+fn stroked_circle(x: f32, y: f32, radius: f32, width: f32, color: Color) -> DrawCommand {
+    DrawCommand::SvgPath {
+        x: 0.0,
+        y: 0.0,
+        width: 0.0,
+        height: 0.0,
+        path: format!(
+            "M{} {}a{r} {r} 0 1 0 {} 0a{r} {r} 0 1 0 {} 0Z",
+            x - radius,
+            y,
+            radius * 2.0,
+            -radius * 2.0,
+            r = radius
+        ),
+        fill: None,
+        stroke: Some(color),
+        stroke_width: width,
+    }
+}
+
+/// Returns the gray squares that show transparency, as MyGo's `checkers`
+/// paints them: white behind, and 204 gray on every other square.
+///
+/// MyGo paints the checkerboard inside the track's capsule clip, which cuts
+/// the squares that reach the round ends; a corner square is then exactly
+/// the quarter disc of the capsule's end, so it is drawn as that disc. The
+/// cut only lands on a whole square when the square is as wide as the
+/// capsule's radius, which is the size these tracks use; otherwise the
+/// square is left uncut.
+fn checkerboard_commands(
+    width: f32,
+    y: f32,
+    height: f32,
+    size: f32,
+    radius: f32,
+) -> Vec<DrawCommand> {
+    let mut commands = vec![DrawCommand::Rect {
+        x: 0.0,
+        y,
+        width,
+        height,
+        color: Color::rgb(255, 255, 255),
+    }];
+    let columns = (width / size).ceil() as usize;
+    let rows = (height / size).ceil() as usize;
+    for row in 0..rows {
+        for column in 0..columns {
+            if (row + column) % 2 == 0 {
+                let x = column as f32 * size;
+                let square_y = y + row as f32 * size;
+                let square_width = size.min(width - x);
+                let square_height = size.min(y + height - square_y);
+                let at_left = x <= 0.0;
+                let at_right = x + square_width >= width;
+                let at_top = square_y <= y;
+                let at_bottom = square_y + square_height >= y + height;
+                let cuts = radius > 0.0
+                    && (square_width - radius).abs() < 0.01
+                    && (square_height - radius).abs() < 0.01
+                    && (at_left || at_right)
+                    && (at_top || at_bottom);
+                if cuts {
+                    let s = radius;
+                    let path = match (at_left, at_top) {
+                        (true, true) => format!("M{s},0A{s},{s} 0 0 0 0,{s}L{s},{s}Z"),
+                        (false, true) => format!("M0,0A{s},{s} 0 0 1 {s},{s}L0,{s}Z"),
+                        (true, false) => format!("M0,{s}A{s},{s} 0 0 0 {s},{s}L{s},0Z"),
+                        (false, false) => format!("M{s},0A{s},{s} 0 0 1 0,{s}L0,0Z"),
+                    };
+                    commands.push(DrawCommand::SvgPath {
+                        x,
+                        y: square_y,
+                        width: square_width,
+                        height: square_height,
+                        path,
+                        fill: Some(Color::rgb(204, 204, 204)),
+                        stroke: None,
+                        stroke_width: 0.0,
+                    });
+                } else {
+                    commands.push(DrawCommand::Rect {
+                        x,
+                        y: square_y,
+                        width: square_width,
+                        height: square_height,
+                        color: Color::rgb(204, 204, 204),
+                    });
+                }
+            }
+        }
+    }
+    commands
+}
+
+/// Sets a color panel's color from a new hue, saturation, value and alpha,
+/// keeping the panel's own state in step, and reports whether the color
+/// changed. Clamping happens here so every control agrees on the bounds.
+fn set_hsv(state: &mut ColorPanelState, color: &mut Color, next: Hsv) -> bool {
+    let next = next.clamped();
+    state.hsv = next;
+    let value = next.to_color();
+    let changed = value != *color;
+    if changed {
+        *color = value;
+    }
+    state.last = *color;
+    state.hex = hex_of(*color);
+    changed
+}
+
+fn hsv_to_color(hue: f32, saturation: f32, value: f32) -> Color {    let hue = if hue.is_finite() {
         hue.rem_euclid(360.0)
     } else {
         0.0
@@ -10865,7 +16334,33 @@ fn rgb_to_hsv(color: Color) -> (u16, u8, u8) {
 }
 
 /// Five-point star in a 24x24 view box, used by the rating control.
-const STAR_PATH: &str = "M12 2 L14.47 8.6 L21.51 8.91 L15.99 13.3 L17.88 20.09 L12 16.2 L6.12 20.09 L8.01 13.3 L2.49 8.91 L9.53 8.6 Z";
+/// A five-pointed star in a 24-unit box, as MyGo's `starPath` draws it
+/// (`ui/indicators.go`): its points reach 0.48 of the width from the center,
+/// its inner corners 0.2, and the center sits 0.04 of the height low.
+/// Returns MyGo's five-pointed star in a box `size` wide and tall
+/// (`ui/indicators.go` starPath): points on a circle 0.48 of the width out,
+/// turning at one 0.2 out, about a center a twenty-fifth of the height below
+/// the middle.
+fn star_path(size: f32) -> String {
+    let center_x = size / 2.0;
+    let center_y = size / 2.0 + size * 0.04;
+    let outer = size * 0.48;
+    let inner = size * 0.2;
+    let mut path = String::new();
+    for index in 0..10 {
+        let radius = if index % 2 == 0 { outer } else { inner };
+        let angle = index as f32 * std::f32::consts::PI / 5.0 - std::f32::consts::FRAC_PI_2;
+        let x = center_x + radius * angle.cos();
+        let y = center_y + radius * angle.sin();
+        if index == 0 {
+            path.push_str(&format!("M{x:.4} {y:.4}"));
+        } else {
+            path.push_str(&format!(" L{x:.4} {y:.4}"));
+        }
+    }
+    path.push_str(" Z");
+    path
+}
 
 fn mix_color(from: Color, to: Color, amount: f32) -> Color {
     let amount = if amount.is_finite() {
@@ -10886,20 +16381,174 @@ fn mix_color(from: Color, to: Color, amount: f32) -> Color {
     )
 }
 
-fn estimated_text_size(text: &str, font_size: f32, max_width: Option<f32>) -> Size {
-    let lines = if let Some(font) = default_font() {
-        let measurer = RealFontMeasurer::new(&font);
-        layout_text(text, font_size, max_width, &measurer)
-    } else {
-        layout_text(text, font_size, max_width, &ApproximateMeasurer)
-    };
-    Size::new(
-        lines.iter().map(|line| line.width).fold(0.0, f32::max),
-        lines.iter().map(|line| line.line_height).sum(),
-    )
+/// Measures line widths with the host canvas when it exports
+/// `myrust_measure_text`, and with the embedded face otherwise.
+struct HostMeasurer<'a> {
+    font: &'a FontFace,
 }
 
-fn measured_text_height(font_size: f32) -> f32 {
+impl TextMeasurer for HostMeasurer<'_> {
+    fn measure(&self, text: &str, font_size: f32) -> TextMetrics {
+        let font_size = font_size.max(1.0);
+        let line_height = self.font.line_height(font_size);
+        let lines = text.split('\n').collect::<Vec<_>>();
+        let width = lines
+            .iter()
+            .map(|line| {
+                host_text_width(line, font_size).unwrap_or_else(|| {
+                    line.chars()
+                        .map(|character| self.font.glyph_advance(character, font_size))
+                        .sum()
+                })
+            })
+            .fold(0.0_f32, f32::max);
+        TextMetrics {
+            width,
+            height: lines.len().max(1) as f32 * line_height,
+            line_height,
+        }
+    }
+}
+
+fn estimated_text_size(text: &str, font_size: f32, max_width: Option<f32>) -> Size {
+    estimated_text_size_styled(text, font_size, max_width, false, 400, None)
+}
+
+/// Measures text as it will be drawn: at its own weight and family, so that
+/// a bold or mono node is as wide as its glyphs, not as its 400-weight
+/// system-font text would be.
+fn estimated_text_size_styled(
+    text: &str,
+    font_size: f32,
+    max_width: Option<f32>,
+    mono: bool,
+    weight: u16,
+    family: Option<&str>,
+) -> Size {
+    // The line box is the styled face's, so a monospace run is measured
+    // with the monospace face's ascent and descent, as MyGo lays it
+    // (`internal/text/canvas_js.go` font).
+    let line_height = measured_text_height_styled(font_size, mono);
+    let mut widest = 0.0_f32;
+    let mut lines = 0_usize;
+    for line in text.split('\n') {
+        let width = family
+            .and_then(|family| {
+                host_text_width_family(line, font_size, false, mono, weight, family)
+            })
+            .or_else(|| host_text_width_weighted(line, font_size, false, mono, weight))
+            .or_else(|| host_text_width(line, font_size))
+            .unwrap_or_else(|| {
+                default_font()
+                    .map(|font| {
+                        line.chars()
+                            .map(|character| font.glyph_advance(character, font_size))
+                            .sum()
+                    })
+                    .unwrap_or_else(|| line.chars().count() as f32 * font_size * 0.5)
+            });
+        let width = match max_width {
+            Some(max) if max > 0.0 => width.min(max),
+            _ => width,
+        };
+        widest = widest.max(width);
+        lines += 1;
+    }
+    Size::new(widest, lines.max(1) as f32 * line_height)
+}
+
+/// The hue of a name's FNV-1a hash, as MyGo picks an avatar's color
+/// (`ui/indicators.go` coreAvatar).
+fn fnv1a_hue(name: &str) -> f64 {
+    let mut hash: u32 = 2_166_136_261;
+    for byte in name.bytes() {
+        hash = (hash ^ u32::from(byte)).wrapping_mul(16_777_619);
+    }
+    f64::from(hash % 360)
+}
+
+/// An HSL color at a hue, saturation and lightness, as MyGo's hslColor.
+fn hsl_color(hue: f64, saturation: f64, lightness: f64) -> Color {
+    let c = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let x = c * (1.0 - ((hue / 60.0) % 2.0 - 1.0).abs());
+    let m = lightness - c / 2.0;
+    let (r, g, b) = if hue < 60.0 {
+        (c, x, 0.0)
+    } else if hue < 120.0 {
+        (x, c, 0.0)
+    } else if hue < 180.0 {
+        (0.0, c, x)
+    } else if hue < 240.0 {
+        (0.0, x, c)
+    } else if hue < 300.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+    let channel = |value: f64| ((value + m) * 255.0) as u8;
+    Color::rgb(channel(r), channel(g), channel(b))
+}
+
+/// The first letters of the first and last words of a name, uppercased, as
+/// MyGo's initials (`ui/indicators.go`).
+fn avatar_initials(name: &str) -> String {
+    let mut first: Option<char> = None;
+    let mut last: Option<char> = None;
+    let mut in_word = false;
+    for character in name.chars() {
+        let letter = character.is_alphanumeric();
+        if letter && !in_word {
+            if first.is_none() {
+                first = Some(character.to_uppercase().next().unwrap_or(character));
+            } else {
+                last = Some(character.to_uppercase().next().unwrap_or(character));
+            }
+        }
+        in_word = letter;
+    }
+    match (first, last) {
+        (None, _) => String::new(),
+        (Some(first), None) => first.to_string(),
+        (Some(first), Some(last)) => format!("{first}{last}"),
+    }
+}
+
+/// Cuts `text` to what fits `max_width`, ending it with an ellipsis, as
+/// MyGo's SingleLine with its default ellipsis does.
+fn truncate_with_ellipsis(text: &str, font_size: f32, max_width: f32) -> String {
+    if measure_text_width(text, font_size) <= max_width {
+        return text.to_string();
+    }
+    let ellipsis = "\u{2026}";
+    let ellipsis_width = measure_text_width(ellipsis, font_size);
+    let mut kept = String::new();
+    for character in text.chars() {
+        let mut candidate = kept.clone();
+        candidate.push(character);
+        if measure_text_width(&candidate, font_size) + ellipsis_width > max_width {
+            break;
+        }
+        kept = candidate;
+    }
+    kept.push_str(ellipsis);
+    kept
+}
+
+pub fn measured_text_height(font_size: f32) -> f32 {
+    measured_text_height_styled(font_size, false)
+}
+
+/// Returns the line box height of the styled font: MyGo lays a line as tall
+/// as the canvas font's ascent and descent (`internal/text/canvas_js.go`
+/// font), which the monospace family makes a pixel shorter than the sans
+/// one.
+pub fn measured_text_height_styled(font_size: f32, mono: bool) -> f32 {
+    if let (Some(ascent), Some(descent)) = (
+        host_text_ascent(font_size, false, mono, false),
+        host_text_descent(font_size, false, mono, false),
+    ) {
+        return ascent + descent;
+    }
     if let Some(font) = default_font() {
         font.line_height(font_size)
     } else {
@@ -10907,8 +16556,11 @@ fn measured_text_height(font_size: f32) -> f32 {
     }
 }
 
-fn measure_text_width(text: &str, font_size: f32) -> f32 {
+pub(crate) fn measure_text_width(text: &str, font_size: f32) -> f32 {
     if let Some(font) = default_font() {
+        if let Some(width) = host_text_width(text, font_size) {
+            return width;
+        }
         text.chars()
             .map(|character| font.glyph_advance(character, font_size))
             .sum()
@@ -11050,40 +16702,281 @@ fn sidebar_item_id<'a>(sections: &'a [SidebarSection<'_>], target: usize) -> Opt
     None
 }
 
+/// How an image fills its box, as MyGo's Fit (`ui/paint.go` fitIn).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImageFit {
+    /// Stretch to the box, ignoring the picture's shape.
+    #[default]
+    Fill,
+    /// Fit the whole picture inside the box, leaving room around it.
+    Contain,
+    /// Cover the box with the picture, cropping what falls outside.
+    Cover,
+    /// Contain, but never scale the picture up.
+    ScaleDown,
+    /// The picture's own size, cropped by the box.
+    NaturalSize,
+}
+
+/// The face of an image: how it fills its box, its corner radius and
+/// whether it draws in gray, as MyGo's Image takes Fit, Radius and
+/// Grayscale.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ImageStyle {
+    /// How the picture fills the box.
+    pub fit: ImageFit,
+    /// Corner radius of the box.
+    pub radius: f32,
+    /// Whether the picture draws in gray.
+    pub grayscale: bool,
+}
+
+/// The part of an image's source that shows, as fractions of it.
+#[derive(Debug, Clone, Copy)]
+struct ImageRegion {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+impl Default for ImageRegion {
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        }
+    }
+}
+
+/// The rounded box an image's cells are masked by, in the image's own
+/// coordinates: MyGo rounds the rect the picture is placed in
+/// (`ui/paint.go` drawBitmap's `p.radii(radius)` on `dst`).
+#[derive(Debug, Clone, Copy, Default)]
+struct ImageMask {
+    /// Corner radii of the placed rect.
+    radius: Radius,
+    /// Where the scaler's own origin sits inside the placed rect.
+    origin_x: f32,
+    /// Where the scaler's own origin sits inside the placed rect.
+    origin_y: f32,
+    /// Width of the placed rect.
+    width: f32,
+    /// Height of the placed rect.
+    height: f32,
+}
+
+impl ImageMask {
+    /// Returns how much of one cell falls inside the rounded rect, from 0
+    /// for none to 1 for all.
+    ///
+    /// A corner's edge is a quarter circle, so a cell that straddles it
+    /// covers a fraction no single distance tells: sampling a 4×4 grid over
+    /// the cell and counting the points inside estimates that area the way
+    /// MyGo's GPU shader antialiases the same edge.
+    fn coverage(&self, x: f32, y: f32, cell_width: f32, cell_height: f32) -> f32 {
+        if self.radius == Radius::default() || self.width <= 0.0 || self.height <= 0.0 {
+            return 1.0;
+        }
+        // The cell in the placed rect's own coordinates.
+        let left = x + self.origin_x;
+        let top = y + self.origin_y;
+        let right = left + cell_width;
+        let bottom = top + cell_height;
+        let limit = self.width.min(self.height) / 2.0;
+        let corners = [
+            (self.radius.top_left.clamp(0.0, limit), false, false),
+            (self.radius.top_right.clamp(0.0, limit), true, false),
+            (self.radius.bottom_right.clamp(0.0, limit), true, true),
+            (self.radius.bottom_left.clamp(0.0, limit), false, true),
+        ];
+        // A corner only reaches into the cell when it straddles that
+        // corner's quadrant.
+        let mut straddled: Vec<(f32, f32, f32, bool, bool)> = Vec::new();
+        for (corner_radius, right_side, bottom_side) in corners {
+            if corner_radius <= 0.0 {
+                continue;
+            }
+            let center_x = if right_side {
+                self.width - corner_radius
+            } else {
+                corner_radius
+            };
+            let center_y = if bottom_side {
+                self.height - corner_radius
+            } else {
+                corner_radius
+            };
+            let in_corner = if right_side {
+                left > center_x
+            } else {
+                right < center_x
+            } && if bottom_side {
+                top > center_y
+            } else {
+                bottom < center_y
+            };
+            if in_corner {
+                straddled.push((center_x, center_y, corner_radius, right_side, bottom_side));
+            }
+        }
+        if straddled.is_empty() {
+            return 1.0;
+        }
+        const STEPS: usize = 4;
+        let mut inside = 0;
+        for row in 0..STEPS {
+            let sample_y = top + cell_height * (row as f32 + 0.5) / STEPS as f32;
+            for column in 0..STEPS {
+                let sample_x = left + cell_width * (column as f32 + 0.5) / STEPS as f32;
+                let covered = straddled
+                    .iter()
+                    .all(|&(center_x, center_y, radius, right_side, bottom_side)| {
+                        let dx = sample_x - center_x;
+                        let dy = sample_y - center_y;
+                        // The arc only cuts the corner's own quadrant; the
+                        // rest of the rect's sides are straight and cover
+                        // the point. A circle's four centers coincide at the
+                        // middle, so the quadrant comes from the corner's
+                        // side, not from where its center falls.
+                        let towards_x = if right_side { dx > 0.0 } else { dx < 0.0 };
+                        let towards_y = if bottom_side { dy > 0.0 } else { dy < 0.0 };
+                        !(towards_x && towards_y) || dx * dx + dy * dy <= radius * radius
+                    });
+                if covered {
+                    inside += 1;
+                }
+            }
+        }
+        inside as f32 / (STEPS * STEPS) as f32
+    }
+}
+
 fn scaled_rgba_commands(
     data: ImageData<'_>,
     commands: &mut Vec<DrawCommand>,
     target_width: f32,
     target_height: f32,
     circular_mask: bool,
+    scale: f32,
+) -> (usize, usize) {
+    // A circular mask rounds the whole box by half its width.
+    let mask = if circular_mask {
+        ImageMask {
+            radius: Radius::all(target_width.min(target_height) / 2.0),
+            origin_x: 0.0,
+            origin_y: 0.0,
+            width: target_width,
+            height: target_height,
+        }
+    } else {
+        ImageMask::default()
+    };
+    scaled_rgba_commands_with(
+        data,
+        commands,
+        target_width,
+        target_height,
+        mask,
+        ImageRegion::default(),
+        false,
+        scale,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Samples an RGBA picture at a fractional position, interpolating between
+/// the four pixels around it, as a GPU texture sampler does.
+fn bilinear_sample(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    x: f32,
+    y: f32,
+) -> (u8, u8, u8) {
+    if width == 0 || height == 0 {
+        return (0, 0, 0);
+    }
+    // Pixel centers sit at half-integers, so the sample moves back half a
+    // pixel before it is split into a cell and a weight within it.
+    let sample_x = (x - 0.5).max(0.0);
+    let sample_y = (y - 0.5).max(0.0);
+    let x0 = (sample_x.floor() as usize).min(width - 1);
+    let y0 = (sample_y.floor() as usize).min(height - 1);
+    let x1 = (x0 + 1).min(width - 1);
+    let y1 = (y0 + 1).min(height - 1);
+    let fx = sample_x - sample_x.floor();
+    let fy = sample_y - sample_y.floor();
+    let texel = |px: usize, py: usize, channel: usize| -> f32 {
+        f32::from(pixels[(py * width + px) * 4 + channel])
+    };
+    let mut out = [0_u8; 3];
+    for (channel, slot) in out.iter_mut().enumerate() {
+        let top = texel(x0, y0, channel) * (1.0 - fx) + texel(x1, y0, channel) * fx;
+        let bottom = texel(x0, y1, channel) * (1.0 - fx) + texel(x1, y1, channel) * fx;
+        *slot = (top * (1.0 - fy) + bottom * fy).round() as u8;
+    }
+    (out[0], out[1], out[2])
+}
+
+fn scaled_rgba_commands_with(
+    data: ImageData<'_>,
+    commands: &mut Vec<DrawCommand>,
+    target_width: f32,
+    target_height: f32,
+    mask: ImageMask,
+    region: ImageRegion,
+    grayscale: bool,
+    scale: f32,
 ) -> (usize, usize) {
     if !data.is_valid() {
         return (0, 0);
     }
-    let columns = (target_width.round() as usize).clamp(1, 512);
-    let rows = (target_height.round() as usize).clamp(1, 512);
+    // MyGo samples the picture once per device pixel, as its shader runs
+    // over the frame's pixels, not its DIPs.
+    let scale = scale.max(1.0);
+    let columns = ((target_width * scale).round() as usize).clamp(1, 1024);
+    let rows = ((target_height * scale).round() as usize).clamp(1, 1024);
     let cell_width = target_width / columns as f32;
     let cell_height = target_height / rows as f32;
     let source_width = data.width as usize;
     let source_height = data.height as usize;
     for row in 0..rows {
         for column in 0..columns {
-            if circular_mask {
-                let nx = (column as f32 + 0.5) / columns as f32 * 2.0 - 1.0;
-                let ny = (row as f32 + 0.5) / rows as f32 * 2.0 - 1.0;
-                if nx * nx + ny * ny > 1.0 {
-                    continue;
-                }
-            }
-            let source_x = (column * source_width / columns).min(source_width - 1);
-            let source_y = (row * source_height / rows).min(source_height - 1);
-            let offset = (source_y * source_width + source_x) * 4;
-            let color = Color::rgba(
-                data.pixels[offset],
-                data.pixels[offset + 1],
-                data.pixels[offset + 2],
-                data.pixels[offset + 3],
+            let coverage = mask.coverage(
+                column as f32 * cell_width,
+                row as f32 * cell_height,
+                cell_width,
+                cell_height,
             );
+            if coverage <= 0.0 {
+                continue;
+            }
+            let sample_x = region.x * source_width as f32
+                + (column as f32 + 0.5) / columns as f32 * region.width * source_width as f32;
+            let sample_y = region.y * source_height as f32
+                + (row as f32 + 0.5) / rows as f32 * region.height * source_height as f32;
+            // MyGo draws an image as one GPU texture, whose sampler
+            // interpolates between source pixels; sampling each cell's
+            // center bilinearly keeps a scaled picture's gradients and
+            // edges as smooth as that draw, where nearest sampling would
+            // step them.
+            let (mut red, mut green, mut blue) =
+                bilinear_sample(data.pixels, source_width, source_height, sample_x, sample_y);
+            if grayscale {
+                let luma = (0.2126 * f32::from(red) + 0.7152 * f32::from(green) + 0.0722 * f32::from(blue))
+                    .round() as u8;
+                red = luma;
+                green = luma;
+                blue = luma;
+            }
+            let nearest_x = (sample_x as usize).min(source_width - 1);
+            let nearest_y = (sample_y as usize).min(source_height - 1);
+            let alpha_offset = (nearest_y * source_width + nearest_x) * 4 + 3;
+            let alpha = (f32::from(data.pixels[alpha_offset]) * coverage).round() as u8;
+            let color = Color::rgba(red, green, blue, alpha);
             commands.push(DrawCommand::Rect {
                 x: column as f32 * cell_width,
                 y: row as f32 * cell_height,
@@ -11682,11 +17575,10 @@ mod tests {
             })
             .expect("button background");
         let midpoint = Animation::default().value(0.5);
-        let hover = mix_color(theme.surface, theme.accent, 0.65);
         assert_eq!(
             background,
-            mix_color(theme.surface, hover, midpoint),
-            "hover animation should interpolate toward the themed accent"
+            mix_color(theme.surface, theme.surface_hover, midpoint),
+            "hover animation should interpolate toward the themed surface hover"
         );
     }
 
@@ -12326,7 +18218,8 @@ mod tests {
             .iter()
             .filter(|command| matches!(command, DrawCommand::Line { .. }))
             .count();
-        assert_eq!(spokes, 8);
+        // MyGo's coreSpinner strokes twelve spokes a twelfth of a turn apart.
+        assert_eq!(spokes, 12);
         assert!(state.spinning);
         assert!(frame.needs_animation_frame);
         assert!(frame
@@ -12343,8 +18236,17 @@ mod tests {
         let badge = context.badge("42");
         let frame = context.produce().unwrap();
         assert!(badge.width > 0.0 && badge.height > 0.0);
+        // MyGo fills the pill with the text color at 10% (`ui/sidebar.go`
+        // coreBadge's `t.Text.Alpha(0.1)`), not the accent.
+        let theme = context.theme();
+        let tint = Color::rgba(
+            theme.foreground.r,
+            theme.foreground.g,
+            theme.foreground.b,
+            26,
+        );
         assert!(frame.display.commands.iter().any(|command| {
-            matches!(command, DrawCommand::RoundedRect { color, .. } if *color == context.theme().accent)
+            matches!(command, DrawCommand::RoundedRect { color, .. } if *color == tint)
         }));
         assert!(frame
             .access_nodes
@@ -12581,3 +18483,256 @@ mod tests {
         );
     }
 }
+
+
+/// Turns parsed inline spans into the runs MyGo's markdown view styles:
+/// strong 600, italic slanted, code monospaced in a tinted pill, links in
+/// the accent, and strikethrough struck.
+fn markdown_runs(
+    spans: &[InlineSpan],
+    size: f32,
+    weight: u16,
+    color: Color,
+    theme: &Theme,
+) -> Vec<RichTextSpan> {
+    spans
+        .iter()
+        .map(|span| {
+            let mut run = RichTextSpan::new(span.text.clone());
+            run.font_size = size;
+            run.weight = weight;
+            run.color = Some(color);
+            match &span.style {
+                InlineStyle::Plain => {}
+                InlineStyle::Bold => run.weight = 600,
+                InlineStyle::Italic => run.italic = true,
+                InlineStyle::Strikethrough => run.strikethrough = true,
+                InlineStyle::Code => {
+                    run.mono = true;
+                    run.font_size = size * 0.875;
+                    run.background = Some(Color::rgba(24, 24, 27, 18));
+                    run.background_radius = 3.06;
+                }
+                InlineStyle::Link { .. } => run.color = Some(theme.accent),
+            }
+            run
+        })
+        .collect()
+}
+
+
+/// The kind of one run of Go source, for the editor theme's colors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodeColor {
+    Text,
+    Keyword,
+    Type,
+    Constant,
+    Function,
+    Property,
+    Operator,
+    Number,
+    String,
+    Comment,
+}
+
+/// Splits one line of Go into runs with their colors, as the editor's
+/// tokenizer names them.
+/// The width of one breadcrumb item: its label at the weight it draws in,
+/// padded `pad` either side, and at least Space(6) = 24 unless it is the
+/// path's last item.
+fn crumb_width(label: &str, font_size: f32, last: bool, pad: f32) -> f32 {
+    let weight = if last { 500 } else { 400 };
+    let text = host_text_width_weighted(label, font_size, false, false, weight)
+        .unwrap_or_else(|| measure_text_width(label, font_size));
+    let padded = text + pad * 2.0;
+    if last {
+        padded
+    } else {
+        padded.max(24.0)
+    }
+}
+
+/// Columns of a line's indentation, tabs going to tab stops. A blank line
+/// takes the larger of the nearest non-blank lines around it, as MyGo's
+/// `lineIndent` does.
+fn line_indent(lines: &[&str], index: usize, tab_size: usize) -> usize {
+    let indent = |line: &str| -> usize {
+        let mut column = 0;
+        for character in line.chars() {
+            match character {
+                '\t' => column += tab_size - column % tab_size,
+                ' ' => column += 1,
+                _ => return column,
+            }
+        }
+        column
+    };
+    if lines.get(index).is_some_and(|line| !line.trim().is_empty()) {
+        return indent(lines[index]);
+    }
+    let before = (0..index)
+        .rev()
+        .take(50)
+        .find_map(|i| lines.get(i).filter(|line| !line.trim().is_empty()).map(|l| indent(l)))
+        .unwrap_or(0);
+    let after = (index + 1..lines.len())
+        .take(50)
+        .find_map(|i| lines.get(i).filter(|line| !line.trim().is_empty()).map(|l| indent(l)))
+        .unwrap_or(0);
+    before.max(after)
+}
+
+/// The display column a character of a line starts at, tabs expanded.
+fn display_column(line: &str, characters: usize, tab_size: usize) -> usize {
+    let mut column = 0;
+    for (seen, character) in line.chars().enumerate() {
+        if seen == characters {
+            break;
+        }
+        if character == '\t' {
+            column += tab_size - column % tab_size;
+        } else {
+            column += 1;
+        }
+    }
+    column
+}
+
+/// The wavy line MyGo rules under a diagnostic (`squiggle` in
+/// `ui/editor/paint.go`): a 4-pixel wave 1.25 either side of `y`.
+fn squiggle_path(x: f32, y: f32, width: f32) -> String {
+    if width <= 0.0 {
+        return String::new();
+    }
+    const WAVE: f32 = 4.0;
+    let mut path = format!("M{x} {y}");
+    let mut step = 0;
+    let mut i = 0.0_f32;
+    while i < width {
+        let dy = if step % 2 == 0 { 1.25 } else { -1.25 };
+        let next = (x + i + WAVE / 2.0).min(x + width);
+        path.push_str(&format!("L{next} {}", y + dy));
+        i += WAVE / 2.0;
+        step += 1;
+    }
+    path
+}
+
+fn go_token_kinds(line: &str) -> Vec<(String, CodeColor)> {
+    go_tokens(line)
+}
+
+/// Splits one line of Go into colored runs: keywords and operators red,
+/// calls purple, selectors and numbers blue, strings navy, comments gray,
+/// as MyGo's editor theme paints them.
+fn go_tokens(line: &str) -> Vec<(String, CodeColor)> {
+    const KEYWORDS: [&str; 25] = [
+        "break", "case", "chan", "const", "continue", "default", "defer", "else", "fallthrough",
+        "for", "func", "go", "goto", "if", "import", "interface", "map", "package", "range",
+        "return", "select", "struct", "switch", "type", "var",
+    ];
+    // MyGo's Go language names these built-in types and functions
+    // (`ui/editor/languages.go`), which its theme colors apart from text.
+    const TYPES: [&str; 22] = [
+        "any", "bool", "byte", "comparable", "complex64", "complex128", "error", "float32",
+        "float64", "int", "int8", "int16", "int32", "int64", "rune", "string", "uint", "uint8",
+        "uint16", "uint32", "uint64", "uintptr",
+    ];
+    const CONSTANTS: [&str; 4] = ["true", "false", "nil", "iota"];
+    const BUILTINS: [&str; 19] = [
+        "append", "cap", "clear", "close", "complex", "copy", "delete", "imag", "len", "make",
+        "max", "min", "new", "panic", "print", "println", "real", "recover", "complex",
+    ];
+    let chars: Vec<char> = line.chars().collect();
+    let mut runs = Vec::new();
+    let mut plain = String::new();
+    let push_plain = |runs: &mut Vec<(String, CodeColor)>, plain: &mut String| {
+        if !plain.is_empty() {
+            runs.push((std::mem::take(plain), CodeColor::Text));
+        }
+    };
+    let mut index = 0;
+    while index < chars.len() {
+        let character = chars[index];
+        if character == '/' && chars.get(index + 1) == Some(&'/') {
+            push_plain(&mut runs, &mut plain);
+            runs.push((chars[index..].iter().collect(), CodeColor::Comment));
+            break;
+        }
+        if character == '"' || character == '\'' || character == '`' {
+            push_plain(&mut runs, &mut plain);
+            let quote = character;
+            let mut end = index + 1;
+            while end < chars.len() {
+                if chars[end] == '\\' {
+                    end += 2;
+                    continue;
+                }
+                if chars[end] == quote {
+                    end += 1;
+                    break;
+                }
+                end += 1;
+            }
+            runs.push((chars[index..end.min(chars.len())].iter().collect(), CodeColor::String));
+            index = end;
+            continue;
+        }
+        if character.is_ascii_digit() {
+            push_plain(&mut runs, &mut plain);
+            let mut end = index + 1;
+            while end < chars.len()
+                && (chars[end].is_ascii_alphanumeric() || chars[end] == '.' || chars[end] == '_')
+            {
+                end += 1;
+            }
+            runs.push((chars[index..end].iter().collect(), CodeColor::Number));
+            index = end;
+            continue;
+        }
+        if character.is_alphabetic() || character == '_' {
+            push_plain(&mut runs, &mut plain);
+            let mut end = index + 1;
+            while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
+                end += 1;
+            }
+            let word: String = chars[index..end].iter().collect();
+            let after_dot = index > 0 && chars[index - 1] == '.';
+            let mut next = end;
+            while next < chars.len() && chars[next].is_whitespace() {
+                next += 1;
+            }
+            let calls = chars.get(next) == Some(&'(');
+            let kind = if KEYWORDS.contains(&word.as_str()) {
+                CodeColor::Keyword
+            } else if TYPES.contains(&word.as_str()) {
+                CodeColor::Type
+            } else if CONSTANTS.contains(&word.as_str()) {
+                CodeColor::Constant
+            } else if BUILTINS.contains(&word.as_str()) {
+                CodeColor::Function
+            } else if calls {
+                CodeColor::Function
+            } else if after_dot {
+                CodeColor::Property
+            } else {
+                CodeColor::Text
+            };
+            runs.push((word, kind));
+            index = end;
+            continue;
+        }
+        if "&|+-*/%=<>!^~".contains(character) {
+            push_plain(&mut runs, &mut plain);
+            runs.push((character.to_string(), CodeColor::Operator));
+            index += 1;
+            continue;
+        }
+        plain.push(character);
+        index += 1;
+    }
+    push_plain(&mut runs, &mut plain);
+    runs
+}
+
