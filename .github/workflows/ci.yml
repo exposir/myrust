@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests
+        run: cargo test -p myrust-ui -p myrust-core
+      - name: Clippy
+        # Warnings are not errors yet: the tree hand-formats some code and
+        # carries a few style warnings. Errors (denied lints) fail the job.
+        run: cargo clippy -p myrust-ui -p myrust-core --all-targets
+      - name: Demo wasm
+        run: cargo build -p demo-wasm --target wasm32-unknown-unknown --release
+      - name: Docs match their source
+        run: |
+          python3 website/docs-src/build.py
+          git diff --exit-code -- website/docs/ui website/assets/docs-entries.js

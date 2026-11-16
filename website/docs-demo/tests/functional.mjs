@@ -199,6 +199,12 @@ const demos = [
   { slug: "markdown", h: 440, steps: [
     { c: { text: "Stream it" }, e: { probe: 1 } },
     { c: { text: "Sentence" }, e: { probe: 3 } }] },
+  { slug: "drag-and-drop", h: 230, steps: [
+    { drop: [{ name: "note.txt", content: "hello\nworld", type: "text/plain" }],
+      e: { probe: 1, text: "note.txt" } },
+    { drop: [{ name: "note.txt", content: "hello\nworld", type: "text/plain" },
+             { name: "blob.bin", size: 2500, type: "application/octet-stream" }],
+      e: { probe: 2, text: "2.5 KB" } }] },
 ];
 
 const task = await taskSpace("docs-demo-functional");
@@ -259,6 +265,20 @@ for (const demo of demos) {
   for (const step of demo.steps) {
     const want = step.e || {};
     const before = await page.evaluate(() => window.__demoProbe());
+    if (step.drop) {
+      await page.evaluate(files => {
+        const transfer = new DataTransfer();
+        for (const file of files) {
+          const body = file.content !== undefined
+            ? [file.content]
+            : [new Uint8Array(file.size || 0)];
+          transfer.items.add(new File(body, file.name, { type: file.type || "" }));
+        }
+        document.getElementById("canvas").dispatchEvent(new DragEvent("drop",
+          { bubbles: true, cancelable: true, dataTransfer: transfer }));
+      }, step.drop);
+      await sleep(400);
+    }
     const target = step.c || step.right || step.hover;
     let point = null;
     if (target) point = await page.evaluate(findPoint, target);

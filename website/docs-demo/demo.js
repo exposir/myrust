@@ -733,6 +733,51 @@ function cssFamilyOf(name) {
     render();
   }, { passive: false });
 
+  // A page can take files dropped on it, but only their names, sizes and
+  // bytes — not the path a desktop build reads with os.ReadFile. The demo's
+  // drop zone lists what a drop delivered (`demo_drop_files`).
+  function firstLine(file) {
+    if (!file.size) return Promise.resolve("");
+    if (file.type && file.type.indexOf("text/") !== 0 && file.type !== "application/json") {
+      return Promise.resolve("");
+    }
+    return file.slice(0, 4096).text().then(function (text) {
+      var line = text.split("\n")[0].replace(/^\s+|\s+$/g, "");
+      line = line.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "");
+      return line.slice(0, 80);
+    }).catch(function () { return ""; });
+  }
+
+  function hostDrop(files) {
+    Promise.all(files.slice(0, 8).map(function (file) {
+      return firstLine(file).then(function (line) {
+        return file.name.replace(/[\t\r\n]/g, " ") + "\t" + file.size + "\t" + line;
+      });
+    })).then(function (rows) {
+      var bytes = new TextEncoder().encode(rows.join("\n"));
+      if (!wasm.demo_host_buffer || bytes.length > 65536) return;
+      var pointer = wasm.demo_host_buffer();
+      new Uint8Array(wasm.memory.buffer, pointer, bytes.length).set(bytes);
+      wasm.demo_drop_files(bytes.length);
+      render();
+    });
+  }
+
+  canvas.addEventListener("dragover", function (event) {
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    if (wasm.demo_drag_hover) wasm.demo_drag_hover(1);
+  });
+  canvas.addEventListener("dragleave", function () {
+    if (wasm.demo_drag_hover) wasm.demo_drag_hover(0);
+  });
+  canvas.addEventListener("drop", function (event) {
+    event.preventDefault();
+    if (wasm.demo_drag_hover) wasm.demo_drag_hover(0);
+    var files = event.dataTransfer ? Array.prototype.slice.call(event.dataTransfer.files || []) : [];
+    if (files.length) hostDrop(files);
+  });
+
   var keys = {
     Tab: 1, Enter: 2, " ": 3, ArrowLeft: 4, ArrowRight: 5, ArrowUp: 6,
     ArrowDown: 7, Escape: 8, Backspace: 9, Delete: 10, Home: 11, End: 12,
@@ -763,7 +808,7 @@ function cssFamilyOf(name) {
   var measureCanvas = document.createElement("canvas");
   var measureCtx = measureCanvas.getContext("2d");
   var measureDecoder = new TextDecoder();
-  WebAssembly.instantiateStreaming(fetch("./demo.wasm?v=r295"), {
+  WebAssembly.instantiateStreaming(fetch("./demo.wasm?v=25ff3ac77f"), {
     env: {
       myrust_now_ms: function () { return performance.now(); },
       myrust_measure_text: function (ptr, len, size) {

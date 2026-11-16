@@ -210,9 +210,11 @@ impl Band {
 }
 
 /// Tick spacing d3-array uses: steps of 1, 2 or 5 times a power of ten.
+/// The thresholds are sqrt(50), sqrt(10) and sqrt(2), as in d3-array's
+/// `e10`, `e5` and `e2`.
 const E10: f64 = 7.071_067_811_865_475_5;
 const E5: f64 = 3.162_277_660_168_379_5;
-const E2: f64 = 1.414_213_562_373_095_1;
+const E2: f64 = std::f64::consts::SQRT_2;
 
 fn tick_spec(lo: f64, hi: f64, count: f64) -> (f64, f64, f64) {
     let step = (hi - lo) / count.max(0.0);

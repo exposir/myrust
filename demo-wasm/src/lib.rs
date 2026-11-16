@@ -28,7 +28,7 @@ use myrust_ui::{
     AccordionState, AutocompleteState, AvatarShape, BreadcrumbItem, CalendarState,
     CodeDiagnostic, CodeEditorOptions, CodeEditorState, CodeSeverity, ColorPanelState, ColorPickerState, ComboboxState, ContextMenuState, DateInputState, DateStyle,
     DecimalInputOptions, DialogAction, DiffViewerState, Direction, Color, Context,
-    DragState, DrawCommand, EditableTextState, FontFace,
+    DrawCommand, EditableTextState, FontFace,
     GridViewState, ImageData, InspectorItem, InspectorTree, ListState, Locale, MenuState,
     NativeUi,
     NumberInputOptions, OverlayState, Page, PaintSummary, RangeSliderState, Role,
@@ -42,6 +42,85 @@ use myrust_ui::{
 thread_local! {
     static APP: RefCell<Option<DemoApp>> = const { RefCell::new(None) };
     static COMMAND_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    /// Bytes the page writes before calling an export that takes a string
+    /// (a dropped file's name, size and first line).
+    static HOST_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Capacity of the buffer `demo_host_buffer` hands to the page.
+const HOST_BUFFER_BYTES: usize = 1 << 16;
+
+/// Returns a writable buffer the page fills before `demo_drop_files`.
+#[no_mangle]
+pub extern "C" fn demo_host_buffer() -> *mut u8 {
+    HOST_BUFFER.with(|buffer| {
+        let mut bytes = buffer.borrow_mut();
+        if bytes.capacity() < HOST_BUFFER_BYTES {
+            let missing = HOST_BUFFER_BYTES.saturating_sub(bytes.len());
+            bytes.reserve(missing);
+        }
+        bytes.as_mut_ptr()
+    })
+}
+
+/// Records the files of a drop. Each line is `name<TAB>size<TAB>first line`
+/// — the path a desktop build reads is not exposed to a page, so the demo
+/// shows the same facts a browser can give.
+#[no_mangle]
+pub extern "C" fn demo_drop_files(len: u32) {
+    let len = (len as usize).min(HOST_BUFFER_BYTES);
+    let mut payload = String::new();
+    HOST_BUFFER.with(|buffer| {
+        let bytes = buffer.borrow();
+        if len <= bytes.capacity() {
+            // SAFETY: the page wrote `len` bytes at this buffer's pointer
+            // through `demo_host_buffer`, the only writer of `HOST_BUFFER`.
+            let slice = unsafe { std::slice::from_raw_parts(bytes.as_ptr(), len) };
+            if let Ok(text) = std::str::from_utf8(slice) {
+                payload.push_str(text);
+            }
+        }
+    });
+    if payload.is_empty() {
+        return;
+    }
+    APP.with(|cell| {
+        let mut app = cell.borrow_mut();
+        let Some(app) = app.as_mut() else { return };
+        let Some(dropped) = app.dropped.as_ref() else {
+            return;
+        };
+        let mut files = dropped.borrow_mut();
+        files.clear();
+        for line in payload.lines() {
+            let mut parts = line.split('\t');
+            let name = parts.next().unwrap_or("").to_string();
+            let size = parts
+                .next()
+                .and_then(|size| size.parse::<usize>().ok())
+                .unwrap_or(0);
+            let first = parts.next().unwrap_or("").to_string();
+            if !name.is_empty() {
+                files.push(DroppedFile {
+                    name,
+                    size,
+                    line: first,
+                });
+            }
+        }
+        app.probe.set(files.len() as i32);
+    });
+}
+
+/// Reports whether a drag hovers the drop zone.
+#[no_mangle]
+pub extern "C" fn demo_drag_hover(hovering: u32) {
+    APP.with(|cell| {
+        let app = cell.borrow();
+        if let Some(hover) = app.as_ref().and_then(|app| app.drag_hover.as_ref()) {
+            hover.set(hovering != 0);
+        }
+    });
 }
 
 static FONT: OnceLock<Option<Arc<FontFace>>> = OnceLock::new();
@@ -69,6 +148,18 @@ struct DemoApp {
     frame: Rc<Cell<u64>>,
     selected: Option<Rc<RefCell<usize>>>,
     probe: Rc<Cell<i32>>,
+    /// The files a browser drop delivered to the drag-and-drop demo, and
+    /// whether a drag currently hovers its zone.
+    dropped: Option<Rc<RefCell<Vec<DroppedFile>>>>,
+    drag_hover: Option<Rc<Cell<bool>>>,
+}
+
+/// A file dropped on the drag-and-drop demo. A browser exposes its name,
+/// size and bytes, not the path a desktop build reads with `os.ReadFile`.
+struct DroppedFile {
+    name: String,
+    size: usize,
+    line: String,
 }
 
 impl DemoApp {
@@ -76,6 +167,8 @@ impl DemoApp {
         let frame = Rc::new(Cell::new(0_u64));
         let selected = (slug == 0).then(|| Rc::new(RefCell::new(0_usize)));
         let probe = Rc::new(Cell::new(0_i32));
+        let dropped = (slug == 7).then(|| Rc::new(RefCell::new(Vec::new())));
+        let drag_hover = (slug == 7).then(|| Rc::new(Cell::new(false)));
         let ui = match slug {
             0 => {
                 let view_selected = Rc::clone(selected.as_ref().expect("tabs selection"));
@@ -157,13 +250,11 @@ impl DemoApp {
                 })
             }
             7 => {
-                let drag = Rc::new(RefCell::new(DragState::new()));
-                let drops = Rc::new(Cell::new(0_i32));
-                let view_drag = Rc::clone(&drag);
-                let view_drops = Rc::clone(&drops);
+                let view_dropped = Rc::clone(dropped.as_ref().expect("drag files"));
+                let view_hover = Rc::clone(drag_hover.as_ref().expect("drag hover"));
                 let view_probe = Rc::clone(&probe);
                 NativeUi::new(move |context| {
-                    drag_demo(context, &view_drag, &view_drops, &view_probe);
+                    drag_demo(context, &view_dropped, &view_hover, &view_probe);
                 })
             }
             8 => {
@@ -903,6 +994,8 @@ impl DemoApp {
             frame,
             selected,
             probe,
+            dropped,
+            drag_hover,
         }
     }
 }
@@ -1118,13 +1211,21 @@ fn input_demo(context: &mut Context, value: &Rc<RefCell<String>>, probe: &Rc<Cel
 
 fn drag_demo(
     context: &mut Context,
-    _drag: &Rc<RefCell<DragState>>,
-    _drops: &Rc<Cell<i32>>,
-    _probe: &Rc<Cell<i32>>,
+    files: &Rc<RefCell<Vec<DroppedFile>>>,
+    hovering: &Rc<Cell<bool>>,
+    probe: &Rc<Cell<i32>>,
 ) {
     // MyGo's drop zone: 440 by 150, centered on both axes with an icon and
-    // its hint, over the line saying what a drop is read with.
+    // its hint, over the line saying what a drop is read with. A drag over
+    // the zone turns its border to the accent, as `FileDragOver` does.
     let theme = context.theme().clone();
+    let files = files.borrow();
+    probe.set(files.len() as i32);
+    let border = if hovering.get() {
+        theme.accent
+    } else {
+        theme.border
+    };
     column(context)
         .width(440.0)
         .height(150.0)
@@ -1133,16 +1234,51 @@ fn drag_demo(
         .gap(8.0)
         .justify(JustifyContent::Center)
         .background(theme.surface, 10.0)
-        .border(theme.border, 10.0)
+        .border(border, 10.0)
         .children(|context| {
-            column(context)
-                .width(406.0)
-                .gap(6.0)
-                .align(AlignItems::Center)
-                .children(|context| {
-                    icon(context, "docs-demo-drop-icon", "file", 14.0, theme.muted);
-                    text(context, "Drop files here").color(theme.muted);
-                });
+            if files.is_empty() {
+                column(context)
+                    .width(406.0)
+                    .gap(6.0)
+                    .align(AlignItems::Center)
+                    .children(|context| {
+                        icon(context, "docs-demo-drop-icon", "file", 14.0, theme.muted);
+                        text(context, "Drop files here").color(theme.muted);
+                    });
+                return;
+            }
+            for (index, file) in files.iter().enumerate() {
+                if index == 3 {
+                    text(context, &format!("and {} more", files.len() - index))
+                        .font_size(12.0)
+                        .color(theme.muted);
+                    break;
+                }
+                row(context)
+                    .gap(8.0)
+                    .align(AlignItems::Center)
+                    .children(|context| {
+                        icon(
+                            context,
+                            &format!("docs-demo-drop-file-{index}"),
+                            "file",
+                            14.0,
+                            theme.foreground,
+                        );
+                        text(context, &file.name).single_line().max_width(160.0);
+                        text(context, &drag_size(file.size))
+                            .font_size(12.0)
+                            .color(theme.muted)
+                            .single_line();
+                        if !file.line.is_empty() {
+                            text(context, &format!("“{}”", file.line))
+                                .font_size(12.0)
+                                .color(theme.muted)
+                                .single_line()
+                                .max_width(180.0);
+                        }
+                    });
+            }
         });
     text(
         context,
@@ -1150,6 +1286,17 @@ fn drag_demo(
     )
     .font_size(12.0)
     .color(theme.muted);
+}
+
+/// Formats a byte count as MyGo's drag demo does (`dragSize`).
+fn drag_size(bytes: usize) -> String {
+    if bytes < 1000 {
+        format!("{bytes} bytes")
+    } else if bytes < 1_000_000 {
+        format!("{:.1} KB", bytes as f64 / 1000.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+    }
 }
 
 static DEMO_DISABLED: AtomicBool = AtomicBool::new(false);
