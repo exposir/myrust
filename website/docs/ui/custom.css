@@ -1,0 +1,8 @@
+/* Hand-written overrides on top of docs.css.
+   docs.css is a generated Tailwind artifact with no source in this repo;
+   keep local fixed rules here so regenerating it cannot lose them.
+
+   The demo preview always paints white, so the iframe must not inherit the
+   dark page's color scheme: the user agent draws the embedded document's
+   backdrop from it before the demo's own stylesheet arrives. */
+.dark .ui-preview-frame { color-scheme: light; }
