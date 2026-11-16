@@ -9,11 +9,20 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+      - name: Linux desktop libraries
+        # myrust-core links GTK and WebKit through tao/wry, so the test build
+        # needs their development packages on the runner. The tray icon loads
+        # libappindicator at runtime and needs no package of its own.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libglib2.0-dev libgtk-3-dev libwebkit2gtk-4.1-dev \
+            librsvg2-dev libdbus-1-dev
       - name: Tests
         run: cargo test -p myrust-ui -p myrust-core
       - name: Clippy
