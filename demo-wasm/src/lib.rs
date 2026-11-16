@@ -5747,8 +5747,11 @@ fn alert_demo(
             &mut is_open,
             "Delete “Notes”?",
             "You can't undo this.",
-            "Cancel",
+            // The panel draws cancel on the left and confirm on the right
+            // (`ui/dialog.rs` alert_dialog), which is the order MyGo's demo
+            // passes its buttons in: Cancel, then Delete.
             "Delete",
+            "Cancel",
         );
         open.set(response.open);
         if response.open {

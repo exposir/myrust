@@ -482,7 +482,9 @@ function cssFamilyOf(name) {
         // (internal/text/canvas_js.go cssFamily), so glyphs match the source.
         ctx.font = (italic ? "italic " : "") + (weight > 0 ? weight : 400) + " " + fontSize +
           "px " + (family ? cssFamilyOf(family) : cssFamilyOf(mono ? "monospace" : null));
-        if (window.__lastCommands) window.__lastCommands.push({ t: "Text", str: str, raw: [tx, ty], size: fontSize, weight: weight });
+        // The transform is part of the record: a widget's text can sit under
+        // a translated parent, so its raw coordinates are not page pixels.
+        if (window.__lastCommands) window.__lastCommands.push({ t: "Text", str: str, raw: [tx, ty], size: fontSize, weight: weight, ctm: ctm.slice() });
         ctx.fillStyle = rgba(color);
         // MyGo keeps each run's subpixel phase and places its glyph at
         // Floor(pen) (`ui/paint.go`), and its canvas engine rounds the
@@ -761,7 +763,7 @@ function cssFamilyOf(name) {
   var measureCanvas = document.createElement("canvas");
   var measureCtx = measureCanvas.getContext("2d");
   var measureDecoder = new TextDecoder();
-  WebAssembly.instantiateStreaming(fetch("./demo.wasm?v=r293"), {
+  WebAssembly.instantiateStreaming(fetch("./demo.wasm?v=r295"), {
     env: {
       myrust_now_ms: function () { return performance.now(); },
       myrust_measure_text: function (ptr, len, size) {

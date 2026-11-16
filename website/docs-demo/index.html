@@ -17,16 +17,16 @@
     font-weight: 100 900;
     font-display: swap;
   }
-  :root { color-scheme: dark; }
+  :root { color-scheme: light; }
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0d14; color: #e2e8f0; font: 13px/1.4 ui-sans-serif, system-ui, sans-serif; }
-  body { display: flex; align-items: stretch; padding: 10px; box-sizing: border-box; }
-  .window { display: flex; flex: 1; min-height: 0; flex-direction: column; overflow: hidden; border: 1px solid #263244; border-radius: 10px; background: #111827; box-shadow: 0 18px 50px -24px #000; }
-  .titlebar { position: relative; display: flex; height: 30px; flex: none; align-items: center; justify-content: center; gap: 8px; border-bottom: 1px solid #263244; background: #182132; }
-  .lights { position: absolute; left: 10px; display: flex; gap: 6px; }
-  .lights i { width: 10px; height: 10px; border-radius: 50%; box-shadow: inset 0 0 0 .5px #0004; }
-  .lights .close { background: #ff5f57; } .lights .min { background: #febc2e; } .lights .zoom { background: #28c840; }
-  .title { color: #94a3b8; font-size: 12px; font-weight: 600; }
+  /* The frame is what the demo paints: a white page. The browser shows this
+     before the wasm runs, so it must already be the demo's own backdrop;
+     styling it dark first and repainting it from demo.js flashed a black
+     box in every docs preview. */
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #ffffff; color: #18181b; font: 13px/1.4 ui-sans-serif, system-ui, sans-serif; }
+  body { display: flex; align-items: stretch; padding: 0; box-sizing: border-box; }
+  .window { display: flex; flex: 1; min-height: 0; flex-direction: column; overflow: hidden; border: 0; border-radius: 0; background: #ffffff; box-shadow: none; }
+  .titlebar { display: none; }
   canvas { display: block; width: 100%; height: 100%; min-height: 0; flex: 1; outline: none; touch-action: none; cursor: default; }
   canvas:focus { box-shadow: inset 0 0 0 2px #22d3ee55; }
 </style>
@@ -36,6 +36,6 @@
   <div class="titlebar"><div class="lights"><i class="close"></i><i class="min"></i><i class="zoom"></i></div><span class="title" id="title">MyRust UI</span></div>
   <canvas id="canvas" tabindex="0" aria-label="Interactive MyRust UI demo"></canvas>
 </div>
-<script src="./demo.js?v=r293"></script>
+<script src="./demo.js?v=r294"></script>
 </body>
 </html>
