@@ -73,6 +73,18 @@ pub fn image(
     context.image(id, data, target_width, target_height)
 }
 
+/// Draws an image with MyGo's Fit, corner radius and grayscale.
+pub fn image_styled(
+    context: &mut Context,
+    id: &str,
+    data: ImageData<'_>,
+    target_width: f32,
+    target_height: f32,
+    style: super::context::ImageStyle,
+) -> ImageState {
+    context.image_styled(id, data, target_width, target_height, style)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

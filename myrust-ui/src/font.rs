@@ -67,14 +67,22 @@ impl FontFace {
 
     /// Returns the recommended line height at the supplied size.
     pub fn line_height(&self, size: f32) -> f32 {
-        let scaled = self.font.as_scaled(self.px_scale(size));
-        let size = normalize_size(size);
-        (scaled.ascent() - scaled.descent() + scaled.line_gap()).max(size)
+        // MyGo's browser engine lays text out one pixel taller than the
+        // Canvas fontBoundingBox ascent + descent Chrome reports: its 14px
+        // radio rows repeat every 25px with an 8px gap, so the line box is
+        // 17. Geist's own metrics are 1.30x, which makes every stacked row
+        // taller than the page it mirrors.
+        normalize_size(size) + 3.0
     }
 
     /// Returns the ascent above the baseline at the supplied size.
     pub fn ascent(&self, size: f32) -> f32 {
         self.font.as_scaled(self.px_scale(size)).ascent()
+    }
+
+    /// Returns the descent below the baseline at the supplied size.
+    pub fn descent(&self, size: f32) -> f32 {
+        self.font.as_scaled(self.px_scale(size)).descent().abs()
     }
 
     /// Returns whether the font contains a non-notdef glyph for a character.

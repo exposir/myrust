@@ -19,6 +19,246 @@ pub struct TextMetrics {
     pub line_height: f32,
 }
 
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "env")]
+unsafe extern "C" {
+    fn myrust_measure_text(ptr: *const u8, len: usize, size: f32) -> f32;
+}
+
+/// Measures one line of text with the host's canvas, when the host exports
+/// `myrust_measure_text`.
+///
+/// On the web build the browser owns the font, and its canvas is the same
+/// one that draws the text, so its `measureText` is the only advance width
+/// that keeps layout and glyphs on the same pixels. Native builds return
+/// `None` and measure with the embedded face instead.
+#[cfg(target_arch = "wasm32")]
+pub fn host_text_width(text: &str, font_size: f32) -> Option<f32> {
+    if text.is_empty() {
+        return None;
+    }
+    let width = unsafe { myrust_measure_text(text.as_ptr(), text.len(), font_size) };
+    width.is_finite().then_some(width.max(0.0))
+}
+
+/// Measures with the host canvas in a style: `flags` bit 0 italic, bit 1
+/// monospace, bit 2 bold.
+#[cfg(target_arch = "wasm32")]
+pub fn host_text_width_styled(
+    text: &str,
+    font_size: f32,
+    italic: bool,
+    mono: bool,
+    bold: bool,
+) -> Option<f32> {
+    host_text_width_weighted(text, font_size, italic, mono, if bold { 700 } else { 400 })
+}
+
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "env")]
+unsafe extern "C" {
+    fn myrust_measure_text_weighted(
+        ptr: *const u8,
+        len: usize,
+        size: f32,
+        italic: u32,
+        mono: u32,
+        weight: u32,
+    ) -> f32;
+}
+
+/// Measures with the host canvas at a CSS numeric weight. MyGo styles text
+/// with CSS weights (600 for strong, 650 and 700 for headings), and the
+/// browser resolves each to its own face, so a bold boolean would round
+/// them all to the same advance.
+#[cfg(target_arch = "wasm32")]
+pub fn host_text_width_weighted(
+    text: &str,
+    font_size: f32,
+    italic: bool,
+    mono: bool,
+    weight: u16,
+) -> Option<f32> {
+    if text.is_empty() {
+        return None;
+    }
+    let width = unsafe {
+        myrust_measure_text_weighted(
+            text.as_ptr(),
+            text.len(),
+            font_size,
+            u32::from(italic),
+            u32::from(mono),
+            u32::from(weight),
+        )
+    };
+    width.is_finite().then_some(width.max(0.0))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "env")]
+unsafe extern "C" {
+    fn myrust_measure_text_family(
+        ptr: *const u8,
+        len: usize,
+        size: f32,
+        italic: u32,
+        mono: u32,
+        weight: u32,
+        family_ptr: *const u8,
+        family_len: usize,
+    ) -> f32;
+}
+
+/// Measures with the host canvas in a named family, as MyGo's `Font(name)`
+/// resolves it. An empty family falls back to the default stack.
+#[cfg(target_arch = "wasm32")]
+pub fn host_text_width_family(
+    text: &str,
+    font_size: f32,
+    italic: bool,
+    mono: bool,
+    weight: u16,
+    family: &str,
+) -> Option<f32> {
+    if text.is_empty() {
+        return None;
+    }
+    let width = unsafe {
+        myrust_measure_text_family(
+            text.as_ptr(),
+            text.len(),
+            font_size,
+            u32::from(italic),
+            u32::from(mono),
+            u32::from(weight),
+            family.as_ptr(),
+            family.len(),
+        )
+    };
+    width.is_finite().then_some(width.max(0.0))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "env")]
+unsafe extern "C" {
+    fn myrust_text_ascent(size: f32, flags: u32) -> f32;
+}
+
+/// Returns the host canvas ascent of the styled font, when exported.
+#[cfg(target_arch = "wasm32")]
+pub fn host_text_ascent(font_size: f32, italic: bool, mono: bool, bold: bool) -> Option<f32> {
+    let flags = u32::from(italic) | (u32::from(mono) << 1) | (u32::from(bold) << 2);
+    let ascent = unsafe { myrust_text_ascent(font_size, flags) };
+    ascent.is_finite().then_some(ascent.max(0.0))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "env")]
+unsafe extern "C" {
+    fn myrust_text_x_height(size: f32, flags: u32) -> f32;
+}
+
+/// Returns the host canvas height of a lowercase x, the reference MyGo
+/// strikes text through, when exported.
+#[cfg(target_arch = "wasm32")]
+pub fn host_text_x_height(font_size: f32, italic: bool, mono: bool, bold: bool) -> Option<f32> {
+    let flags = u32::from(italic) | (u32::from(mono) << 1) | (u32::from(bold) << 2);
+    let height = unsafe { myrust_text_x_height(font_size, flags) };
+    height.is_finite().then_some(height.max(0.0))
+}
+
+/// Native builds have no host canvas; see the wasm variant.
+#[cfg(not(target_arch = "wasm32"))]
+pub const fn host_text_x_height(
+    _font_size: f32,
+    _italic: bool,
+    _mono: bool,
+    _bold: bool,
+) -> Option<f32> {
+    None
+}
+
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "env")]
+unsafe extern "C" {
+    fn myrust_text_descent(size: f32, flags: u32) -> f32;
+}
+
+/// Returns the host canvas descent of the styled font, when exported.
+#[cfg(target_arch = "wasm32")]
+pub fn host_text_descent(font_size: f32, italic: bool, mono: bool, bold: bool) -> Option<f32> {
+    let flags = u32::from(italic) | (u32::from(mono) << 1) | (u32::from(bold) << 2);
+    let descent = unsafe { myrust_text_descent(font_size, flags) };
+    descent.is_finite().then_some(descent.max(0.0))
+}
+
+/// Native builds have no host canvas; see the wasm variant.
+#[cfg(not(target_arch = "wasm32"))]
+pub const fn host_text_ascent(
+    _font_size: f32,
+    _italic: bool,
+    _mono: bool,
+    _bold: bool,
+) -> Option<f32> {
+    None
+}
+
+/// Native builds have no host canvas; see the wasm variant.
+#[cfg(not(target_arch = "wasm32"))]
+pub const fn host_text_descent(
+    _font_size: f32,
+    _italic: bool,
+    _mono: bool,
+    _bold: bool,
+) -> Option<f32> {
+    None
+}
+
+/// Native builds have no host canvas; see the wasm variant.
+#[cfg(not(target_arch = "wasm32"))]
+pub const fn host_text_width_styled(
+    _text: &str,
+    _font_size: f32,
+    _italic: bool,
+    _mono: bool,
+    _bold: bool,
+) -> Option<f32> {
+    None
+}
+
+/// Native builds have no host canvas; see the wasm variant.
+#[cfg(not(target_arch = "wasm32"))]
+pub const fn host_text_width_weighted(
+    _text: &str,
+    _font_size: f32,
+    _italic: bool,
+    _mono: bool,
+    _weight: u16,
+) -> Option<f32> {
+    None
+}
+
+/// Native builds measure with their embedded face; see the wasm variant.
+#[cfg(not(target_arch = "wasm32"))]
+pub const fn host_text_width(_text: &str, _font_size: f32) -> Option<f32> {
+    None
+}
+
+/// Native builds have no host canvas to resolve a named family; see the
+/// wasm variant.
+#[cfg(not(target_arch = "wasm32"))]
+pub const fn host_text_width_family(
+    _text: &str,
+    _font_size: f32,
+    _italic: bool,
+    _mono: bool,
+    _weight: u16,
+    _family: &str,
+) -> Option<f32> {
+    None
+}
+
 /// CPU-side text measurement interface.
 pub trait TextMeasurer {
     /// Measures one or more newline-separated lines.

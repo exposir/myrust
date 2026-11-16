@@ -146,6 +146,9 @@ impl CommandCounts {
             DrawCommand::Line { .. } => self.line += 1,
             DrawCommand::Text { .. } => self.text += 1,
             DrawCommand::SvgPath { .. } => self.svg_path += 1,
+            // Covers the shadow rather than painting it; the shape it
+            // belongs to is counted by its own command.
+            DrawCommand::Shadow { .. } => {}
             DrawCommand::LinearGradient { .. } => self.linear_gradient += 1,
             DrawCommand::Image { .. } => self.image += 1,
             DrawCommand::ScissorPush { .. } => self.scissor_push += 1,
@@ -466,6 +469,13 @@ fn command_bounds(command: &DrawCommand) -> Option<Rect> {
             width,
             height,
             ..
+        }
+        | DrawCommand::Shadow {
+            x,
+            y,
+            width,
+            height,
+            ..
         } => Some(Rect::new(*x, *y, *width, *height)),
         DrawCommand::Circle { x, y, radius, .. } => Some(Rect::new(
             *x - *radius,
@@ -568,6 +578,19 @@ impl TransformMatrix {
             self.m11 * point.x + self.m12 * point.y + self.tx,
             self.m21 * point.x + self.m22 * point.y + self.ty,
         )
+    }
+
+    /// Shears horizontally around `baseline_y`, the slant an italic face
+    /// gives its glyphs.
+    pub(crate) fn italic_shear(baseline_y: f32, slant: f32) -> Self {
+        Self {
+            m11: 1.0,
+            m12: -slant,
+            m21: 0.0,
+            m22: 1.0,
+            tx: slant * baseline_y,
+            ty: 0.0,
+        }
     }
 
     pub(crate) fn then(self, child: Self) -> Self {
@@ -674,6 +697,9 @@ mod tests {
                 text: "text".into(),
                 font_size: 14.0,
                 weight: 400,
+                italic: false,
+                mono: false,
+                family: None,
                 color: Color::WHITE,
                 max_width: None,
                 alignment: TextAlignment::Start,
@@ -693,6 +719,7 @@ mod tests {
                 y: 0.0,
                 width: 10.0,
                 height: 10.0,
+                radius: Radius::all(0.0),
                 start: Point::new(0.0, 0.0),
                 end: Point::new(1.0, 0.0),
                 stops: vec![

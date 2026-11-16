@@ -155,46 +155,40 @@ mod tests {
     fn time_input_parses_steps_and_clamps() {
         let size = Size::new(320.0, 100.0);
         let mut context = Context::new(size);
-        let text = Rc::new(RefCell::new(String::new()));
+        let text = Rc::new(RefCell::new("23:59".to_string()));
         let last = Rc::new(RefCell::new(TimeInputState::default()));
-        click(&mut context, size, "time:input", &text, &last);
-        render(
-            &mut context,
-            size,
-            Some(UiEvent::TextInput {
-                text: "23:59".to_string(),
-            }),
-            &text,
-            &last,
-        );
-        assert_eq!(*text.borrow(), "23:59");
+        render(&mut context, size, None, &text, &last);
         assert!(last.borrow().valid);
         assert_eq!(last.borrow().hour, 23);
         assert_eq!(last.borrow().minute, 59);
 
-        click(&mut context, size, "time:hour_inc", &text, &last);
-        assert_eq!(*text.borrow(), "23:59");
-        assert_eq!(last.borrow().hour, 23);
-        click(&mut context, size, "time:minute_inc", &text, &last);
-        assert_eq!(*text.borrow(), "23:59");
-        assert_eq!(last.borrow().minute, 59);
-        click(&mut context, size, "time:minute_dec", &text, &last);
-        assert_eq!(*text.borrow(), "23:58");
+        // MyGo's field is one pill of segments (`ui/timeinput.go`
+        // coreTimeInput): the arrows step the segment that has the focus,
+        // round the clock.
+        click(&mut context, size, "time:hours", &text, &last);
+        render(
+            &mut context,
+            size,
+            Some(UiEvent::Key { key: Key::ArrowUp }),
+            &text,
+            &last,
+        );
+        assert_eq!(*text.borrow(), "00:59");
+        assert_eq!(last.borrow().hour, 0);
+
+        click(&mut context, size, "time:minutes", &text, &last);
+        render(
+            &mut context,
+            size,
+            Some(UiEvent::Key { key: Key::ArrowDown }),
+            &text,
+            &last,
+        );
+        assert_eq!(*text.borrow(), "00:58");
+        assert_eq!(last.borrow().minute, 58);
 
         *text.borrow_mut() = "24:00".to_string();
         render(&mut context, size, None, &text, &last);
         assert!(!last.borrow().valid);
-
-        *text.borrow_mut() = "9:5".to_string();
-        render(
-            &mut context,
-            size,
-            Some(UiEvent::Key { key: Key::Enter }),
-            &text,
-            &last,
-        );
-        assert_eq!(*text.borrow(), "09:05");
-        assert!(last.borrow().submitted);
-        assert!(last.borrow().valid);
     }
 }

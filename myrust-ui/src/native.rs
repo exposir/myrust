@@ -59,6 +59,9 @@ pub struct NativeUi {
     input_queue: Rc<RefCell<Vec<UiEvent>>>,
     renderer_kind: RendererKind,
     theme: Theme,
+    preview: bool,
+    /// Device pixels the host draws per logical pixel.
+    pixel_scale: std::cell::Cell<f32>,
 }
 
 impl fmt::Debug for NativeUi {
@@ -82,6 +85,8 @@ impl NativeUi {
             input_queue: Rc::new(RefCell::new(Vec::new())),
             renderer_kind: RendererKind::Software,
             theme: Theme::dark(),
+            preview: false,
+            pixel_scale: std::cell::Cell::new(1.0),
         }
     }
 
@@ -91,6 +96,18 @@ impl NativeUi {
     /// initialization implicitly.
     pub fn with_renderer_kind(mut self, kind: RendererKind) -> Self {
         self.renderer_kind = kind;
+        self
+    }
+
+    /// Sets the device pixels the host draws per logical pixel, which the
+    /// painter snaps a picture's box to, as MyGo's `snap` does.
+    pub fn set_pixel_scale(&self, scale: f32) {
+        self.pixel_scale.set(if scale.is_finite() { scale.clamp(1.0, 4.0) } else { 1.0 });
+    }
+
+    /// Wraps the view in MyGo's demo preview layout.
+    pub fn with_preview(mut self, preview: bool) -> Self {
+        self.preview = preview;
         self
     }
 
@@ -161,11 +178,22 @@ impl NativeUi {
         } = &mut *runtime;
         *last_size = size;
         context.begin_frame(size);
+        context.set_pixel_scale(self.pixel_scale.get());
         context.set_theme(self.theme.clone());
         for event in events {
             context.set_input(event);
         }
-        (render)(context);
+        if self.preview {
+            context
+                .column()
+                .fill()
+                .center()
+                .gap(12.0)
+                .padding(20.0)
+                .children(|context| (render)(context));
+        } else {
+            (render)(context);
+        }
         let mut frame = context.produce().map_err(NativeUiError::Render)?;
         frame.input_consumed = input_consumed;
         context.end_frame();

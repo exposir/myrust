@@ -13,17 +13,19 @@ pub use super::breadcrumbs::{breadcrumbs, BreadcrumbItem, BreadcrumbsResponse};
 pub use super::calendar::{calendar, CalendarResponse, CalendarState};
 pub use super::charts::{bar_chart, line_chart, ChartKind, ChartResponse};
 pub use super::code_editor::{
-    code_editor, tokenize_rust_line, CodeEditorResponse, CodeEditorState, CodeToken, CodeTokenKind,
+    code_editor, code_editor_with_options, tokenize_rust_line, CodeDiagnostic, CodeEditorOptions,
+    CodeEditorResponse, CodeEditorState, CodeSeverity, CodeToken, CodeTokenKind,
 };
 pub use super::color_picker::{color_picker, ColorPickerResponse, ColorPickerState, PRESET_COLORS};
 pub use super::combobox::{combobox, ComboboxResponse, ComboboxState};
 pub use super::context::{
-    button, checkbox, column, container, grid, row, scroll_view, slider, spacer, text, text_field,
+    button, checkbox, column, container, grid, row, scroll_view, slider, slider_stepped, spacer,
+    text, text_area, text_area_placeholder, text_area_sized, text_field, text_field_invalid, text_field_placeholder,
     transform, ButtonState, CheckboxState, ColumnBuilder, ContainerBuilder, FlexBuilder,
     GridBuilder, RowBuilder, ScrollState, SliderState, TextBuilder, TextFieldState,
 };
 pub use super::controls::{
-    badge, collapsible, progress, progress_indeterminate, radio_group, select, spinner, switch,
+    badge, collapsible, collapsible_custom, progress, progress_indeterminate, radio_group, select, spinner, switch,
     tabs, BadgeState, CollapsibleState, ProgressState, RadioGroupState, SelectState, SpinnerState,
     SwitchState, TabsState,
 };
@@ -35,7 +37,7 @@ pub use super::diff::{
 pub use super::direction::Direction;
 pub use super::find_bar::{count_matches, find_bar, FindBarState};
 pub use super::floating::{
-    context_menu, menu_button, popover, tooltip, tooltip_for, tooltip_with_delay,
+    context_menu, menu_button, menu_icon_button, popover, tooltip, tooltip_for, tooltip_with_delay,
     ContextMenuResponse, ContextMenuState, MenuButtonState, MenuState, TooltipState, TOOLTIP_DELAY,
 };
 pub use super::form::{form_field, FormFieldState};
@@ -57,7 +59,7 @@ pub use super::overlay::{overlay, popup, OverlayResponse, OverlayState};
 pub use super::performance::{frame_stats_panel, FrameStats, FrameStatsResponse};
 pub use super::range_slider::{range_slider, RangeKnob, RangeSliderResponse, RangeSliderState};
 pub use super::rating::{rating, RatingState};
-pub use super::rich_text::{rich_text, RichTextResponse};
+pub use super::rich_text::{rich_text, rich_text_spans, RichTextResponse, RichTextSpan};
 pub use super::router::{
     back_forward_buttons, router, BackForwardState, Page, RouterResponse, RouterState,
 };

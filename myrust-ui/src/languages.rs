@@ -100,7 +100,9 @@ pub fn format_date(date: &str, locale: Locale, style: DateStyle) -> Result<Strin
     match style {
         DateStyle::Iso => Ok(format!("{year:04}-{month:02}-{day:02}")),
         DateStyle::Short => match locale {
-            Locale::EnUs => Ok(format!("{month:02}/{day:02}/{year:04}")),
+            // ICU's yMd skeleton writes a US date without leading zeros,
+            // as MyGo's `i18n.FormatDate` does: 4/12/1990.
+            Locale::EnUs => Ok(format!("{month}/{day}/{year:04}")),
             Locale::ZhCn => Ok(format!("{year}年{month}月{day}日")),
         },
     }
@@ -179,7 +181,7 @@ mod tests {
         );
         assert_eq!(
             format_date("2024-02-29", Locale::EnUs, DateStyle::Short).unwrap(),
-            "02/29/2024"
+            "2/29/2024"
         );
         assert_eq!(
             format_date("2024-02-29", Locale::ZhCn, DateStyle::Short).unwrap(),

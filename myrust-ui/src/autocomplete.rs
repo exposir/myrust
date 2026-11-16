@@ -11,6 +11,8 @@ pub struct AutocompleteState {
     pub highlight: usize,
     /// Query for which the suggestion overlay was dismissed.
     pub dismissed: Option<String>,
+    /// Text the empty input shows, as MyGo's `Placeholder` sets.
+    pub placeholder: Option<String>,
 }
 
 impl AutocompleteState {

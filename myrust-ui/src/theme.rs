@@ -92,6 +92,14 @@ pub struct Theme {
     pub on_accent: Color,
     /// Default border and inactive track color.
     pub border: Color,
+    /// Surface color of a hovered control.
+    pub surface_hover: Color,
+    /// Surface color of a pressed control.
+    pub surface_pressed: Color,
+    /// Accent color of a hovered primary control.
+    pub accent_hover: Color,
+    /// Accent color of a pressed primary control.
+    pub accent_pressed: Color,
     /// Spacing scale.
     pub spacing: Spacing,
     /// Informational font-family name.
@@ -111,6 +119,10 @@ impl Theme {
             accent: Color::rgb(34, 211, 238),
             on_accent: Color::rgb(11, 13, 18),
             border: Color::rgb(63, 63, 69),
+            surface_hover: Color::rgb(50, 50, 54),
+            surface_pressed: Color::rgb(60, 60, 65),
+            accent_hover: Color::rgb(96, 165, 250),
+            accent_pressed: Color::rgb(37, 99, 235),
             spacing: Spacing::default(),
             font_family: "DejaVu Sans".to_string(),
             font_sizes: FontSizes::default(),
@@ -120,13 +132,17 @@ impl Theme {
     /// Built-in light theme.
     pub fn light() -> Self {
         Self {
-            background: Color::rgb(248, 250, 252),
-            surface: Color::rgb(255, 255, 255),
-            foreground: Color::rgb(15, 23, 42),
-            muted: Color::rgb(100, 116, 139),
-            accent: Color::rgb(2, 132, 199),
+            background: Color::rgb(255, 255, 255),
+            surface: Color::rgb(244, 244, 245),
+            foreground: Color::rgb(24, 24, 27),
+            muted: Color::rgb(113, 113, 122),
+            accent: Color::rgb(37, 99, 235),
             on_accent: Color::rgb(255, 255, 255),
-            border: Color::rgb(203, 213, 225),
+            border: Color::rgb(217, 217, 222),
+            surface_hover: Color::rgb(233, 233, 236),
+            surface_pressed: Color::rgb(221, 221, 225),
+            accent_hover: Color::rgb(29, 78, 216),
+            accent_pressed: Color::rgb(30, 64, 175),
             ..Self::dark()
         }
     }
@@ -143,6 +159,42 @@ impl Theme {
             Color::rgb(180, 83, 9)
         } else {
             Color::rgb(251, 191, 36)
+        }
+    }
+
+    /// Returns the success color MyGo uses for a healthy quantity
+    /// (`ui/theme.go` Success, #16a34a in the light theme).
+    pub fn success(&self) -> Color {
+        let brightness =
+            (self.background.r as u16 + self.background.g as u16 + self.background.b as u16) / 3;
+        if brightness >= 140 {
+            Color::rgb(22, 163, 74)
+        } else {
+            Color::rgb(34, 197, 94)
+        }
+    }
+
+    /// Returns the warning color MyGo uses for a quantity that calls for
+    /// attention (`ui/theme.go` Warning, #d97706 in the light theme).
+    pub fn warning(&self) -> Color {
+        let brightness =
+            (self.background.r as u16 + self.background.g as u16 + self.background.b as u16) / 3;
+        if brightness >= 140 {
+            Color::rgb(217, 119, 6)
+        } else {
+            Color::rgb(245, 158, 11)
+        }
+    }
+
+    /// Returns the danger color MyGo uses for errors and an invalid
+    /// control's border (`ui/theme.go` Danger, #dc2626 in the light theme).
+    pub fn danger(&self) -> Color {
+        let brightness =
+            (self.background.r as u16 + self.background.g as u16 + self.background.b as u16) / 3;
+        if brightness >= 140 {
+            Color::rgb(220, 38, 38)
+        } else {
+            Color::rgb(239, 68, 68)
         }
     }
 

@@ -1,7 +1,185 @@
 //! Color swatch with preset palette and optional hex input.
+//!
+//! [`color_picker`] is a 28px swatch that opens a palette popup.
+//! [`color_panel`] is the always-open panel MyGo's `ColorPicker` draws: a
+//! saturation/brightness square, hue and opacity sliders, the color in hex,
+//! and swatches of common colors.
 
 use super::context::Context;
 use super::paint::Color;
+
+/// Colors a panel offers, in MyGo's order (`ui/colorpicker.go` swatches).
+pub const SWATCH_COLORS: [Color; 12] = [
+    Color::rgb(0xef, 0x44, 0x44),
+    Color::rgb(0xf9, 0x73, 0x16),
+    Color::rgb(0xea, 0xb3, 0x08),
+    Color::rgb(0x22, 0xc5, 0x5e),
+    Color::rgb(0x14, 0xb8, 0xa6),
+    Color::rgb(0x3b, 0x82, 0xf6),
+    Color::rgb(0x63, 0x66, 0xf1),
+    Color::rgb(0xa8, 0x55, 0xf7),
+    Color::rgb(0xec, 0x48, 0x99),
+    Color::rgb(0x92, 0x40, 0x0e),
+    Color::rgb(0x71, 0x71, 0x7a),
+    Color::rgb(0x00, 0x00, 0x00),
+];
+
+/// The names of [`SWATCH_COLORS`], as MyGo labels them.
+pub const SWATCH_NAMES: [&str; 12] = [
+    "red", "orange", "yellow", "green", "teal", "blue", "indigo", "purple", "pink", "brown",
+    "gray", "black",
+];
+
+/// A color as hue, saturation, value and alpha, which a panel keeps: a
+/// color of red, green and blue loses the hue of its grays.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Hsv {
+    /// Hue in degrees, 0..360.
+    pub hue: f32,
+    /// Saturation, 0..1.
+    pub saturation: f32,
+    /// Brightness, 0..1.
+    pub value: f32,
+    /// Alpha, 0..1.
+    pub alpha: f32,
+}
+
+impl Hsv {
+    /// Converts a color to its hue, saturation, value and alpha.
+    pub fn from_color(color: Color) -> Self {
+        let red = f32::from(color.r) / 255.0;
+        let green = f32::from(color.g) / 255.0;
+        let blue = f32::from(color.b) / 255.0;
+        let high = red.max(green).max(blue);
+        let low = red.min(green).min(blue);
+        let delta = high - low;
+        let hue = if delta <= f32::EPSILON {
+            0.0
+        } else if high == red {
+            60.0 * ((green - blue) / delta).rem_euclid(6.0)
+        } else if high == green {
+            60.0 * ((blue - red) / delta + 2.0)
+        } else {
+            60.0 * ((red - green) / delta + 4.0)
+        };
+        Self {
+            hue: if hue < 0.0 { hue + 360.0 } else { hue },
+            saturation: if high > 0.0 { delta / high } else { 0.0 },
+            value: high,
+            alpha: f32::from(color.a) / 255.0,
+        }
+    }
+
+    /// Converts back to a color.
+    pub fn to_color(self) -> Color {
+        let chroma = self.value * self.saturation;
+        let sector = (self.hue.rem_euclid(360.0)) / 60.0;
+        let second = chroma * (1.0 - (sector % 2.0 - 1.0).abs());
+        let (red, green, blue) = match sector as u32 {
+            0 => (chroma, second, 0.0),
+            1 => (second, chroma, 0.0),
+            2 => (0.0, chroma, second),
+            3 => (0.0, second, chroma),
+            4 => (second, 0.0, chroma),
+            _ => (chroma, 0.0, second),
+        };
+        let base = self.value - chroma;
+        let channel = |part: f32| ((part + base) * 255.0).round().clamp(0.0, 255.0) as u8;
+        Color::rgba(
+            channel(red),
+            channel(green),
+            channel(blue),
+            (self.alpha * 255.0).round().clamp(0.0, 255.0) as u8,
+        )
+    }
+
+    /// Clamps every channel into range, as a panel does before setting one.
+    pub fn clamped(self) -> Self {
+        Self {
+            hue: if self.hue.is_finite() {
+                self.hue.rem_euclid(360.0)
+            } else {
+                0.0
+            },
+            saturation: self.saturation.clamp(0.0, 1.0),
+            value: self.value.clamp(0.0, 1.0),
+            alpha: self.alpha.clamp(0.0, 1.0),
+        }
+    }
+}
+
+/// Caller-owned state of an always-open [`color_panel`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColorPanelState {
+    /// The color as the panel keeps it, so a gray keeps its hue.
+    pub hsv: Hsv,
+    /// The color the panel last set or saw from the caller.
+    pub last: Color,
+    /// The text of the hex field, as typed.
+    pub hex: String,
+    /// Which of the square, hue and opacity controls the pointer drags.
+    pub dragging: Option<PanelDrag>,
+}
+
+/// The control of a [`color_panel`] the pointer is dragging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelDrag {
+    /// The saturation/brightness square.
+    Square,
+    /// The hue slider.
+    Hue,
+    /// The opacity slider.
+    Opacity,
+}
+
+impl ColorPanelState {
+    /// Creates the state of a panel showing `color`.
+    pub fn new(color: Color) -> Self {
+        Self {
+            hsv: Hsv::from_color(color),
+            last: color,
+            hex: hex_of(color),
+            dragging: None,
+        }
+    }
+}
+
+impl Default for ColorPanelState {
+    fn default() -> Self {
+        Self::new(Color::BLACK)
+    }
+}
+
+/// Result of drawing a [`color_panel`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ColorPanelResponse {
+    /// The color after this frame.
+    pub color: Color,
+    /// Whether this frame changed the color.
+    pub changed: bool,
+}
+
+/// Returns `c` as `#rrggbb`, or `#rrggbbaa` when it is not opaque.
+pub fn hex_of(color: Color) -> String {
+    if color.a == 255 {
+        format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b)
+    } else {
+        format!("#{:02x}{:02x}{:02x}{:02x}", color.r, color.g, color.b, color.a)
+    }
+}
+
+/// Draws MyGo's `ColorPicker`: a square choosing the saturation, across,
+/// and the brightness, up, of the hue its slider chooses below it, a slider
+/// of opacity, the color in hex, which the user edits, and swatches of
+/// common colors (`ui/colorpicker.go` coreColorPicker).
+pub fn color_panel(
+    context: &mut Context,
+    id: &str,
+    color: &mut Color,
+    state: &mut ColorPanelState,
+) -> ColorPanelResponse {
+    context.color_panel(id, color, state)
+}
 
 /// Preset palette colors.
 pub const PRESET_COLORS: [Color; 12] = [

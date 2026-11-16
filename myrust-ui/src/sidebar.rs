@@ -13,12 +13,15 @@ pub struct SidebarItem<'a> {
     pub icon: Option<&'a str>,
     /// Optional trailing badge text (e.g. an unread count).
     pub badge: Option<&'a str>,
+    /// Whether the badge fills with the accent color, as MyGo's
+    /// `Badge(c, "New").Background(t.Accent).TextColor(t.AccentText)`.
+    pub badge_accent: bool,
 }
 
 impl<'a> SidebarItem<'a> {
     /// Creates a sidebar item without an icon or badge.
     pub const fn new(id: &'a str, label: &'a str) -> Self {
-        Self { id, label, icon: None, badge: None }
+        Self { id, label, icon: None, badge: None, badge_accent: false }
     }
 
     /// Adds an optional built-in icon.
@@ -30,6 +33,13 @@ impl<'a> SidebarItem<'a> {
     /// Adds an optional trailing badge.
     pub const fn badge(mut self, badge: &'a str) -> Self {
         self.badge = Some(badge);
+        self
+    }
+
+    /// Fills the badge with the accent color and its text with the accent
+    /// text color, as a badge marking something new.
+    pub const fn badge_accent(mut self) -> Self {
+        self.badge_accent = true;
         self
     }
 }

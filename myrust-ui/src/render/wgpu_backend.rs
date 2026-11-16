@@ -491,6 +491,7 @@ impl FrameMesh {
                             start,
                             end,
                             stops,
+                            ..
                         } => mesh.add_gradient(
                             transform,
                             Rect::new(*x, *y, *width, *height),
@@ -878,6 +879,7 @@ mod tests {
             y: 0.0,
             width: 20.0,
             height: 10.0,
+            radius: Radius::all(0.0),
             start: Point::new(0.0, 0.0),
             end: Point::new(1.0, 0.0),
             stops: vec![

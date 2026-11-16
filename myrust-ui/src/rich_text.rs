@@ -1,6 +1,105 @@
 //! Read-only formatted text.
 
 use super::context::Context;
+use super::paint::Color;
+
+/// One run of rich text with its own background or color, as MyGo's
+/// `ui.Span` in `RichText`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RichTextSpan {
+    /// The run's text.
+    pub text: String,
+    /// Optional background behind the run, a search highlight.
+    pub background: Option<Color>,
+    /// Optional text color.
+    pub color: Option<Color>,
+    /// Numeric font weight, conventionally `100..=900`.
+    pub weight: u16,
+    /// Whether the run is drawn in the italic face.
+    pub italic: bool,
+    /// Whether the run is drawn in the monospaced face.
+    pub mono: bool,
+    /// Whether a line is drawn through the run's middle.
+    pub strikethrough: bool,
+    /// Font size in logical pixels; zero uses the theme's body size.
+    pub font_size: f32,
+    /// Corner radius of the run's background.
+    pub background_radius: f32,
+}
+
+impl RichTextSpan {
+    /// Creates a plain span.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            background: None,
+            color: None,
+            weight: 400,
+            italic: false,
+            mono: false,
+            strikethrough: false,
+            font_size: 0.0,
+            background_radius: 0.0,
+        }
+    }
+
+    /// Sets the span's background.
+    pub const fn background(mut self, color: Color) -> Self {
+        self.background = Some(color);
+        self
+    }
+
+    /// Sets the span's text color.
+    pub const fn color(mut self, color: Color) -> Self {
+        self.color = Some(color);
+        self
+    }
+
+    /// Sets the span's font weight.
+    pub const fn weight(mut self, weight: u16) -> Self {
+        self.weight = weight;
+        self
+    }
+
+    /// Draws the span in the italic face.
+    pub const fn italic(mut self) -> Self {
+        self.italic = true;
+        self
+    }
+
+    /// Draws the span in the monospaced face.
+    pub const fn mono(mut self) -> Self {
+        self.mono = true;
+        self
+    }
+
+    /// Draws a line through the span's middle.
+    pub const fn strikethrough(mut self) -> Self {
+        self.strikethrough = true;
+        self
+    }
+
+    /// Sets the span's font size, which also scales its code pills.
+    pub const fn font_size(mut self, size: f32) -> Self {
+        self.font_size = size;
+        self
+    }
+
+    /// Rounds the span's background to `radius`.
+    pub const fn background_radius(mut self, radius: f32) -> Self {
+        self.background_radius = radius;
+        self
+    }
+}
+
+/// Renders rich text spans that wrap across lines, as MyGo's `RichText`.
+pub fn rich_text_spans(
+    context: &mut Context,
+    id: &str,
+    spans: &[RichTextSpan],
+) -> RichTextResponse {
+    context.rich_text_spans(id, spans)
+}
 
 /// Result of rendering rich text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -47,6 +47,22 @@ pub fn meter(
     context.meter(id, value, min, max, low_threshold, high_threshold)
 }
 
+/// Creates a three-tone quantity meter whose thresholds name their sides,
+/// as MyGo's `Meter(c, v, lo, hi, &MeterLevels{Warning, Critical})`: a
+/// Critical below Warning makes low values the bad ones, as a battery's
+/// charge is. Both `None` shows the success color throughout.
+pub fn meter_levels(
+    context: &mut Context,
+    id: &str,
+    value: f32,
+    min: f32,
+    max: f32,
+    warning: Option<f32>,
+    critical: Option<f32>,
+) -> MeterState {
+    context.meter_levels(id, value, min, max, warning, critical)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

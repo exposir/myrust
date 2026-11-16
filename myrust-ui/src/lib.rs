@@ -24,6 +24,8 @@ pub mod avatar;
 pub mod breadcrumbs;
 /// Month calendar.
 pub mod calendar;
+/// Chart scales, plot layout and mark paths, as MyGo's `ui/chart`.
+pub mod chart;
 /// Minimal bar/line charts.
 pub mod charts;
 /// Read-only code viewer.
@@ -151,21 +153,34 @@ pub use time::{Duration, Instant};
 pub use autocomplete::{autocomplete, AutocompleteResponse, AutocompleteState};
 pub use avatar::{avatar, avatar_image, AvatarShape, AvatarState};
 pub use breadcrumbs::{breadcrumbs, BreadcrumbItem, BreadcrumbsResponse};
-pub use calendar::{calendar, CalendarResponse, CalendarState};
+pub use calendar::{calendar, weekday_monday, CalendarResponse, CalendarState};
+pub use chart::{
+    area_path, extent, line_path, pie, plot, plot_sized, point, rect as chart_rect, rule_x, sector_path,
+    AxisStyle, Band, Curve, Linear, PlotResponse, Slice, Span, StackSegment, Tick, stack,
+    filled_path, grid_line, path_mark, stroked_path, TimeScale,
+};
 pub use charts::{bar_chart, line_chart, ChartKind, ChartResponse};
 pub use code_editor::{
-    code_editor, tokenize_rust_line, CodeEditorResponse, CodeEditorState, CodeToken, CodeTokenKind,
+    code_editor, code_editor_with_options, tokenize_rust_line, CodeDiagnostic, CodeEditorOptions,
+    CodeEditorResponse, CodeEditorState, CodeSeverity, CodeToken, CodeTokenKind,
 };
-pub use color_picker::{color_picker, ColorPickerResponse, ColorPickerState, PRESET_COLORS};
+pub use color_picker::{
+    color_panel, color_picker, hex_of, ColorPanelResponse, ColorPanelState, ColorPickerResponse,
+    ColorPickerState, Hsv, PanelDrag, SWATCH_COLORS, SWATCH_NAMES, PRESET_COLORS,
+};
 pub use combobox::{combobox, ComboboxResponse, ComboboxState};
 pub use context::{
-    button, button_primary, button_primary_with_icon, button_with_icon, checkbox, checkbox_labeled, checkbox_indeterminate, column, container, grid, icon_button, row, scroll_view,
-    slider, spacer, text, text_area, text_field, text_field_password, transform, ButtonState, CheckboxState, ColumnBuilder,
-    ContainerBuilder, Context, FlexBuilder, GridBuilder, LayoutScope, RowBuilder, ScrollState,
-    SliderState, TextBuilder, TextFieldState,
+    scroll_view_styled,
+    button, button_disabled, button_padded, button_padded_disabled, button_primary, button_primary_with_icon, button_with_icon,
+    button_with_icon_after, checkbox, checkbox_labeled, checkbox_indeterminate, column, container, grid, icon_button, radio, row, scroll_view,
+    segment, slider, slider_stepped, spacer, text, text_area, text_area_mono, text_area_placeholder, text_area_sized, text_area_sized_placeholder, text_field, text_field_invalid, text_field_password, text_field_placeholder, text_field_password_placeholder, transform, ButtonState, CheckboxState, ColumnBuilder,
+    ContainerBuilder, Context, FlexBuilder, GridBuilder, LayoutScope, RadioState, RowBuilder, ScrollState,
+    ScrollStyle, ImageFit, ImageStyle, measured_text_height,
+    SegmentFace, SegmentState, SliderState, TextBuilder, TextFieldState,
 };
 pub use controls::{
-    badge, collapsible, progress, progress_indeterminate, radio_group, select, spinner, switch,
+    badge, collapsible, collapsible_custom, progress, progress_indeterminate, radio_group, select, select_sized,
+    spinner, switch,
     tabs, BadgeState, CollapsibleState, ProgressState, RadioGroupState, SelectState, SpinnerState,
     SwitchState, TabsState,
 };
@@ -186,16 +201,16 @@ pub use event::{
 };
 pub use find_bar::{count_matches, find_bar, FindBarState};
 pub use floating::{
-    context_menu, menu_button, popover, tooltip, tooltip_for, tooltip_with_delay,
+    context_menu, menu_button, menu_icon_button, popover, tooltip, tooltip_for, tooltip_with_delay,
     ContextMenuResponse, ContextMenuState, MenuButtonState, MenuState, TooltipState, TOOLTIP_DELAY,
 };
 pub use font::{
     default_font, install_default_font, FontFace, FontRegistry, GlyphBitmap, RealFontMeasurer,
 };
-pub use form::{form_field, FormFieldState};
+pub use form::{form_field, form_group, form_row, FormFieldState};
 pub use grid_view::{grid_view, GridViewResponse, GridViewState};
 pub use icon::{icon, Icon, IconState};
-pub use image::{image, ImageData, ImageState};
+pub use image::{image, image_styled, ImageData, ImageState};
 pub use inspector::{
     inspect_display, inspect_frame, inspector, InspectorItem, InspectorResponse, InspectorTree,
     PaintSummary,
@@ -211,7 +226,7 @@ pub use markdown::{
     markdown, parse_inline, parse_markdown, InlineSpan, InlineStyle, MarkdownBlock,
     MarkdownResponse,
 };
-pub use meter::{meter, MeterState, MeterTone};
+pub use meter::{meter, meter_levels, MeterState, MeterTone};
 pub use migration::migrate_value;
 pub use native::{NativeUi, NativeUiError, ViewFrame};
 pub use numeric::{
@@ -233,7 +248,7 @@ pub use render::{
 };
 #[cfg(feature = "gpu")]
 pub use render::{GpuInfo, WgpuRenderer};
-pub use rich_text::{rich_text, RichTextResponse};
+pub use rich_text::{rich_text, rich_text_spans, RichTextResponse, RichTextSpan};
 pub use router::{
     back_forward_buttons, router, BackForwardState, Page, RouterResponse, RouterState,
 };
@@ -241,7 +256,7 @@ pub use search_field::{search_field, SearchFieldState};
 pub use segmented::{segmented, SegmentedResponse};
 pub use sidebar::{sidebar, SidebarItem, SidebarResponse, SidebarSection};
 pub use split::{
-    split_view, SplitOrientation, SplitViewResponse, SplitViewState, MAX_SPLIT_RATIO,
+    split_view, split_sized, SplitOrientation, SplitViewResponse, SplitViewState, MAX_SPLIT_RATIO,
     MIN_SPLIT_RATIO,
 };
 pub use stepper::{stepper, StepperState};
@@ -249,7 +264,7 @@ pub use svg::{parse_svg_path, SvgContour, SvgOutline};
 pub use table::{
     table, SortDirection, TableColumn, TableResponse, TableRow, TableSort, TableState,
 };
-pub use text::{layout_text, ApproximateMeasurer, TextLine, TextMeasurer, TextMetrics};
+pub use text::{host_text_ascent, host_text_descent, host_text_width, host_text_width_family, host_text_width_styled, host_text_width_weighted, host_text_x_height, layout_text, ApproximateMeasurer, TextLine, TextMeasurer, TextMetrics};
 pub use text_input::TextInputState;
 pub use theme::{FontSizes, Spacing, Theme};
 pub use time_input::{time_input, TimeInputState};

@@ -393,6 +393,30 @@ pub enum DrawCommand {
         /// Stroke color.
         color: Color,
     },
+    /// Soft drop shadow cast by a rounded rectangle, as MyGo's `Painter`.
+    ///
+    /// The rectangle itself is left for the caller's own fill; only the
+    /// blur that it casts around the shape is drawn.
+    Shadow {
+        /// Local x coordinate.
+        x: f32,
+        /// Local y coordinate.
+        y: f32,
+        /// Shadow-casting rectangle width.
+        width: f32,
+        /// Shadow-casting rectangle height.
+        height: f32,
+        /// Corner radius of the casting rectangle.
+        radius: f32,
+        /// Horizontal offset of the shadow.
+        offset_x: f32,
+        /// Vertical offset of the shadow.
+        offset_y: f32,
+        /// Blur radius.
+        blur: f32,
+        /// Shadow color, alpha included.
+        color: Color,
+    },
     /// Text produced from caller-provided strings.
     ///
     /// No shaping, kerning, or fallback-font selection occurs in this batch.
@@ -407,6 +431,15 @@ pub enum DrawCommand {
         font_size: f32,
         /// Numeric font weight, conventionally `100..=900`.
         weight: u16,
+        /// Whether the text is drawn in the italic face.
+        italic: bool,
+        /// Whether the text is drawn in the monospaced face.
+        mono: bool,
+        /// Font family name, as MyGo's `Font(name)` takes it. `None` draws
+        /// in the default sans face; `mono` still selects the monospace
+        /// stack when no family is named.
+        #[serde(default)]
+        family: Option<String>,
         /// Text color.
         color: Color,
         /// Optional wrapping and alignment width.
@@ -435,7 +468,7 @@ pub enum DrawCommand {
         /// Stroke width in SVG user units.
         stroke_width: f32,
     },
-    /// Axis-aligned linear gradient.
+    /// Axis-aligned linear gradient, optionally rounded.
     LinearGradient {
         /// Local x coordinate.
         x: f32,
@@ -445,6 +478,9 @@ pub enum DrawCommand {
         width: f32,
         /// Gradient rectangle height.
         height: f32,
+        /// Corner radii of the gradient's box, as MyGo's `FillGradient`
+        /// takes a radius.
+        radius: Radius,
         /// Normalized start point in `0.0..=1.0`.
         start: Point,
         /// Normalized end point in `0.0..=1.0`.
@@ -579,6 +615,13 @@ impl DisplayList {
                     width,
                     height,
                     ..
+                }
+                | DrawCommand::Shadow {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
                 } => include_rect(
                     &mut bounds,
                     current.transform_rect(Rect::new(*x, *y, *width, *height)),
@@ -677,6 +720,7 @@ impl DisplayList {
                 | DrawCommand::Circle { x, y, .. }
                 | DrawCommand::Text { x, y, .. }
                 | DrawCommand::SvgPath { x, y, .. }
+                | DrawCommand::Shadow { x, y, .. }
                 | DrawCommand::LinearGradient { x, y, .. }
                 | DrawCommand::Image { x, y, .. } => {
                     *x += offset.x;
@@ -901,6 +945,9 @@ mod tests {
             text: "hello".into(),
             font_size: 12.0,
             weight: 400,
+            italic: false,
+            mono: false,
+            family: None,
             color: Color::from_hex("#112233").unwrap(),
             max_width: Some(80.0),
             alignment: TextAlignment::Center,

@@ -156,6 +156,36 @@ pub struct CodeEditorState {
     pub selected_line: Option<usize>,
 }
 
+/// Severity of a code diagnostic, which colors the rule under its text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CodeSeverity {
+    /// An error.
+    Error,
+    /// A warning, the default.
+    #[default]
+    Warning,
+    /// An informational note.
+    Info,
+    /// A hint.
+    Hint,
+}
+
+/// One diagnostic range of one line.
+///
+/// `start` and `end` are zero-based character columns of the line; a range
+/// to the end of the line reports the line's character count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CodeDiagnostic {
+    /// Zero-based line.
+    pub line: usize,
+    /// Zero-based first character.
+    pub start: usize,
+    /// Zero-based character past the last.
+    pub end: usize,
+    /// How the range reads.
+    pub severity: CodeSeverity,
+}
+
 /// Result of constructing a code viewer for one frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CodeEditorResponse {
@@ -180,7 +210,43 @@ pub fn code_editor(
     code: &str,
     state: &mut CodeEditorState,
 ) -> CodeEditorResponse {
-    context.code_editor(id, code, state)
+    context.code_editor_with_options(id, code, state, &CodeEditorOptions::default())
+}
+
+/// Creates a read-only code viewer with diagnostics and wrap guides.
+///
+/// MyGo's editor takes these as `State` fields (`Diagnostics`,
+/// `WrapGuides`, `TabSize`); grouping them keeps `code_editor`'s own
+/// signature unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CodeEditorOptions<'a> {
+    /// Diagnostic ranges, each ruled with a wavy line.
+    pub diagnostics: &'a [CodeDiagnostic],
+    /// Column a vertical guide marks, as MyGo's `WrapGuides`.
+    pub wrap_guide: Option<usize>,
+    /// Columns a tab advances to.
+    pub tab_size: usize,
+}
+
+impl Default for CodeEditorOptions<'_> {
+    fn default() -> Self {
+        Self {
+            diagnostics: &[],
+            wrap_guide: None,
+            tab_size: 4,
+        }
+    }
+}
+
+/// Creates a read-only code viewer with options.
+pub fn code_editor_with_options(
+    context: &mut Context,
+    id: &str,
+    code: &str,
+    state: &mut CodeEditorState,
+    options: &CodeEditorOptions<'_>,
+) -> CodeEditorResponse {
+    context.code_editor_with_options(id, code, state, options)
 }
 
 #[cfg(test)]

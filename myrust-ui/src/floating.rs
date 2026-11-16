@@ -105,6 +105,17 @@ pub fn menu_button(
     context.menu_button(id, label, state, items)
 }
 
+/// Creates an icon-only button whose menu is anchored below its bounds.
+pub fn menu_icon_button(
+    context: &mut Context,
+    id: &str,
+    icon_name: &str,
+    state: &mut MenuState,
+    items: &[&str],
+) -> MenuButtonState {
+    context.menu_icon_button(id, icon_name, state, items)
+}
+
 /// Creates a system-style context menu over `area`.
 ///
 /// A non-primary pointer press inside `area` opens the menu at the press

@@ -205,6 +205,10 @@ impl<'a> PageHandle<'a> {
     }
 
     /// Opens platform developer tools.
+    ///
+    /// Available in debug builds and when the `devtools` feature is enabled,
+    /// matching the upstream `wry` gate.
+    #[cfg(any(debug_assertions, feature = "devtools"))]
     pub fn open_devtools(&self) {
         self.webview.open_devtools();
     }

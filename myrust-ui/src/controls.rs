@@ -128,6 +128,18 @@ pub fn select(
     context.select(id, selected, options)
 }
 
+/// Creates a select as wide as `width`, as MyGo's `Width` makes one fill a
+/// field's column (`ui/widgets.go` coreSelect).
+pub fn select_sized(
+    context: &mut Context,
+    id: &str,
+    selected: &mut usize,
+    options: &[&str],
+    width: f32,
+) -> SelectState {
+    context.select_sized(id, selected, options, width)
+}
+
 /// Creates a row of tabs choosing one index.
 pub fn tabs(context: &mut Context, id: &str, selected: &mut usize, labels: &[&str]) -> TabsState {
     context.tabs(id, selected, labels)
@@ -162,4 +174,16 @@ pub fn collapsible(
     content: impl FnOnce(&mut Context),
 ) -> CollapsibleState {
     context.collapsible(id, open, title, content)
+}
+
+/// Creates a header the caller draws that shows or hides its content, as
+/// MyGo's `CollapsibleBase`.
+pub fn collapsible_custom(
+    context: &mut Context,
+    id: &str,
+    open: &mut bool,
+    title: &str,
+    content: impl FnOnce(&mut Context),
+) -> CollapsibleState {
+    context.collapsible_custom(id, open, title, content)
 }

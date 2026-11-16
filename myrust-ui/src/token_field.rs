@@ -176,7 +176,7 @@ mod tests {
             vec!["alpha".to_string(), "gamma".to_string()]
         );
 
-        click(&mut context, size, "tokens:token:0", &mut build);
+        click(&mut context, size, "tokens:token:alpha:remove", &mut build);
         assert_eq!(*tokens.borrow(), vec!["gamma".to_string()]);
         assert!(last.borrow().removed);
     }

@@ -73,6 +73,25 @@ pub fn split_view(
     context.split_view(id, state, orientation, first, second)
 }
 
+/// Creates a split whose first pane keeps a DIP size, as MyGo's `ui.Split`.
+///
+/// `size` is the first pane's width (or height with
+/// [`SplitOrientation::Vertical`]); the panes meet at a one-pixel line that
+/// a drag moves, leaving at least `min_pane` on either side. MyGo's demos
+/// pass `Space(10)` and `Space(1.5)` for those two.
+pub fn split_sized(
+    context: &mut Context,
+    id: &str,
+    size: &mut f32,
+    orientation: SplitOrientation,
+    min_pane: f32,
+    grip: f32,
+    first: impl FnOnce(&mut Context),
+    second: impl FnOnce(&mut Context),
+) -> SplitViewResponse {
+    context.split_sized(id, size, orientation, min_pane, grip, first, second)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

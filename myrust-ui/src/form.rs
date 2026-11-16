@@ -32,6 +32,25 @@ pub fn form_field(
     context.form_field(id, label, description, error, content)
 }
 
+/// Starts a form, lining its fields' labels up in one column
+/// (`ui/form.go` coreForm).
+pub fn form_group(context: &mut Context, id: &str, build: impl FnOnce(&mut Context)) {
+    context.form_group(id, build)
+}
+
+/// Creates a field inside a [`form_group`]: label at the start, control
+/// filling the rest (`ui/form.go` coreField).
+pub fn form_row(
+    context: &mut Context,
+    id: &str,
+    label: &str,
+    description: Option<&str>,
+    error: Option<&str>,
+    content: impl FnOnce(&mut Context),
+) -> FormFieldState {
+    context.form_row(id, label, description, error, content)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,7 +95,9 @@ mod tests {
                 && group.bounds.bottom() >= input.bounds.bottom(),
             "the labeled group must contain its input"
         );
-        let warn = context.theme().warn();
+        // MyGo draws a field's message in the theme's Danger color
+        // (`ui/form.go` coreField's `fieldText(msg, t.Danger)`).
+        let warn = context.theme().danger();
         assert!(frame.display.commands.iter().any(|command| {
             matches!(
                 command,

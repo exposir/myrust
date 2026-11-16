@@ -1778,7 +1778,9 @@ mod tests {
         let mut window =
             NativeUiWindow::new(test_native_ui(), RenderSize::new(320, 200), 1.0).unwrap();
         assert_eq!(window.renderer.backend(), RendererBackend::Software);
-        assert_eq!(window.last_stats.total_commands, 3);
+        // The button's border and face are two rounded rects over its
+        // label, beside the column's own text: four commands, two texts.
+        assert_eq!(window.last_stats.total_commands, 4);
         assert!(window.cpu_frame.is_some());
         window.render().unwrap();
         assert_eq!(window.last_stats.command_counts.text, 2);

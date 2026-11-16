@@ -33,11 +33,12 @@ pub fn avatar(
     context: &mut Context,
     id: &str,
     label: &str,
-    initials: &str,
+    initials: Option<&str>,
+    data: Option<ImageData<'_>>,
     size: f32,
     shape: AvatarShape,
 ) -> AvatarState {
-    context.avatar(id, label, Some(initials), None, size, shape)
+    context.avatar(id, label, initials, data, size, shape)
 }
 
 /// Draws an RGBA image avatar.
@@ -60,7 +61,7 @@ mod tests {
     use super::*;
     use crate::access::Role;
     use crate::layout::Size;
-    use crate::paint::DrawCommand;
+    use crate::paint::{DrawCommand, Radius};
 
     #[test]
     fn avatar_initials_use_label_and_configurable_size() {
@@ -71,7 +72,8 @@ mod tests {
             &mut context,
             "avatar-small",
             "User",
-            "AB",
+            Some("AB"),
+            None,
             48.0,
             AvatarShape::Circle,
         );
@@ -79,7 +81,8 @@ mod tests {
             &mut context,
             "avatar-large",
             "User",
-            "AB",
+            Some("AB"),
+            None,
             96.0,
             AvatarShape::Rounded,
         );
@@ -87,14 +90,16 @@ mod tests {
             &mut context,
             "avatar-zero",
             "User",
-            "AB",
+            Some("AB"),
+            None,
             0.0,
             AvatarShape::Circle,
         );
         let frame = context.produce().unwrap();
         assert_eq!(small.size, 48.0);
         assert_eq!(large.size, 96.0);
-        assert_eq!(zero.size, 0.0);
+        // A zero size asks for MyGo's own `FontSize * 2.25` default.
+        assert_eq!(zero.size, 31.5);
         let small_node = frame
             .access_nodes
             .iter()
@@ -107,9 +112,14 @@ mod tests {
             .find(|node| node.label == "User" && node.bounds.width == 96.0)
             .expect("large avatar label");
         assert_eq!(large_node.role, Role::Label);
-        assert!(frame.display.commands.iter().any(
-            |command| matches!(command, DrawCommand::Circle { radius, .. } if *radius == 24.0)
-        ));
+        // MyGo rounds the avatar's box, and its painter snaps every edge to
+        // whole device pixels, so the disc is a rounded rectangle of half
+        // the size rather than an arc.
+        assert!(frame.display.commands.iter().any(|command| matches!(
+            command,
+            DrawCommand::RoundedRect { radius, .. }
+                if *radius == Radius::all(24.0)
+        )));
         assert!(frame
             .display
             .commands

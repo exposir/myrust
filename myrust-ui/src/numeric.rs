@@ -63,6 +63,13 @@ pub struct DecimalInputOptions {
     pub allow_negative: bool,
     /// Exact number of fraction digits used for the scaled integer.
     pub decimals: usize,
+    /// Step in scaled integer units, added or subtracted by the buttons
+    /// and ArrowUp/ArrowDown, as MyGo's step string (`ui/decimal.go`).
+    pub step_units: i64,
+    /// Lower limit in scaled integer units, when any.
+    pub min_units: Option<i64>,
+    /// Upper limit in scaled integer units, when any.
+    pub max_units: Option<i64>,
 }
 
 impl Default for DecimalInputOptions {
@@ -70,6 +77,9 @@ impl Default for DecimalInputOptions {
         Self {
             allow_negative: true,
             decimals: 2,
+            step_units: 1,
+            min_units: None,
+            max_units: None,
         }
     }
 }
@@ -315,6 +325,7 @@ mod tests {
                 DecimalInputOptions {
                     allow_negative: true,
                     decimals: 2,
+                    ..DecimalInputOptions::default()
                 },
             );
         };

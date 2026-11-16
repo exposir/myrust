@@ -99,7 +99,7 @@ pub(crate) fn civil_from_days(days: i64) -> (i32, u32, u32) {
     )
 }
 
-pub(crate) fn weekday_monday(year: i32, month: u32, day: u32) -> u32 {
+pub fn weekday_monday(year: i32, month: u32, day: u32) -> u32 {
     (days_from_civil(year, month, day) + 3).rem_euclid(7) as u32
 }
 

@@ -18,6 +18,29 @@ pub enum InlineStyle {
         /// Link target URL.
         target: String,
     },
+    /// Struck-through text.
+    Strikethrough,
+}
+
+/// Horizontal alignment of one table column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TableAlign {
+    /// Left aligned, the default.
+    #[default]
+    Start,
+    /// Centered.
+    Center,
+    /// Right aligned.
+    End,
+}
+
+/// One item of a task list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskItem {
+    /// Whether the item's box is checked.
+    pub checked: bool,
+    /// Inline item content.
+    pub spans: Vec<InlineSpan>,
 }
 
 /// One inline text span.
@@ -53,6 +76,8 @@ pub enum MarkdownBlock {
     Paragraph(Vec<InlineSpan>),
     /// Unordered list items.
     UnorderedList(Vec<Vec<InlineSpan>>),
+    /// Task list items.
+    TaskList(Vec<TaskItem>),
     /// Ordered list items.
     OrderedList(Vec<Vec<InlineSpan>>),
     /// Fenced code block.
@@ -68,6 +93,8 @@ pub enum MarkdownBlock {
         headers: Vec<String>,
         /// Body cells.
         rows: Vec<Vec<String>>,
+        /// Alignment of each column.
+        aligns: Vec<TableAlign>,
     },
 }
 
@@ -91,7 +118,7 @@ pub fn markdown(context: &mut Context, id: &str, source: &str) -> MarkdownRespon
 pub fn parse_markdown(source: &str) -> Vec<MarkdownBlock> {
     let mut blocks = Vec::new();
     let mut paragraph = String::new();
-    let mut unordered: Vec<Vec<InlineSpan>> = Vec::new();
+    let mut unordered: Vec<(Option<bool>, Vec<InlineSpan>)> = Vec::new();
     let mut ordered: Vec<Vec<InlineSpan>> = Vec::new();
 
     let flush_paragraph = |paragraph: &mut String, blocks: &mut Vec<MarkdownBlock>| {
@@ -100,11 +127,26 @@ pub fn parse_markdown(source: &str) -> Vec<MarkdownBlock> {
             blocks.push(MarkdownBlock::Paragraph(parse_inline(text.trim())));
         }
     };
-    let flush_lists = |unordered: &mut Vec<Vec<InlineSpan>>,
+    let flush_lists = |unordered: &mut Vec<(Option<bool>, Vec<InlineSpan>)>,
                        ordered: &mut Vec<Vec<InlineSpan>>,
                        blocks: &mut Vec<MarkdownBlock>| {
         if !unordered.is_empty() {
-            blocks.push(MarkdownBlock::UnorderedList(std::mem::take(unordered)));
+            let items = std::mem::take(unordered);
+            if items.iter().any(|(task, _)| task.is_some()) {
+                blocks.push(MarkdownBlock::TaskList(
+                    items
+                        .into_iter()
+                        .map(|(task, spans)| TaskItem {
+                            checked: task.unwrap_or(false),
+                            spans,
+                        })
+                        .collect(),
+                ));
+            } else {
+                blocks.push(MarkdownBlock::UnorderedList(
+                    items.into_iter().map(|(_, spans)| spans).collect(),
+                ));
+            }
         }
         if !ordered.is_empty() {
             blocks.push(MarkdownBlock::OrderedList(std::mem::take(ordered)));
@@ -153,6 +195,9 @@ pub fn parse_markdown(source: &str) -> Vec<MarkdownBlock> {
         }
         if index < lines.len() && table_separator(lines[index]) {
             if let Some(headers) = split_table_row(trimmed) {
+                let aligns = split_table_row(lines[index])
+                    .map(|cells| cells.iter().map(|cell| table_align(cell)).collect())
+                    .unwrap_or_default();
                 flush_paragraph(&mut paragraph, &mut blocks);
                 flush_lists(&mut unordered, &mut ordered, &mut blocks);
                 index += 1;
@@ -167,7 +212,7 @@ pub fn parse_markdown(source: &str) -> Vec<MarkdownBlock> {
                     }
                     index += 1;
                 }
-                blocks.push(MarkdownBlock::Table { headers, rows });
+                blocks.push(MarkdownBlock::Table { headers, rows, aligns });
                 continue;
             }
         }
@@ -176,7 +221,8 @@ pub fn parse_markdown(source: &str) -> Vec<MarkdownBlock> {
             if !ordered.is_empty() {
                 flush_lists(&mut unordered, &mut ordered, &mut blocks);
             }
-            unordered.push(parse_inline(text));
+            let (task, text) = task_item(text);
+            unordered.push((task, parse_inline(text)));
             continue;
         }
         if let Some(text) = ordered_item(trimmed) {
@@ -244,6 +290,29 @@ fn unordered_item(line: &str) -> Option<&str> {
         .map(str::trim)
 }
 
+/// Returns the check box state of a task item and its text, the text
+/// unchanged for an item that is not a task.
+fn task_item(text: &str) -> (Option<bool>, &str) {
+    if let Some(rest) = text.strip_prefix("[x] ").or_else(|| text.strip_prefix("[X] ")) {
+        return (Some(true), rest);
+    }
+    if let Some(rest) = text.strip_prefix("[ ] ") {
+        return (Some(false), rest);
+    }
+    (None, text)
+}
+
+/// Returns the alignment a separator cell asks for.
+fn table_align(cell: &str) -> TableAlign {
+    let left = cell.starts_with(':');
+    let right = cell.ends_with(':');
+    match (left, right) {
+        (true, true) => TableAlign::Center,
+        (false, true) => TableAlign::End,
+        _ => TableAlign::Start,
+    }
+}
+
 fn ordered_item(line: &str) -> Option<&str> {
     let digits = line
         .chars()
@@ -266,6 +335,14 @@ pub fn parse_inline(text: &str) -> Vec<InlineSpan> {
             if let Some(end) = after.find("**").or_else(|| after.find("__")) {
                 push_plain(&mut spans, &mut plain);
                 spans.push(InlineSpan::new(&after[..end], InlineStyle::Bold));
+                index += 2 + end + 2;
+                continue;
+            }
+        }
+        if let Some(after) = rest.strip_prefix("~~") {
+            if let Some(end) = after.find("~~") {
+                push_plain(&mut spans, &mut plain);
+                spans.push(InlineSpan::new(&after[..end], InlineStyle::Strikethrough));
                 index += 2 + end + 2;
                 continue;
             }
@@ -397,7 +474,7 @@ mod tests {
         let blocks =
             parse_markdown("| Block | Cost |\n| --- | --- |\n| heading | O(1) |\n| paragraph | O(n) |");
         assert_eq!(blocks.len(), 1);
-        let MarkdownBlock::Table { headers, rows } = &blocks[0] else {
+        let MarkdownBlock::Table { headers, rows, aligns: _ } = &blocks[0] else {
             panic!("table");
         };
         assert_eq!(headers, &["Block".to_string(), "Cost".to_string()]);
@@ -441,7 +518,7 @@ mod tests {
             .display
             .commands
             .iter()
-            .any(|command| matches!(command, DrawCommand::Text { text, font_size, .. } if text == "Title" && *font_size == 26.0)));
+            .any(|command| matches!(command, DrawCommand::Text { text, font_size, .. } if text == "Title" && (*font_size - 22.4).abs() < 0.01)));
         assert!(frame
             .display
             .commands

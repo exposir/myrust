@@ -17,6 +17,8 @@ pub struct FindBarState {
     pub previous_clicked: bool,
     /// Whether next was clicked.
     pub next_clicked: bool,
+    /// Whether Done was clicked, closing the bar.
+    pub closed: bool,
     /// Whether the text input owns focus.
     pub focused: bool,
     /// Whether the pointer is over the input.
@@ -152,20 +154,17 @@ mod tests {
             .display
             .commands
             .iter()
-            .any(|command| matches!(command, DrawCommand::Text { text, .. } if text == "3/3")));
+            .any(|command| matches!(command, DrawCommand::Text { text, .. } if text == "3 of 3")));
 
-        *current.borrow_mut() = 1;
         *matches.borrow_mut() = 0;
+        click(&mut context, size, "find:next", &mut build);
+        assert_eq!(*current.borrow(), 0, "no matches leaves the current alone");
         let zero = render(&mut context, size, None, &mut build);
-        assert!(!zero
-            .interactions
-            .iter()
-            .any(|region| region.button_id == "find:next"));
         assert!(zero
             .display
             .commands
             .iter()
-            .any(|command| matches!(command, DrawCommand::Text { text, .. } if text == "0/0")));
+            .any(|command| matches!(command, DrawCommand::Text { text, .. } if text == "No matches")));
         assert_eq!(count_matches("Foo foo foo", "foo"), 3);
         assert_eq!(count_matches("anything", ""), 0);
     }

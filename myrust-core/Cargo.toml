@@ -9,6 +9,7 @@ description = "Desktop application framework for myrust"
 [features]
 default = []
 gpu = ["dep:wgpu"]
+devtools = ["wry/devtools"]
 
 [dependencies]
 myrust-ui = { path = "../myrust-ui" }

@@ -149,14 +149,13 @@ mod tests {
         let text = Rc::new(RefCell::new("2024-02-29".to_string()));
         let state = Rc::new(RefCell::new(DateInputState::default()));
         let last = Rc::new(RefCell::new(DateInputResponse::default()));
-        click(&mut context, size, "date:input", &text, &state, &last);
         render(&mut context, size, None, &text, &state, &last);
         assert!(last.borrow().valid);
         assert_eq!(state.borrow().calendar.year, 2024);
         assert_eq!(state.borrow().calendar.month, 2);
         assert_eq!(state.borrow().calendar.selected, Some(29));
 
-        click(&mut context, size, "date:toggle", &text, &state, &last);
+        click(&mut context, size, "date", &text, &state, &last);
         assert!(state.borrow().open);
         click(
             &mut context,
@@ -169,7 +168,7 @@ mod tests {
         assert_eq!(*text.borrow(), "2024-02-15");
         assert!(!state.borrow().open);
 
-        click(&mut context, size, "date:toggle", &text, &state, &last);
+        click(&mut context, size, "date", &text, &state, &last);
         assert!(state.borrow().open);
         render(
             &mut context,

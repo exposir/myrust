@@ -28,6 +28,12 @@ pub struct TextRenderCommand {
     pub font_size: f32,
     /// Font weight (400 normal, 700 bold).
     pub weight: u16,
+    /// Whether the run is drawn in the italic face.
+    pub italic: bool,
+    /// Whether the run is drawn in the monospaced face.
+    pub mono: bool,
+    /// Named font family, as MyGo's `Font(name)` takes it.
+    pub family: Option<String>,
     /// Text color.
     pub color: Color,
     /// Maximum width for alignment, or None.
@@ -177,6 +183,9 @@ impl CpuRasterizer {
                     text,
                     font_size,
                     weight,
+                    italic,
+                    mono,
+                    family,
                     color,
                     max_width,
                     alignment,
@@ -211,6 +220,9 @@ impl CpuRasterizer {
                                 text: line.to_string(),
                                 font_size: *font_size,
                                 weight: *weight,
+                                italic: *italic,
+                                mono: *mono,
+                                family: family.clone(),
                                 color: *color,
                                 max_width: *max_width,
                                 alignment: *alignment,
@@ -228,6 +240,9 @@ impl CpuRasterizer {
                             text,
                             *font_size,
                             *weight,
+                            *italic,
+                            *mono,
+                            family.as_deref(),
                             *color,
                         );
                     }
@@ -309,6 +324,7 @@ impl CpuRasterizer {
                         y,
                         width,
                         height,
+                        radius,
                         start,
                         end,
                         stops,
@@ -316,6 +332,7 @@ impl CpuRasterizer {
                         transform,
                         scissor,
                         Rect::new(*x, *y, *width, *height),
+                        *radius,
                         *start,
                         *end,
                         stops,
@@ -692,6 +709,7 @@ impl Canvas {
         transform: TransformMatrix,
         scissor: Option<Rect>,
         rect: Rect,
+        radius: Radius,
         start: Point,
         end: Point,
         stops: &[GradientStop],
@@ -701,6 +719,14 @@ impl Canvas {
         }
         let mut ordered = stops.to_vec();
         ordered.sort_by(|left, right| left.offset.total_cmp(&right.offset));
+        let maximum = rect.width.min(rect.height) / 2.0;
+        let radii = [
+            radius.top_left.clamp(0.0, maximum),
+            radius.top_right.clamp(0.0, maximum),
+            radius.bottom_right.clamp(0.0, maximum),
+            radius.bottom_left.clamp(0.0, maximum),
+        ];
+        let rounded = radii.iter().any(|value| *value > 0.0);
         let corners = [
             (Point::new(rect.x, rect.y), Point::new(0.0, 0.0)),
             (Point::new(rect.right(), rect.y), Point::new(1.0, 0.0)),
@@ -750,12 +776,36 @@ impl Canvas {
                         colors[3][2] + (colors[2][2] - colors[3][2]) * u,
                         colors[3][3] + (colors[2][3] - colors[3][3]) * u,
                     ];
-                    let color = [
+                    let mut color = [
                         top_color[0] + (bottom_color[0] - top_color[0]) * v,
                         top_color[1] + (bottom_color[1] - top_color[1]) * v,
                         top_color[2] + (bottom_color[2] - top_color[2]) * v,
                         top_color[3] + (bottom_color[3] - top_color[3]) * v,
                     ];
+                    if rounded {
+                        let cx = x as f32 + 0.5;
+                        let cy = y as f32 + 0.5;
+                        let in_corner = (cx < rect.x + radii[0] && cy < rect.y + radii[0])
+                            || (cx > rect.right() - radii[1] && cy < rect.y + radii[1])
+                            || (cx > rect.right() - radii[2] && cy > rect.bottom() - radii[2])
+                            || (cx < rect.x + radii[3] && cy > rect.bottom() - radii[3]);
+                        if in_corner {
+                            let mut covered = 0_u32;
+                            for sy in 0..2 {
+                                for sx in 0..2 {
+                                    let sample_x = x as f32 + (sx as f32 + 0.5) / 2.0;
+                                    let sample_y = y as f32 + (sy as f32 + 0.5) / 2.0;
+                                    if inside_rounded_rect(rect, radii, sample_x, sample_y) {
+                                        covered += 1;
+                                    }
+                                }
+                            }
+                            if covered == 0 {
+                                continue;
+                            }
+                            color[3] *= covered as f32 / 4.0;
+                        }
+                    }
                     self.blend(x, y, color);
                 }
             }
@@ -805,6 +855,9 @@ impl Canvas {
         text: &str,
         font_size: f32,
         weight: u16,
+        italic: bool,
+        _mono: bool,
+        _family: Option<&str>,
         color: Color,
     ) {        let Some(font) = self.font.clone() else {
             self.draw_bitmap_text(transform, scissor, origin, text, font_size, color);
@@ -824,6 +877,11 @@ impl Canvas {
         for (line_index, line) in text.split('\n').enumerate() {
             let mut cursor_x = origin.x;
             let baseline_y = origin.y + line_index as f32 * line_height + baseline_offset;
+            let line_transform = if italic {
+                transform.then(TransformMatrix::italic_shear(baseline_y, 0.2))
+            } else {
+                transform
+            };
             for character in line.chars() {
                 if !font.has_glyph(character) {
                     self.unsupported_glyphs += 1;
@@ -832,7 +890,7 @@ impl Canvas {
                 }
                 let bitmap = font.rasterize(character, font_size);
                 self.fill_glyph_bitmap(
-                    transform,
+                    line_transform,
                     scissor,
                     &bitmap,
                     cursor_x,
@@ -842,7 +900,7 @@ impl Canvas {
                 );
                 if bold_offset > 0.0 {
                     self.fill_glyph_bitmap(
-                        transform,
+                        line_transform,
                         scissor,
                         &bitmap,
                         cursor_x,
@@ -1376,6 +1434,9 @@ mod tests {
             text: "A".to_string(),
             font_size: 16.0,
             weight: 400,
+            italic: false,
+            mono: false,
+            family: None,
             color: Color::WHITE,
             max_width: None,
             alignment: crate::paint::TextAlignment::Start,
@@ -1402,6 +1463,9 @@ mod tests {
             text: "M".to_string(),
             font_size: 28.0,
             weight: 400,
+            italic: false,
+            mono: false,
+            family: None,
             color: Color::WHITE,
             max_width: None,
             alignment: crate::paint::TextAlignment::Start,
@@ -1428,6 +1492,9 @@ mod tests {
             text: "\u{10FFFF}".to_string(),
             font_size: 24.0,
             weight: 400,
+            italic: false,
+            mono: false,
+            family: None,
             color: Color::WHITE,
             max_width: None,
             alignment: crate::paint::TextAlignment::Start,

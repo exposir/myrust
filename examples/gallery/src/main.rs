@@ -554,6 +554,8 @@ fn view(context: &mut Context, state: &mut State) {
                         DecimalInputOptions {
                             allow_negative: true,
                             decimals: 2,
+                            step_units: 1,
+                            ..DecimalInputOptions::default()
                         },
                     );
                 });
@@ -738,7 +740,8 @@ fn view(context: &mut Context, state: &mut State) {
                             context,
                             "gallery-avatar",
                             "Maya",
-                            "MA",
+                            Some("MA"),
+                            None,
                             44.0,
                             AvatarShape::Circle,
                         );
@@ -1243,6 +1246,9 @@ fn view(context: &mut Context, state: &mut State) {
                     y: 34.0,
                     text: "Display list: rounded rect, circle, line, text".to_string(),
                     font_size: 14.0,
+                    italic: false,
+                    mono: false,
+                    family: None,
                     weight: 500,
                     color: theme.foreground,
                     max_width: Some(400.0),
@@ -1254,6 +1260,9 @@ fn view(context: &mut Context, state: &mut State) {
                 y: 70.0,
                 text: format!("{:.0}% accent hue", 210.0 - state.volume * 1.8),
                 font_size: 12.0,
+                italic: false,
+                mono: false,
+                family: None,
                 weight: 400,
                 color: theme.muted,
                 max_width: None,

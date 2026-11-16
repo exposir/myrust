@@ -155,10 +155,15 @@ pub struct Style {
     pub gap: f32,
     /// Flex direction.
     pub flex_direction: FlexDirection,
+    /// Wraps a row's children onto more lines when they overflow.
+    pub flex_wrap: bool,
     /// Main-axis alignment.
     pub justify_content: JustifyContent,
     /// Cross-axis alignment.
     pub align_items: AlignItems,
+    /// Cross-axis alignment this node asks its parent for, overriding the
+    /// parent's [`Self::align_items`] as CSS's `align-self` does.
+    pub align_self: Option<AlignItems>,
     /// Share of remaining main-axis space.
     pub flex_grow: f32,
     /// Relative or absolute flow participation.
@@ -171,6 +176,9 @@ pub struct Style {
     pub display_grid: bool,
     /// Equal-width grid column count.
     pub grid_columns: usize,
+    /// Lines this row's children up by their first baselines, as MyGo's
+    /// `baselines` on a form field's row (`ui/form.go` alignBaselines).
+    pub baselines: bool,
 }
 
 impl Default for Style {
@@ -186,14 +194,17 @@ impl Default for Style {
             padding: Edges::default(),
             gap: 0.0,
             flex_direction: FlexDirection::Row,
+            flex_wrap: false,
             justify_content: JustifyContent::FlexStart,
             align_items: AlignItems::Stretch,
+            align_self: None,
             flex_grow: 0.0,
             position: Position::Relative,
             left: None,
             top: None,
             display_grid: false,
             grid_columns: 1,
+            baselines: false,
         }
     }
 }
@@ -237,6 +248,18 @@ pub struct Node {
     pub children: Vec<Node>,
     /// Intrinsic content size for leaf nodes.
     pub content_size: Size,
+    /// Distance from this node's top to the baseline of its first line of
+    /// text, when the node itself draws text. Containers leave it `None` and
+    /// their first line is found among their children.
+    pub first_baseline: Option<f32>,
+    /// The ascent of this node's first line, when it draws text.
+    ///
+    /// A row that lines its children up by their baselines lines a control
+    /// without text up on a line of the row's text centered on it, which
+    /// takes the line's ascent and descent (`ui/form.go` anchor).
+    pub text_ascent: Option<f32>,
+    /// The descent of this node's first line, when it draws text.
+    pub text_descent: Option<f32>,
 }
 
 impl Node {
@@ -247,6 +270,9 @@ impl Node {
             style: Style::default(),
             children: Vec::new(),
             content_size: Size::default(),
+            first_baseline: None,
+            text_ascent: None,
+            text_descent: None,
         }
     }
 
@@ -271,6 +297,19 @@ impl Node {
     /// Appends children.
     pub fn extend(mut self, children: impl IntoIterator<Item = Node>) -> Self {
         self.children.extend(children);
+        self
+    }
+
+    /// Sets how far below this node's top its first line's baseline sits.
+    pub fn with_first_baseline(mut self, baseline: f32) -> Self {
+        self.first_baseline = Some(baseline);
+        self
+    }
+
+    /// Sets the ascent and descent of this node's first line.
+    pub fn with_text_metrics(mut self, ascent: f32, descent: f32) -> Self {
+        self.text_ascent = Some(ascent);
+        self.text_descent = Some(descent);
         self
     }
 }
@@ -364,6 +403,103 @@ fn layout_node(
     layout_absolute(node, content_origin, results);
 }
 
+fn layout_flex_wrap(
+    node: &Node,
+    children: &[&Node],
+    content_origin: Point,
+    content_width: f32,
+    content_height: f32,
+    results: &mut Vec<LayoutResult>,
+) {
+    let gap = node.style.gap;
+    let sizes: Vec<Size> = children.iter().map(|child| base_size(child)).collect();
+    let mut lines: Vec<Vec<usize>> = Vec::new();
+    let mut line: Vec<usize> = Vec::new();
+    let mut line_width = 0.0;
+    for (index, child) in children.iter().enumerate() {
+        let width = sizes[index].width
+            + child.style.margin.left
+            + child.style.margin.right;
+        let added = if line.is_empty() { width } else { line_width + gap + width };
+        if !line.is_empty() && added > content_width + 0.5 {
+            lines.push(std::mem::take(&mut line));
+            line_width = width;
+        } else {
+            line_width = added;
+        }
+        line.push(index);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    let line_heights: Vec<f32> = lines
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|&index| {
+                    sizes[index].height + children[index].style.margin.top + children[index].style.margin.bottom
+                })
+                .fold(0.0_f32, f32::max)
+        })
+        .collect();
+    let total_height =
+        line_heights.iter().sum::<f32>() + gap * lines.len().saturating_sub(1) as f32;
+    let leftover = (content_height - total_height).max(0.0);
+    let lead = match node.style.justify_content {
+        JustifyContent::Center => leftover / 2.0,
+        JustifyContent::FlexEnd => leftover,
+        _ => 0.0,
+    };
+    let mut y = content_origin.y + lead;
+    for (line, line_height) in lines.iter().zip(line_heights.iter()) {
+        let line_width: f32 = line
+            .iter()
+            .map(|&index| {
+                sizes[index].width
+                    + children[index].style.margin.left
+                    + children[index].style.margin.right
+            })
+            .sum::<f32>()
+            + gap * line.len().saturating_sub(1) as f32;
+        let leftover_x = (content_width - line_width).max(0.0);
+        let lead_x = match node.style.justify_content {
+            JustifyContent::Center => leftover_x / 2.0,
+            JustifyContent::FlexEnd => leftover_x,
+            _ => 0.0,
+        };
+        let mut x = content_origin.x + lead_x;
+        for &index in line {
+            let child = children[index];
+            let offset_y = match node.style.align_items {
+                AlignItems::Center => (line_height
+                    - sizes[index].height
+                    - child.style.margin.top
+                    - child.style.margin.bottom)
+                    .max(0.0)
+                    / 2.0,
+                AlignItems::FlexEnd => (line_height
+                    - sizes[index].height
+                    - child.style.margin.top
+                    - child.style.margin.bottom)
+                    .max(0.0),
+                _ => 0.0,
+            };
+            layout_node(
+                child,
+                Point::new(
+                    x + child.style.margin.left,
+                    y + offset_y + child.style.margin.top,
+                ),
+                sizes[index].width,
+                sizes[index].height,
+                results,
+            );
+            x += sizes[index].width + child.style.margin.left + child.style.margin.right + gap;
+        }
+        y += line_height + gap;
+    }
+}
+
 fn layout_absolute(node: &Node, content_origin: Point, results: &mut Vec<LayoutResult>) {
     for child in node
         .children
@@ -391,6 +527,10 @@ fn layout_flex(
     }
 
     let direction = node.style.flex_direction;
+    if node.style.flex_wrap && direction == FlexDirection::Row {
+        layout_flex_wrap(node, children, content_origin, content_width, content_height, results);
+        return;
+    }
     let content_main = match direction {
         FlexDirection::Row => content_width,
         FlexDirection::Column => content_height,
@@ -460,6 +600,47 @@ fn layout_flex(
     );
     let mut cursor = lead;
 
+    // A row that lines its children up by their baselines moves each one down
+    // by the difference between its baseline and the lowest in the row, as
+    // MyGo's `alignBaselines` does for a form field's row (`ui/form.go`).
+    // The line metrics of the row's first text set where a control without
+    // text sits: MyGo centers a line of that text on it, so a switch beside
+    // its label is level with the label rather than with the row's top.
+    let baseline_offsets: Option<Vec<f32>> = if node.style.baselines
+        && direction == FlexDirection::Row
+    {
+        let metrics = children.iter().find_map(|child| first_text_metrics(child));
+        let baselines: Vec<Option<f32>> = children
+            .iter()
+            .enumerate()
+            .map(|(index, child)| match metrics {
+                Some((ascent, descent)) => {
+                    anchor(child, cross_sizes[index], ascent, descent)
+                        .map(|baseline| baseline + child.style.margin.top)
+                }
+                // Without a line of text in the row, a child without text of
+                // its own has no baseline to line up on.
+                None => first_text_baseline(child).map(|baseline| baseline + child.style.margin.top),
+            })
+            .collect();
+        if baselines.iter().all(Option::is_some) {
+            let lowest = baselines
+                .iter()
+                .flatten()
+                .fold(f32::MIN, |lowest, baseline| lowest.max(*baseline));
+            Some(
+                baselines
+                    .iter()
+                    .map(|baseline| lowest - baseline.unwrap_or(0.0))
+                    .collect(),
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     for (index, child) in children.iter().enumerate() {
         let main_size = main_sizes[index];
         let cross_margin = margin_cross(child);
@@ -467,7 +648,10 @@ fn layout_flex(
             FlexDirection::Row => child.style.height.is_none(),
             FlexDirection::Column => child.style.width.is_none(),
         };
-        let cross_size = if node.style.align_items == AlignItems::Stretch && cross_auto {
+        // A child's own `align_self` wins over the container's, as CSS's
+        // `align-self` does.
+        let align = child.style.align_self.unwrap_or(node.style.align_items);
+        let cross_size = if align == AlignItems::Stretch && cross_auto {
             clamp_axis_for_child(
                 (content_cross - cross_margin).max(0.0),
                 child,
@@ -478,10 +662,13 @@ fn layout_flex(
             cross_sizes[index]
         };
         let outer_cross = cross_size + cross_margin;
-        let cross_offset = match node.style.align_items {
-            AlignItems::Stretch | AlignItems::FlexStart => 0.0,
-            AlignItems::Center => ((content_cross - outer_cross) / 2.0).max(0.0),
-            AlignItems::FlexEnd => (content_cross - outer_cross).max(0.0),
+        let cross_offset = match baseline_offsets {
+            Some(ref offsets) => offsets[index],
+            None => match align {
+                AlignItems::Stretch | AlignItems::FlexStart => 0.0,
+                AlignItems::Center => ((content_cross - outer_cross) / 2.0).max(0.0),
+                AlignItems::FlexEnd => (content_cross - outer_cross).max(0.0),
+            },
         };
         let (margin_main_start, margin_cross_start) = match direction {
             FlexDirection::Row => (child.style.margin.left, child.style.margin.top),
@@ -511,6 +698,79 @@ fn layout_flex(
         );
         cursor += main_size + margin_main(child) + distributed_gap;
     }
+}
+
+/// Returns the ascent and descent of the first line of text in `node`, as
+/// MyGo's `firstLine` finds it.
+fn first_text_metrics(node: &Node) -> Option<(f32, f32)> {
+    if let (Some(ascent), Some(descent)) = (node.text_ascent, node.text_descent) {
+        return Some((ascent, descent));
+    }
+    node.children.iter().find_map(first_text_metrics)
+}
+
+/// Returns how far below `node`'s top the baseline of its first line of text
+/// sits, without a line of the row's text to center a control on.
+fn first_text_baseline(node: &Node) -> Option<f32> {
+    if let Some(baseline) = node.first_baseline {
+        return Some(baseline);
+    }
+    for child in &node.children {
+        if child.style.position != Position::Relative {
+            continue;
+        }
+        if let Some(baseline) = first_text_baseline(child) {
+            return Some(node.style.padding.top + child.style.margin.top + baseline);
+        }
+    }
+    None
+}
+
+/// Returns how far below `node`'s top the baseline its row lines up on sits,
+/// as MyGo's `anchor` does (`ui/form.go`): that of its first line of text, or,
+/// for a control without text, a line of the row's text centered on it, so a
+/// switch beside its label is level with the label. A container reports the
+/// first of its children's, through its padding and that child's margin.
+fn anchor(node: &Node, height: f32, ascent: f32, descent: f32) -> Option<f32> {
+    anchor_of(node, height, ascent, descent, node.style.flex_direction == FlexDirection::Row)
+        .map(|(baseline, _)| baseline)
+}
+
+/// Returns the baseline `node` lines up on, and whether it is a line of text:
+/// a row prefers a child's text line to a control's centered one, and a
+/// column takes the first child's either way.
+fn anchor_of(
+    node: &Node,
+    height: f32,
+    ascent: f32,
+    descent: f32,
+    row: bool,
+) -> Option<(f32, bool)> {
+    if let Some(baseline) = node.first_baseline {
+        return Some((baseline, true));
+    }
+    let mut first = None;
+    for child in &node.children {
+        if child.style.position != Position::Relative {
+            continue;
+        }
+        let child_height = base_size(child).height;
+        let Some((baseline, text)) = anchor_of(child, child_height, ascent, descent, row) else {
+            continue;
+        };
+        let offset = node.style.padding.top + child.style.margin.top + baseline;
+        if text || !row {
+            return Some((offset, text));
+        }
+        first.get_or_insert((offset, false));
+    }
+    if first.is_some() {
+        return first;
+    }
+    if height <= 0.0 {
+        return None;
+    }
+    Some((height / 2.0 + (ascent - descent) / 2.0, false))
 }
 
 fn layout_grid(
@@ -575,7 +835,7 @@ fn base_size(node: &Node) -> Size {
     )
 }
 
-fn intrinsic_size(node: &Node) -> Size {
+pub(crate) fn intrinsic_size(node: &Node) -> Size {
     let relative = node
         .children
         .iter()
@@ -607,6 +867,42 @@ fn intrinsic_size(node: &Node) -> Size {
 fn intrinsic_flex(node: &Node, children: &[&Node]) -> Size {
     if children.is_empty() {
         return node.content_size;
+    }
+    if node.style.flex_wrap && node.style.flex_direction == FlexDirection::Row {
+        // A wrapping row is as tall as its lines, its width limited by
+        // the row's own width.
+        let limit = node.style.width.unwrap_or(f32::INFINITY);
+        let gap = node.style.gap;
+        let mut line_width = 0.0_f32;
+        let mut line_height = 0.0_f32;
+        let mut total_height = 0.0_f32;
+        let mut widest = 0.0_f32;
+        let mut lines = 0_usize;
+        let mut first = true;
+        for child in children {
+            let size = base_size(child);
+            let width = size.width + child.style.margin.left + child.style.margin.right;
+            let height = size.height + child.style.margin.top + child.style.margin.bottom;
+            let added = if first { width } else { line_width + gap + width };
+            if !first && added > limit + 0.5 {
+                widest = widest.max(line_width);
+                total_height += line_height;
+                lines += 1;
+                line_width = width;
+            } else {
+                line_width = added;
+            }
+            line_height = line_height.max(height);
+            first = false;
+        }
+        widest = widest.max(line_width);
+        if lines > 0 {
+            total_height += line_height;
+            total_height += gap * lines as f32;
+        } else {
+            total_height = line_height;
+        }
+        return Size::new(widest.min(limit), total_height);
     }
     let mut main = node.style.gap * children.len().saturating_sub(1) as f32;
     let mut cross = 0.0_f32;
@@ -677,6 +973,9 @@ fn justify_offsets(justify: JustifyContent, leftover: f32, gap: f32, count: usiz
     match justify {
         JustifyContent::FlexStart => (0.0, gap),
         JustifyContent::FlexEnd => (leftover, gap),
+        // MyGo centers at the exact half and snaps each box to the device
+        // grid as it paints (`Painter.snap`), so a centered box may sit on a
+        // half pixel; rounding here would move it a pixel off the source.
         JustifyContent::Center => (leftover / 2.0, gap),
         JustifyContent::SpaceBetween if count > 1 => (0.0, gap + leftover / (count - 1) as f32),
         JustifyContent::SpaceBetween => (leftover / 2.0, gap),
@@ -904,5 +1203,31 @@ mod tests {
         let first = LayoutEngine::compute(&root, Size::new(100.0, 100.0));
         let second = LayoutEngine::compute(&root, Size::new(100.0, 100.0));
         assert_eq!(first, second);
+    }
+}
+
+
+#[cfg(test)]
+mod baseline_tests {
+    use super::*;
+
+    #[test]
+    fn row_lines_children_up_by_first_baseline() {
+        let label = Node::new(1).with_content_size(Size::new(30.0, 17.0)).with_first_baseline(13.0);
+        let input = Node::new(2)
+            .with_style(Style::default().height(30.0))
+            .with_first_baseline(20.0);
+        let root = Node::new(0).with_style(Style {
+            width: Some(200.0),
+            height: Some(40.0),
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::FlexStart,
+            baselines: true,
+            ..Style::default()
+        }).push(label).push(input);
+        let results = LayoutEngine::compute(&root, Size::new(200.0, 40.0));
+        let y = |id| results.iter().find(|r| r.id == id).unwrap().y;
+        assert_eq!(y(1), 7.0, "label moves down to the input's baseline");
+        assert_eq!(y(2), 0.0);
     }
 }
