@@ -223,9 +223,58 @@ def shell(index):
     return header, aside, footer, drawer, mobile, style, base_i18n, js, search
 
 
+ACTIVE_ITEM = ' bg-muted font-medium text-foreground!'
+ITEM_CLASS = 'flex items-center gap-1 rounded-md px-2.5 py-1.5 text-muted-foreground transition-colors hover:text-foreground'
+TOC_OPEN = '<ul class="my-1.5 ml-3.5 border-l">'
+
+
+def drop_toc(aside):
+    """Drops the section headings hanging under the overview link.
+
+    They are the overview page's own table of contents; a detail page has
+    none in the sidebar, as MyGo's DocsNav shows headings of the current
+    page alone. The block nests a list of items, so its end is found by
+    counting the tags rather than by a regular expression.
+    """
+    start = aside.find(TOC_OPEN)
+    if start < 0:
+        return aside
+    depth = 0
+    index = start
+    while index < len(aside):
+        if aside.startswith("<ul", index):
+            depth += 1
+            index += 3
+            continue
+        if aside.startswith("</ul>", index):
+            depth -= 1
+            index += 5
+            if depth == 0:
+                return aside[:start] + aside[index:]
+            continue
+        index += 1
+    return aside
+
+
+def mark_current(aside, entry):
+    """Marks entry's own link in the sidebar, as MyGo's DocsNav does."""
+    aside = drop_toc(aside)
+    aside = aside.replace(ITEM_CLASS + ACTIVE_ITEM, ITEM_CLASS)
+    aside = aside.replace(' data-status="active" aria-current="page"', '')
+    # The link's class attribute comes before its href: the active classes
+    # join the ones it already has, and the state marks it as current.
+    link = 'class="%s" href="/docs/ui/%s/">' % (ITEM_CLASS, entry["slug"])
+    marked = 'class="%s%s" href="/docs/ui/%s/" data-status="active" aria-current="page">' % (
+        ITEM_CLASS, ACTIVE_ITEM, entry["slug"])
+    if link in aside:
+        aside = aside.replace(link, marked, 1)
+    return aside
+
+
 def detail_page(entry, prev, next, meta, shell_parts):
     header, aside, footer, drawer, mobile, style, base_i18n, js, search = shell_parts
     aside = aside.replace('href="#', 'href="/docs/ui/#')
+    aside = mark_current(aside, entry)
     en_body = markdown((SRC / (entry["slug"] + ".en.md")).read_text())
     zh_body = markdown((SRC / (entry["slug"] + ".zh.md")).read_text())
     i18n = json.loads(json.dumps(base_i18n))
@@ -288,20 +337,20 @@ def detail_page(entry, prev, next, meta, shell_parts):
             '<div class="ui-preview"><div class="ui-preview-titlebar">'
             '<div class="ui-preview-lights"><i class="close"></i><i class="minimize"></i><i class="zoom"></i></div>'
             '<span class="ui-preview-title" data-i18n="preview.title">%s</span>'
-            '<a class="ui-preview-open" href="/docs-demo/?demo=%s" target="_blank" rel="noopener" '
-            'aria-label="Open demo in a new tab" data-i18n-aria="preview.open">↗</a></div>'
+            '<a class="ui-preview-open" href="/docs-demo/?demo=%s" target="_blank" rel="noopener" title="Open in a new tab" '
+            'aria-label="Open demo in a new tab" data-i18n-aria="preview.open"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"></path><path d="M10 14 21 3"></path><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path></svg></a></div>'
             '<iframe class="ui-preview-frame" src="/docs-demo/?demo=%s" title="%s" height="%s" loading="eager"></iframe></div>'
             % (entry["title"], entry["preview"], entry["preview"], entry["title"], entry["height"])
         )
     article = (
         '<header><p class="label" data-i18n="entry.section">%s</p>'
-        '<div class="mt-3 flex flex-wrap items-center gap-3"><h1 class="text-3xl font-semibold tracking-[-0.03em] sm:text-4xl" data-i18n="entry.title">%s</h1>%s</div>'
-        '<p class="mt-3 text-muted-foreground" data-i18n="entry.desc">%s</p></header>'
+        '<div class="mt-3 flex flex-wrap items-center gap-3"><h1 class="text-3xl font-semibold tracking-[-0.03em] sm:text-4xl" data-i18n="entry.title">%s</h1></div>'
+        '<p class="mt-3 text-lg leading-8 text-muted-foreground" data-i18n="entry.desc">%s</p></header>'
         '%s<div class="mt-10"><div class="prose-docs" data-i18n-html="entry.body">%s</div>'
         '<footer class="mt-16"><nav class="grid gap-px overflow-hidden rounded-lg border bg-border sm:grid-cols-2">%s%s</nav>'
         '<a href="https://github.com/exposir/myrust/edit/main/website/docs-src/%s.en.md" class="mt-6 inline-block text-sm text-muted-foreground hover:text-foreground" data-i18n="edit.label">Edit this page on GitHub</a>'
         '</footer></div>'
-    ) % (entry["sectionTitle"], entry["title"], status, entry["description"], preview, en_body, prev_html, next_html, entry["slug"])
+    ) % (entry["sectionTitle"], entry["title"], entry["description"], preview, en_body, prev_html, next_html, entry["slug"])
     extra_js = (
         "<script>document.addEventListener('click',function(e){var b=e.target.closest('.copy-button');if(!b)return;"
         "var block=b.closest('.code-block');if(!block)return;var code=block.querySelector('code');if(!code)return;"
