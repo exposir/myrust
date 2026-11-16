@@ -1183,6 +1183,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-showcase"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "myrust-core",
+]
+
+[[package]]
 name = "example-text-input"
 version = "0.1.0"
 dependencies = [

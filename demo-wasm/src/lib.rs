@@ -152,6 +152,9 @@ struct DemoApp {
     /// whether a drag currently hovers its zone.
     dropped: Option<Rc<RefCell<Vec<DroppedFile>>>>,
     drag_hover: Option<Rc<Cell<bool>>>,
+    /// Toasts the showcase landing page raises from its call-to-action
+    /// buttons.
+    toasts: Option<Rc<RefCell<ToastQueue>>>,
 }
 
 /// A file dropped on the drag-and-drop demo. A browser exposes its name,
@@ -169,6 +172,7 @@ impl DemoApp {
         let probe = Rc::new(Cell::new(0_i32));
         let dropped = (slug == 7).then(|| Rc::new(RefCell::new(Vec::new())));
         let drag_hover = (slug == 7).then(|| Rc::new(Cell::new(false)));
+        let toasts = (slug == 83).then(|| Rc::new(RefCell::new(ToastQueue::new())));
         let ui = match slug {
             0 => {
                 let view_selected = Rc::clone(selected.as_ref().expect("tabs selection"));
@@ -969,6 +973,14 @@ impl DemoApp {
                 let view_probe = Rc::clone(&probe);
                 NativeUi::new(move |context| avatar_demo(context, &view_name, &view_probe))
             }
+            83 => {
+                let view_frame = Rc::clone(&frame);
+                let view_probe = Rc::clone(&probe);
+                let view_toasts = Rc::clone(toasts.as_ref().expect("showcase toasts"));
+                NativeUi::new(move |context| {
+                    showcase_demo(context, &view_frame, &view_probe, &view_toasts)
+                })
+            }
             _ => {
                 let done = Rc::new(Cell::new(2_i32));
                 let view_done = Rc::clone(&done);
@@ -996,6 +1008,7 @@ impl DemoApp {
             probe,
             dropped,
             drag_hover,
+            toasts,
         }
     }
 }
@@ -6936,6 +6949,151 @@ fn avatar_demo(context: &mut Context, name: &Rc<RefCell<String>>, probe: &Rc<Cel
             text_field_placeholder(context, "docs-demo-avatar-field", &mut name, "A name");
         });
         probe.set(name.len() as i32);
+    });
+}
+
+fn showcase_demo(
+    context: &mut Context,
+    frame: &Rc<Cell<u64>>,
+    probe: &Rc<Cell<i32>>,
+    toasts_state: &Rc<RefCell<ToastQueue>>,
+) {
+    // The landing page behind the site's Demo tab. The chart advances with
+    // the frame counter so the page keeps moving while it is on screen.
+    let theme = context.theme().clone();
+    let tick = frame.get().wrapping_add(1);
+    frame.set(tick);
+    let values: Vec<f32> = (0..30)
+        .map(|i| {
+            let phase = (tick as f32 * 0.06 + i as f32 * 0.28).sin();
+            (0.5 + 0.42 * phase).clamp(0.0, 1.0)
+        })
+        .collect();
+    // Three equal columns inside the 28px page padding with 12px gaps. The
+    // cards take an explicit width and height so the grid rows stay even and
+    // the descriptions wrap inside the card instead of spilling out.
+    let page_width = context.available_size().width;
+    let card_width = ((page_width - 56.0 - 24.0) / 3.0).floor();
+    let card_text_width = (card_width - 28.0).max(1.0);
+
+    column(context).fill().padding(28.0).gap(26.0).children(|context| {
+        // Hero
+        column(context).gap(12.0).children(|context| {
+            text(context, "Build native apps in Rust.").font_size(30.0).bold();
+            text(
+                context,
+                "An immediate-mode UI engine — no HTML, no JavaScript, no WebView.",
+            )
+            .font_size(13.0)
+            .color(theme.muted);
+            row(context).gap(10.0).children(|context| {
+                if button_primary(context, "Get started").clicked {
+                    probe.set(probe.get() + 1);
+                    toasts_state
+                        .borrow_mut()
+                        .push_message(context, "Opening the docs…");
+                }
+                if button(context, "View on GitHub").clicked {
+                    probe.set(probe.get() + 1);
+                    toasts_state
+                        .borrow_mut()
+                        .push_message(context, "Opening GitHub repository…");
+                }
+            });
+        });
+
+        // Feature cards
+        grid(context).columns(3).gap(12.0).children(|context| {
+            let features: &[(&str, &str, &str)] = &[
+                (
+                    "home",
+                    "Native UI",
+                    "Self-drawn windows: flex layout, TTF glyphs, hover, focus.",
+                ),
+                (
+                    "code",
+                    "Typed IPC",
+                    "Call Rust from TypeScript with auto-generated bindings.",
+                ),
+                (
+                    "settings",
+                    "Desktop APIs",
+                    "Menus, tray, clipboard, global shortcuts.",
+                ),
+                (
+                    "star",
+                    "No unsafe",
+                    "myrust-core enforces #![forbid(unsafe_code)].",
+                ),
+                (
+                    "loader",
+                    "Small binary",
+                    "Ships as a single stripped executable under 2 MB.",
+                ),
+                (
+                    "terminal",
+                    "Testable",
+                    "NativeUi::render() runs views headlessly in CI.",
+                ),
+            ];
+            for (idx, (icon_name, title, desc)) in features.iter().enumerate() {
+                container(context)
+                    .width(card_width)
+                    .height(112.0)
+                    .padding(14.0)
+                    .background(theme.surface, 10.0)
+                    .border(theme.border, 10.0)
+                    .children(|context| {
+                        column(context).gap(8.0).children(|context| {
+                            icon(
+                                context,
+                                &format!("docs-demo-showcase-icon-{idx}"),
+                                icon_name,
+                                18.0,
+                                theme.accent,
+                            );
+                            text(context, *title).font_size(13.0).bold();
+                            text(context, *desc)
+                                .font_size(11.0)
+                                .color(theme.muted)
+                                .max_width(card_text_width);
+                        });
+                    });
+            }
+        });
+
+        // Metrics and the live chart
+        row(context).gap(28.0).align(AlignItems::FlexEnd).children(|context| {
+            column(context).gap(14.0).children(|context| {
+                for (num, label) in [
+                    ("1.9 MB", "Binary, stripped"),
+                    ("6 MB", "Memory, idle UI"),
+                    ("0%", "CPU at idle"),
+                ] {
+                    column(context).gap(2.0).children(|context| {
+                        text(context, num).font_size(24.0).bold().color(theme.accent);
+                        text(context, label).font_size(11.0).color(theme.muted);
+                    });
+                }
+            });
+            container(context).width(380.0).height(110.0).children(|context| {
+                line_chart(
+                    context,
+                    "docs-demo-showcase-chart",
+                    &values,
+                    110.0,
+                    Some(0.0),
+                    Some(1.0),
+                );
+            });
+        });
+
+        // Toasts paint above the rest of the page.
+        toasts(
+            context,
+            "docs-demo-showcase-toasts",
+            &mut toasts_state.borrow_mut(),
+        );
     });
 }
 

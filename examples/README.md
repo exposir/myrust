@@ -31,6 +31,7 @@ process.
 | Loading | `example-loading` | A frame-driven animation without a web page |
 | Streaming chart | `example-chart-streaming` | `DisplayList` lines redrawn from animated state |
 | Gallery | `example-gallery` | Built-in widgets and raw drawing commands: button, checkbox, switch, radio group, select, tabs, accordion, list, table, tree, outline, grid, grid view, split view, sidebar, breadcrumbs, stepper, rating, range slider, number input, decimal input, search field, combobox, autocomplete, token field, editable text, pages/router, history buttons, find bar, markdown, rich text, meter, avatar, bar/line charts, image, icon, transition, inspector, frame stats, transformed hit, RTL row, locale formatting, control-id migration, link, toggle, segmented control, toolbar, calendar, date input, time input, color picker, code editor, diff viewer, drag/drop, reorder list, text-input primitives, slider, progress, spinner, badge, collapsible, menu button, context menu, tooltip, popover, toast, dialog, alert dialog, form field, text field |
+| Showcase | `example-showcase` | A complete landing page — hero, call-to-action buttons, feature cards, live chart — also drawn in the browser under the site's Demo tab |
 
 ## Coverage against mygo
 

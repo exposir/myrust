@@ -17,6 +17,64 @@ function ascentOf(ctx) {
 }
 
 
+// lineHeightOf returns the line box of the current canvas font, as the
+// engine's measurer does (fontBoundingBox ascent + descent + 1; `font.rs`
+// line_height).
+var lineHeightCache = {};
+function lineHeightOf(ctx) {
+  var key = ctx.font;
+  var m = lineHeightCache[key];
+  if (m === undefined) {
+    var tm = ctx.measureText("Hg");
+    m = tm.fontBoundingBoxAscent > 0 && tm.fontBoundingBoxDescent > 0
+      ? tm.fontBoundingBoxAscent + tm.fontBoundingBoxDescent + 1
+      : (parseFloat(key) || 14) * 1.3;
+    lineHeightCache[key] = m;
+  }
+  return m;
+}
+
+// wrapCanvasText breaks a run at `maxWidth` the way the engine's
+// `layout_text` does: Latin words at whitespace, an oversized word between
+// characters, and CJK one character at a time (no spaces to break at).
+function wrapCanvasText(ctx, text, maxWidth) {
+  if (ctx.measureText(text).width <= maxWidth) return [text];
+  var lines = [];
+  var line = "";
+  var tokens = text.split(/(\s+)/);
+  for (var i = 0; i < tokens.length; i++) {
+    var token = tokens[i];
+    if (!token) continue;
+    if (/^\s+$/.test(token)) {
+      if (line) line += " ";
+      continue;
+    }
+    var candidate = line ? line + token : token;
+    if (ctx.measureText(candidate).width <= maxWidth) {
+      line = candidate;
+      continue;
+    }
+    if (line) {
+      lines.push(line);
+      line = "";
+    }
+    // A word wider than the line: cut it between characters.
+    var rest = token;
+    while (rest) {
+      var cut = rest.length;
+      while (cut > 1 && ctx.measureText(rest.slice(0, cut)).width > maxWidth) cut--;
+      if (cut >= rest.length) {
+        line = rest;
+        break;
+      }
+      lines.push(rest.slice(0, cut));
+      rest = rest.slice(cut);
+    }
+  }
+  if (line) lines.push(line);
+  return lines.length ? lines : [""];
+}
+
 // cssFamilyOf maps a MyGo font family name to the CSS stack its browser
 // canvas engine uses (`internal/text/canvas_js.go` cssFamily). The generic
 // names take the system's own stacks; anything else is quoted verbatim.
@@ -46,9 +104,9 @@ function cssFamilyOf(name) {
   // context takes the analytic path instead and matches MyGo's edges.
   var ctx = canvas.getContext("2d", { willReadFrequently: true });
   var slug = new URLSearchParams(location.search).get("demo") || "tabs";
-  var demoIds = { tabs: 0, markdown: 1, views: 2, layout: 3, text: 4, styling: 5, input: 6, "drag-and-drop": 7, "pages-and-navigation": 8, overlays: 9, accessibility: 10, "right-to-left": 11, languages: 12, "drawing-and-animation": 13, transitions: 14, motion: 15, transforms: 16, "custom-widgets": 17, "windows-with-native-ui": 18, testing: 19, inspector: 20, rendering: 21, migration: 22, performance: 23, button: 24, link: 25, "menu-button": 26, "context-menu": 27, toggle: 28, "segmented-control": 29, toolbar: 30, checkbox: 31, switch: 32, radio: 33, select: 34, slider: 35, "range-slider": 36, stepper: 37, rating: 38, "text-input": 39, "text-input-primitives": 40, "number-input": 41, "decimal-input": 42, "search-field": 43, combobox: 44, autocomplete: 45, "token-field": 46, "editable-text": 47, "find-bar": 48, "rich-text-editor": 49, "code-editor": 50, "diff-viewer": 51, calendar: 52, "date-input": 53, "time-input": 54, "color-picker": 55, list: 56, table: 57, tree: 58, outline: 59, "grid-view": 60, "scroll-view": 61, grid: 62, "split-view": 63, collapsible: 64, accordion: 65, form: 66, sidebar: 67, breadcrumbs: 68, "back-and-forward-buttons": 69, dialog: 70, "alert-dialog": 71, popover: 72, tooltip: 73, toast: 74, "progress-bar": 75, spinner: 76, meter: 77, badge: 78, charts: 79, image: 80, icon: 81, avatar: 82 };
+  var demoIds = { tabs: 0, markdown: 1, views: 2, layout: 3, text: 4, styling: 5, input: 6, "drag-and-drop": 7, "pages-and-navigation": 8, overlays: 9, accessibility: 10, "right-to-left": 11, languages: 12, "drawing-and-animation": 13, transitions: 14, motion: 15, transforms: 16, "custom-widgets": 17, "windows-with-native-ui": 18, testing: 19, inspector: 20, rendering: 21, migration: 22, performance: 23, button: 24, link: 25, "menu-button": 26, "context-menu": 27, toggle: 28, "segmented-control": 29, toolbar: 30, checkbox: 31, switch: 32, radio: 33, select: 34, slider: 35, "range-slider": 36, stepper: 37, rating: 38, "text-input": 39, "text-input-primitives": 40, "number-input": 41, "decimal-input": 42, "search-field": 43, combobox: 44, autocomplete: 45, "token-field": 46, "editable-text": 47, "find-bar": 48, "rich-text-editor": 49, "code-editor": 50, "diff-viewer": 51, calendar: 52, "date-input": 53, "time-input": 54, "color-picker": 55, list: 56, table: 57, tree: 58, outline: 59, "grid-view": 60, "scroll-view": 61, grid: 62, "split-view": 63, collapsible: 64, accordion: 65, form: 66, sidebar: 67, breadcrumbs: 68, "back-and-forward-buttons": 69, dialog: 70, "alert-dialog": 71, popover: 72, tooltip: 73, toast: 74, "progress-bar": 75, spinner: 76, meter: 77, badge: 78, charts: 79, image: 80, icon: 81, avatar: 82, showcase: 83 };
   var slugId = demoIds[slug] !== undefined ? demoIds[slug] : 0;
-  var labels = { tabs: "Tabs", markdown: "Markdown", views: "Views", layout: "Layout", text: "Text", styling: "Styling and themes", input: "Input", "drag-and-drop": "Drag and drop", "pages-and-navigation": "Pages and navigation", overlays: "Overlays", accessibility: "Accessibility", "right-to-left": "Right to left", languages: "Languages", "drawing-and-animation": "Drawing and animation", transitions: "Transitions", motion: "Motion", transforms: "Transforms", "custom-widgets": "Custom widgets", "windows-with-native-ui": "Windows with native UI", testing: "Testing", inspector: "Inspector", rendering: "Rendering", migration: "Migration", performance: "Performance", button: "Button", link: "Link", "menu-button": "Menu button", "context-menu": "Context menu", toggle: "Toggle", "segmented-control": "Segmented control", toolbar: "Toolbar", checkbox: "Checkbox", switch: "Switch", radio: "Radio", select: "Select", slider: "Slider", "range-slider": "Range slider", stepper: "Stepper", rating: "Rating", "text-input": "Text input", "text-input-primitives": "Text-input primitives", "number-input": "Number input", "decimal-input": "Decimal input", "search-field": "Search field", combobox: "Combobox", autocomplete: "Autocomplete", "token-field": "Token field", "editable-text": "Editable text", "find-bar": "Find bar", "rich-text-editor": "Rich text editor", "code-editor": "Code editor", "diff-viewer": "Diff viewer", calendar: "Calendar", "date-input": "Date input", "time-input": "Time input", "color-picker": "Color picker", list: "List", table: "Table", tree: "Tree", outline: "Outline", "grid-view": "Grid view", "scroll-view": "Scroll view", grid: "Grid", "split-view": "Split view", collapsible: "Collapsible", accordion: "Accordion", form: "Form", sidebar: "Sidebar", breadcrumbs: "Breadcrumbs", "back-and-forward-buttons": "Back and forward buttons", dialog: "Dialog", "alert-dialog": "Alert dialog", popover: "Popover", tooltip: "Tooltip", toast: "Toast", "progress-bar": "Progress bar", spinner: "Spinner", meter: "Meter", badge: "Badge", charts: "Charts", image: "Image", icon: "Icon", avatar: "Avatar" };
+  var labels = { tabs: "Tabs", markdown: "Markdown", views: "Views", layout: "Layout", text: "Text", styling: "Styling and themes", input: "Input", "drag-and-drop": "Drag and drop", "pages-and-navigation": "Pages and navigation", overlays: "Overlays", accessibility: "Accessibility", "right-to-left": "Right to left", languages: "Languages", "drawing-and-animation": "Drawing and animation", transitions: "Transitions", motion: "Motion", transforms: "Transforms", "custom-widgets": "Custom widgets", "windows-with-native-ui": "Windows with native UI", testing: "Testing", inspector: "Inspector", rendering: "Rendering", migration: "Migration", performance: "Performance", button: "Button", link: "Link", "menu-button": "Menu button", "context-menu": "Context menu", toggle: "Toggle", "segmented-control": "Segmented control", toolbar: "Toolbar", checkbox: "Checkbox", switch: "Switch", radio: "Radio", select: "Select", slider: "Slider", "range-slider": "Range slider", stepper: "Stepper", rating: "Rating", "text-input": "Text input", "text-input-primitives": "Text-input primitives", "number-input": "Number input", "decimal-input": "Decimal input", "search-field": "Search field", combobox: "Combobox", autocomplete: "Autocomplete", "token-field": "Token field", "editable-text": "Editable text", "find-bar": "Find bar", "rich-text-editor": "Rich text editor", "code-editor": "Code editor", "diff-viewer": "Diff viewer", calendar: "Calendar", "date-input": "Date input", "time-input": "Time input", "color-picker": "Color picker", list: "List", table: "Table", tree: "Tree", outline: "Outline", "grid-view": "Grid view", "scroll-view": "Scroll view", grid: "Grid", "split-view": "Split view", collapsible: "Collapsible", accordion: "Accordion", form: "Form", sidebar: "Sidebar", breadcrumbs: "Breadcrumbs", "back-and-forward-buttons": "Back and forward buttons", dialog: "Dialog", "alert-dialog": "Alert dialog", popover: "Popover", tooltip: "Tooltip", toast: "Toast", "progress-bar": "Progress bar", spinner: "Spinner", meter: "Meter", badge: "Badge", charts: "Charts", image: "Image", icon: "Icon", avatar: "Avatar", showcase: "Showcase" };
   var name = labels[slug] || labels.tabs;
   if (true) {
     document.querySelector(".titlebar").style.display = "none";
@@ -459,7 +517,7 @@ function cssFamilyOf(name) {
         var italic = bytes[state.off++] === 1;
         var mono = bytes[state.off++] === 1;
         var color = readColor(bytes, state);
-        /* max_width = */ state.off += 4;
+        var maxWidth = view.getFloat32(state.off, true); state.off += 4;
         /* alignment = */ state.off += 1;
         var hasFamily = bytes[state.off++];
         var family = null;
@@ -493,7 +551,24 @@ function cssFamilyOf(name) {
         // horizontally; only the baseline needs the rounding, so glyph rows
         // land where its rasterizer puts them instead of straddling two.
         var baseline = snapDevice(ty + ascentOf(ctx), ctm[5], ctm[3]);
-        if (!window.__plainText && fillTextClustered(str, tx, baseline, color, ctm)) {
+        var lines = maxWidth > 0 && isFinite(maxWidth)
+          ? wrapCanvasText(ctx, str, maxWidth)
+          : [str];
+        if (lines.length > 1) {
+          // A bounded run wraps inside its max width; each line advances by
+          // the font's line box on the same baseline rounding.
+          var lineHeight = lineHeightOf(ctx);
+          for (var lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+            if (!lines[lineIndex]) continue;
+            var lineBaseline = snapDevice(ty + lineIndex * lineHeight + ascentOf(ctx), ctm[5], ctm[3]);
+            if (!window.__plainText && fillTextClustered(lines[lineIndex], tx, lineBaseline, color, ctm)) {
+              // Drawn through the shade's coverage, as MyGo does.
+            } else {
+              ctx.fillStyle = rgba(color);
+              ctx.fillText(lines[lineIndex], tx, lineBaseline);
+            }
+          }
+        } else if (!window.__plainText && fillTextClustered(str, tx, baseline, color, ctm)) {
           // Drawn through the shade's coverage, as MyGo does.
         } else {
           ctx.fillStyle = rgba(color);
@@ -808,7 +883,7 @@ function cssFamilyOf(name) {
   var measureCanvas = document.createElement("canvas");
   var measureCtx = measureCanvas.getContext("2d");
   var measureDecoder = new TextDecoder();
-  WebAssembly.instantiateStreaming(fetch("./demo.wasm?v=25ff3ac77f"), {
+  WebAssembly.instantiateStreaming(fetch("./demo.wasm?v=2961c99948"), {
     env: {
       myrust_now_ms: function () { return performance.now(); },
       myrust_measure_text: function (ptr, len, size) {
