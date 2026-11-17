@@ -3,8 +3,8 @@
 // Runs under ego-browser's Node host on the Mac (the browser that owns the
 // page lives there):
 //
-//   ego-browser nodejs < website/docs-demo/tests/functional.mjs
-//   DEMO_BASE=https://<deployment>.myrust.pages.dev ego-browser nodejs < …
+//   website/docs-demo/tests/run.sh                      # production
+//   website/docs-demo/tests/run.sh http://localhost:8080
 //
 // Each scenario drives the canvas demo the way a reader would — clicking
 // labels and icons, typing, pressing keys, dragging — and then asserts the
@@ -20,8 +20,9 @@
 // Not covered: `icon` and `drag-and-drop` have no state to assert (a static
 // showcase and a drop zone), and `diff-viewer` cannot be edited yet — its
 // status line promises it, but `myrust-ui/src/diff.rs` has no text input.
-const BASE = (typeof process !== "undefined" && process.env.DEMO_BASE) ||
-  "https://myrust.pages.dev";
+// `ego-browser nodejs` does not inherit the shell environment, so the base
+// URL cannot come from `DEMO_BASE`. tests/run.sh rewrites the next line.
+const BASE = "https://myrust.pages.dev";
 
 const demos = [
   { slug: "button", h: 140, steps: [
@@ -199,6 +200,20 @@ const demos = [
   { slug: "markdown", h: 440, steps: [
     { c: { text: "Stream it" }, e: { probe: 1 } },
     { c: { text: "Sentence" }, e: { probe: 3 } }] },
+  // The showcase app: sidebar navigation, a filter that rebuilds the table,
+  // a sort request, row selection, and a settings form. Probes are the page
+  // index, the filtered row count, 200 + sorted column, 10 + row position,
+  // and the save counter.
+  { slug: "showcase", h: 640, steps: [
+    { c: { text: "Projects" }, e: { probe: 1 } },
+    { c: { text: "Filter projects…" } },
+    { type: "at", e: { probe: 2 } },
+    { key: "Backspace" },
+    { key: "Backspace" },
+    { c: { text: "Flux" }, e: { probe: 15 } },
+    { c: { text: "Owner" }, e: { probe: 201 } },
+    { c: { text: "Settings" }, e: { probe: 2 } },
+    { c: { text: "Save changes" }, e: { probe: 1 } }] },
   { slug: "drag-and-drop", h: 230, steps: [
     { drop: [{ name: "note.txt", content: "hello\nworld", type: "text/plain" }],
       e: { probe: 1, text: "note.txt" } },

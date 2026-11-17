@@ -68,4 +68,4 @@ fi
 # is a manual step rather than part of this script.
 echo
 echo "Deployed. Check the deployment with:"
-echo "  ssh mac 'ego-browser nodejs' < website/docs-demo/tests/functional.mjs"
+echo "  website/docs-demo/tests/run.sh"

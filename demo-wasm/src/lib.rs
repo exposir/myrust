@@ -152,9 +152,6 @@ struct DemoApp {
     /// whether a drag currently hovers its zone.
     dropped: Option<Rc<RefCell<Vec<DroppedFile>>>>,
     drag_hover: Option<Rc<Cell<bool>>>,
-    /// Toasts the showcase landing page raises from its call-to-action
-    /// buttons.
-    toasts: Option<Rc<RefCell<ToastQueue>>>,
 }
 
 /// A file dropped on the drag-and-drop demo. A browser exposes its name,
@@ -173,6 +170,7 @@ impl DemoApp {
         let dropped = (slug == 7).then(|| Rc::new(RefCell::new(Vec::new())));
         let drag_hover = (slug == 7).then(|| Rc::new(Cell::new(false)));
         let toasts = (slug == 83).then(|| Rc::new(RefCell::new(ToastQueue::new())));
+        let showcase = (slug == 83).then(|| Rc::new(RefCell::new(ShowcaseState::new())));
         let ui = match slug {
             0 => {
                 let view_selected = Rc::clone(selected.as_ref().expect("tabs selection"));
@@ -977,8 +975,9 @@ impl DemoApp {
                 let view_frame = Rc::clone(&frame);
                 let view_probe = Rc::clone(&probe);
                 let view_toasts = Rc::clone(toasts.as_ref().expect("showcase toasts"));
+                let view_state = Rc::clone(showcase.as_ref().expect("showcase state"));
                 NativeUi::new(move |context| {
-                    showcase_demo(context, &view_frame, &view_probe, &view_toasts)
+                    showcase_demo(context, &view_frame, &view_probe, &view_toasts, &view_state)
                 })
             }
             _ => {
@@ -1008,7 +1007,6 @@ impl DemoApp {
             probe,
             dropped,
             drag_hover,
-            toasts,
         }
     }
 }
@@ -6952,149 +6950,582 @@ fn avatar_demo(context: &mut Context, name: &Rc<RefCell<String>>, probe: &Rc<Cel
     });
 }
 
+/// Interactive state of the showcase application demo (slug 83): the page
+/// the sidebar shows, the project filter and table, and the settings form.
+struct ShowcaseState {
+    page: String,
+    search: String,
+    table: TableState,
+    name: String,
+    notifications: bool,
+    autosave: bool,
+    density: usize,
+    scale: f32,
+    saves: u32,
+}
+
+impl ShowcaseState {
+    fn new() -> Self {
+        Self {
+            page: "Overview".to_string(),
+            search: String::new(),
+            table: TableState::default(),
+            name: "Ada Lovelace".to_string(),
+            notifications: true,
+            autosave: false,
+            density: 1,
+            scale: 100.0,
+            saves: 0,
+        }
+    }
+}
+
+/// The rows the showcase table lists, in creation order (the order used
+/// until the user sorts a column).
+const SHOWCASE_PROJECTS: [(&str, &str, &str, &str); 6] = [
+    ("Atlas", "Linus", "Today", "Active"),
+    ("Beacon", "Grace", "2d ago", "Paused"),
+    ("Canvas", "Alan", "1w ago", "Active"),
+    ("Delta", "Margaret", "3d ago", "Draft"),
+    ("Echo", "Katherine", "2w ago", "Archived"),
+    ("Flux", "Ada", "5d ago", "Active"),
+];
+
+const SHOWCASE_ACTIVITY: [(&str, &str); 4] = [
+    ("Atlas deployed to production", "2m ago"),
+    ("Grace invited 3 teammates", "1h ago"),
+    ("Canvas weekly report generated", "3h ago"),
+    ("Nightly backup completed", "Yesterday"),
+];
+
+const NARROW_BREAKPOINT: f32 = 640.0;
+const SIDEBAR_WIDTH: f32 = 168.0;
+
 fn showcase_demo(
     context: &mut Context,
     frame: &Rc<Cell<u64>>,
     probe: &Rc<Cell<i32>>,
     toasts_state: &Rc<RefCell<ToastQueue>>,
+    state_ref: &Rc<RefCell<ShowcaseState>>,
 ) {
-    // The landing page behind the site's Demo tab. The chart advances with
-    // the frame counter so the page keeps moving while it is on screen.
+    let mut state = state_ref.borrow_mut();
     let theme = context.theme().clone();
     let tick = frame.get().wrapping_add(1);
     frame.set(tick);
-    let values: Vec<f32> = (0..30)
-        .map(|i| {
-            let phase = (tick as f32 * 0.06 + i as f32 * 0.28).sin();
-            (0.5 + 0.42 * phase).clamp(0.0, 1.0)
-        })
-        .collect();
-    // Three equal columns inside the 28px page padding with 12px gaps. The
-    // cards take an explicit width and height so the grid rows stay even and
-    // the descriptions wrap inside the card instead of spilling out.
-    let page_width = context.available_size().width;
-    let card_width = ((page_width - 56.0 - 24.0) / 3.0).floor();
-    let card_text_width = (card_width - 28.0).max(1.0);
+    // The preview wrapper pads 20 on each side; a root that fills the window
+    // would overflow that box and clip the bottom row.
+    let canvas = context.available_size();
+    let width = (canvas.width - 40.0).max(1.0);
+    let height = (canvas.height - 40.0).max(1.0);
+    let is_narrow = canvas.width < NARROW_BREAKPOINT;
 
-    column(context).fill().padding(28.0).gap(26.0).children(|context| {
-        // Hero
-        column(context).gap(12.0).children(|context| {
-            text(context, "Build native apps in Rust.").font_size(30.0).bold();
-            text(
-                context,
-                "An immediate-mode UI engine — no HTML, no JavaScript, no WebView.",
-            )
-            .font_size(13.0)
-            .color(theme.muted);
-            row(context).gap(10.0).children(|context| {
-                if button_primary(context, "Get started").clicked {
-                    probe.set(probe.get() + 1);
-                    toasts_state
-                        .borrow_mut()
-                        .push_message(context, "Opening the docs…");
-                }
-                if button(context, "View on GitHub").clicked {
-                    probe.set(probe.get() + 1);
-                    toasts_state
-                        .borrow_mut()
-                        .push_message(context, "Opening GitHub repository…");
-                }
+    let pages = [
+        SidebarItem::new("Overview", "Overview").icon("home"),
+        SidebarItem::new("Projects", "Projects").icon("grid").badge("6"),
+        SidebarItem::new("Settings", "Settings").icon("settings"),
+    ];
+    let sections = [SidebarSection::new("Workspace", &pages)];
+    let previous_page = state.page.clone();
+
+    if is_narrow {
+        let content_width = (width - 8.0).max(1.0);
+        container(context)
+            .size(width, height)
+            .padding_each(6.0, 4.0, 6.0, 4.0)
+            .children(|context| {
+                column(context).gap(12.0).children(|context| {
+                    // Top segmented control for narrow screens
+                    let mut nav_index = match state.page.as_str() {
+                        "Projects" => 1,
+                        "Settings" => 2,
+                        _ => 0,
+                    };
+                    let nav_resp = segmented(
+                        context,
+                        "docs-demo-showcase-nav-narrow",
+                        &mut nav_index,
+                        &["Overview", "Projects", "Settings"],
+                    );
+                    if nav_resp.changed {
+                        state.page = match nav_index {
+                            1 => "Projects".to_string(),
+                            2 => "Settings".to_string(),
+                            _ => "Overview".to_string(),
+                        };
+                    }
+
+                    row(context).gap(12.0).align(AlignItems::Center).children(|context| {
+                        text(context, state.page.as_str()).font_size(20.0).bold();
+                        spacer(context);
+                        if state.page != "Settings"
+                            && button_primary(context, "New project").clicked
+                        {
+                            toasts_state
+                                .borrow_mut()
+                                .push_message(context, "New project created");
+                            probe.set(100);
+                        }
+                    });
+
+                    match state.page.as_str() {
+                        "Projects" => showcase_projects(context, &mut state, probe, content_width, true),
+                        "Settings" => {
+                            showcase_settings(context, &mut state, probe, toasts_state, content_width, true)
+                        }
+                        _ => showcase_overview(context, &theme, tick, content_width, true),
+                    }
+                });
             });
-        });
-
-        // Feature cards
-        grid(context).columns(3).gap(12.0).children(|context| {
-            let features: &[(&str, &str, &str)] = &[
-                (
-                    "home",
-                    "Native UI",
-                    "Self-drawn windows: flex layout, TTF glyphs, hover, focus.",
-                ),
-                (
-                    "code",
-                    "Typed IPC",
-                    "Call Rust from TypeScript with auto-generated bindings.",
-                ),
-                (
-                    "settings",
-                    "Desktop APIs",
-                    "Menus, tray, clipboard, global shortcuts.",
-                ),
-                (
-                    "star",
-                    "No unsafe",
-                    "myrust-core enforces #![forbid(unsafe_code)].",
-                ),
-                (
-                    "loader",
-                    "Small binary",
-                    "Ships as a single stripped executable under 2 MB.",
-                ),
-                (
-                    "terminal",
-                    "Testable",
-                    "NativeUi::render() runs views headlessly in CI.",
-                ),
-            ];
-            for (idx, (icon_name, title, desc)) in features.iter().enumerate() {
-                container(context)
-                    .width(card_width)
-                    .height(112.0)
-                    .padding(14.0)
-                    .background(theme.surface, 10.0)
-                    .border(theme.border, 10.0)
-                    .children(|context| {
-                        column(context).gap(8.0).children(|context| {
-                            icon(
+    } else {
+        row(context)
+            .size(width, height)
+            .align(AlignItems::Stretch)
+            .children(|context| {
+            // Sidebar: a studio name, the page list, and the signed-in user
+            // pinned to the bottom.
+            container(context)
+                .width(SIDEBAR_WIDTH)
+                .padding_each(14.0, 12.0, 14.0, 12.0)
+                .background(theme.surface, 0.0)
+                .children(|context| {
+                    column(context).gap(18.0).children(|context| {
+                        text(context, "Acme Studio").font_size(15.0).bold();
+                        sidebar(
+                            context,
+                            "docs-demo-showcase-nav",
+                            &mut state.page,
+                            &sections,
+                        );
+                        spacer(context);
+                        row(context).gap(8.0).align(AlignItems::Center).children(|context| {
+                            avatar(
                                 context,
-                                &format!("docs-demo-showcase-icon-{idx}"),
-                                icon_name,
-                                18.0,
-                                theme.accent,
+                                "docs-demo-showcase-user",
+                                "Ada Lovelace",
+                                None,
+                                None,
+                                0.0,
+                                AvatarShape::Circle,
                             );
-                            text(context, *title).font_size(13.0).bold();
-                            text(context, *desc)
-                                .font_size(11.0)
-                                .color(theme.muted)
-                                .max_width(card_text_width);
+                            column(context).gap(1.0).children(|context| {
+                                text(context, "Ada Lovelace").font_size(11.0).bold();
+                                text(context, "Admin").font_size(10.0).color(theme.muted);
+                            });
+                        });
+                    });
+                });
+
+            // Main column: the rest of the row, explicitly sized. `fill_parent`
+            // grows in the parent's main axis, which here is the row's height.
+            let content_width = (width - SIDEBAR_WIDTH - 44.0).max(200.0);
+            container(context)
+                .width((width - SIDEBAR_WIDTH).max(1.0))
+                .padding_each(18.0, 22.0, 14.0, 22.0)
+                .children(|context| {
+                    column(context).gap(16.0).children(|context| {
+                        row(context).gap(12.0).align(AlignItems::Center).children(|context| {
+                            text(context, state.page.as_str()).font_size(22.0).bold();
+                            spacer(context);
+                            if state.page != "Settings"
+                                && button_primary(context, "New project").clicked
+                            {
+                                toasts_state
+                                    .borrow_mut()
+                                    .push_message(context, "New project created");
+                                probe.set(100);
+                            }
+                        });
+
+                        match state.page.as_str() {
+                            "Projects" => showcase_projects(context, &mut state, probe, content_width, false),
+                            "Settings" => {
+                                showcase_settings(context, &mut state, probe, toasts_state, content_width, false)
+                            }
+                            _ => showcase_overview(context, &theme, tick, content_width, false),
+                        }
+                    });
+                });
+        });
+    }
+
+    let index = match state.page.as_str() {
+        "Projects" => 1,
+        "Settings" => 2,
+        _ => 0,
+    };
+    if state.page != previous_page {
+        probe.set(index);
+    }
+
+    toasts(
+        context,
+        "docs-demo-showcase-toasts",
+        &mut toasts_state.borrow_mut(),
+    );
+}
+
+fn showcase_overview(context: &mut Context, theme: &Theme, tick: u64, content_width: f32, is_narrow: bool) {
+    let stats = [
+        ("24", "Active projects", "+3 this week"),
+        ("8", "Due this week", "-1 vs last"),
+        ("73%", "Sprint complete", "+12%"),
+    ];
+
+    if is_narrow {
+        column(context).gap(8.0).children(|context| {
+            for (value, label, trend) in stats {
+                container(context)
+                    .width(content_width)
+                    .height(54.0)
+                    .padding_each(8.0, 12.0, 8.0, 12.0)
+                    .background(theme.surface, 8.0)
+                    .border(theme.border, 8.0)
+                    .children(|context| {
+                        row(context).gap(12.0).align(AlignItems::Center).children(|context| {
+                            text(context, value).font_size(20.0).bold().color(theme.accent);
+                            column(context).gap(1.0).children(|context| {
+                                text(context, label).font_size(11.0).color(theme.muted);
+                                text(context, trend).font_size(10.0).color(theme.muted);
+                            });
                         });
                     });
             }
         });
-
-        // Metrics and the live chart
-        row(context).gap(28.0).align(AlignItems::FlexEnd).children(|context| {
-            column(context).gap(14.0).children(|context| {
-                for (num, label) in [
-                    ("1.9 MB", "Binary, stripped"),
-                    ("6 MB", "Memory, idle UI"),
-                    ("0%", "CPU at idle"),
-                ] {
-                    column(context).gap(2.0).children(|context| {
-                        text(context, num).font_size(24.0).bold().color(theme.accent);
-                        text(context, label).font_size(11.0).color(theme.muted);
+    } else {
+        row(context).gap(12.0).children(|context| {
+            for (value, label, trend) in stats {
+                container(context)
+                    .fill_parent()
+                    .height(74.0)
+                    .padding(12.0)
+                    .background(theme.surface, 10.0)
+                    .border(theme.border, 10.0)
+                    .children(|context| {
+                        column(context).gap(1.0).children(|context| {
+                            text(context, value).font_size(22.0).bold().color(theme.accent);
+                            text(context, label).font_size(11.0).color(theme.muted);
+                            text(context, trend).font_size(10.0).color(theme.muted);
+                        });
                     });
-                }
-            });
-            container(context).width(380.0).height(110.0).children(|context| {
-                line_chart(
-                    context,
-                    "docs-demo-showcase-chart",
-                    &values,
-                    110.0,
-                    Some(0.0),
-                    Some(1.0),
-                );
-            });
+            }
+        });
+    }
+
+    let values: Vec<f32> = (0..30)
+        .map(|i| {
+            let phase = (tick as f32 * 0.05 + i as f32 * 0.24).sin();
+            (0.5 + 0.34 * phase).clamp(0.0, 1.0)
+        })
+        .collect();
+    container(context)
+        .width(content_width)
+        .height(if is_narrow { 96.0 } else { 112.0 })
+        .padding(10.0)
+        .background(theme.surface, 10.0)
+        .border(theme.border, 10.0)
+        .children(|context| {
+            line_chart(
+                context,
+                "docs-demo-showcase-chart",
+                &values,
+                if is_narrow { 76.0 } else { 92.0 },
+                Some(0.0),
+                Some(1.0),
+            );
         });
 
-        // Toasts paint above the rest of the page.
-        toasts(
-            context,
-            "docs-demo-showcase-toasts",
-            &mut toasts_state.borrow_mut(),
-        );
+    text(context, "Recent activity").font_size(if is_narrow { 12.0 } else { 13.0 }).bold();
+    column(context).gap(8.0).children(|context| {
+        for (event, when) in SHOWCASE_ACTIVITY {
+            row(context).gap(8.0).align(AlignItems::Center).children(|context| {
+                text(context, event).font_size(if is_narrow { 11.0 } else { 12.0 });
+                spacer(context);
+                text(context, when).font_size(if is_narrow { 10.0 } else { 11.0 }).color(theme.muted);
+            });
+        }
     });
+}
+
+fn showcase_projects(
+    context: &mut Context,
+    state: &mut ShowcaseState,
+    probe: &Rc<Cell<i32>>,
+    content_width: f32,
+    is_narrow: bool,
+) {
+    let theme = context.theme().clone();
+    let query = state.search.to_lowercase();
+    let mut filtered: Vec<&(&str, &str, &str, &str)> = SHOWCASE_PROJECTS
+        .iter()
+        .filter(|(project, owner, _, status)| {
+            query.is_empty()
+                || project.to_lowercase().contains(&query)
+                || owner.to_lowercase().contains(&query)
+                || status.to_lowercase().contains(&query)
+        })
+        .collect();
+    if let Some(column) = state.table.sort_column {
+        let descending = state.table.sort_direction == SortDirection::Descending;
+        filtered.sort_by(|a, b| {
+            let (left, right) = match column {
+                0 => (a.0, b.0),
+                1 => if is_narrow { (a.3, b.3) } else { (a.1, b.1) },
+                2 => (a.2, b.2),
+                _ => (a.3, b.3),
+            };
+            let order = left.cmp(right);
+            if descending { order.reverse() } else { order }
+        });
+    }
+
+    row(context).gap(10.0).align(AlignItems::Center).children(|context| {
+        container(context).width(if is_narrow { (content_width - 110.0).max(140.0) } else { 230.0 }).children(|context| {
+            text_field_placeholder(
+                context,
+                "docs-demo-showcase-search",
+                &mut state.search,
+                "Filter projects…",
+            );
+        });
+        spacer(context);
+        text(
+            context,
+            &format!("{} of {} projects", filtered.len(), SHOWCASE_PROJECTS.len()),
+        )
+        .font_size(11.0)
+        .color(theme.muted);
+    });
+
+    if is_narrow {
+        let project_width = (content_width * 0.62).max(120.0);
+        let status_width = (content_width - project_width).max(70.0);
+        let columns = [
+            TableColumn::new("Project", project_width),
+            TableColumn::new("Status", status_width),
+        ];
+        let cells: Vec<[&str; 2]> = filtered
+            .iter()
+            .map(|(project, _, _, status)| [*project, *status])
+            .collect();
+        let rows: Vec<TableRow<'_>> = filtered
+            .iter()
+            .zip(cells.iter())
+            .map(|((project, _, _, _), row_cells)| TableRow::new(*project, row_cells))
+            .collect();
+        let response = table(
+            context,
+            "docs-demo-showcase-table",
+            &mut state.table,
+            &columns,
+            &rows,
+        );
+        drop(cells);
+
+        if let Some(clicked) = response.clicked_id.as_deref() {
+            if let Some(position) = filtered.iter().position(|(project, _, _, _)| *project == clicked) {
+                probe.set(position as i32 + 10);
+            }
+        }
+        if let Some(sort) = response.sort {
+            probe.set(200 + sort.column as i32);
+        }
+        if !query.is_empty() {
+            probe.set(filtered.len() as i32);
+        }
+    } else {
+        // Columns share the main column's content width, so the table fits the
+        // docs preview width as well as the wider demo page.
+        let project_width = (content_width * 0.34).max(80.0);
+        let owner_width = (content_width * 0.22).max(64.0);
+        let updated_width = (content_width * 0.22).max(76.0);
+        let status_width = (content_width - project_width - owner_width - updated_width).max(70.0);
+        let columns = [
+            TableColumn::new("Project", project_width),
+            TableColumn::new("Owner", owner_width),
+            TableColumn::new("Updated", updated_width),
+            TableColumn::new("Status", status_width),
+        ];
+        let cells: Vec<[&str; 4]> = filtered
+            .iter()
+            .map(|(project, owner, updated, status)| [*project, *owner, *updated, *status])
+            .collect();
+        let rows: Vec<TableRow<'_>> = filtered
+            .iter()
+            .zip(cells.iter())
+            .map(|((project, _, _, _), row_cells)| TableRow::new(*project, row_cells))
+            .collect();
+        let response = table(
+            context,
+            "docs-demo-showcase-table",
+            &mut state.table,
+            &columns,
+            &rows,
+        );
+        drop(cells);
+
+        if let Some(clicked) = response.clicked_id.as_deref() {
+            if let Some(position) = filtered.iter().position(|(project, _, _, _)| *project == clicked) {
+                probe.set(position as i32 + 10);
+            }
+        }
+        if let Some(sort) = response.sort {
+            probe.set(200 + sort.column as i32);
+        }
+        if !query.is_empty() {
+            probe.set(filtered.len() as i32);
+        }
+    }
+}
+
+fn showcase_settings(
+    context: &mut Context,
+    state: &mut ShowcaseState,
+    probe: &Rc<Cell<i32>>,
+    toasts_state: &Rc<RefCell<ToastQueue>>,
+    content_width: f32,
+    is_narrow: bool,
+) {
+    let theme = context.theme().clone();
+    if is_narrow {
+        column(context).gap(14.0).children(|context| {
+            column(context).gap(4.0).children(|context| {
+                text(context, "Display name").font_size(11.0).color(theme.muted);
+                container(context).width(content_width).children(|context| {
+                    text_field(context, "docs-demo-showcase-name", &mut state.name);
+                });
+            });
+            row(context).gap(12.0).align(AlignItems::Center).children(|context| {
+                text(context, "Notifications").font_size(12.0).color(theme.muted);
+                spacer(context);
+                switch(
+                    context,
+                    "docs-demo-showcase-notifications",
+                    &mut state.notifications,
+                );
+            });
+            row(context).gap(12.0).align(AlignItems::Center).children(|context| {
+                text(context, "Auto-save").font_size(12.0).color(theme.muted);
+                spacer(context);
+                switch(context, "docs-demo-showcase-autosave", &mut state.autosave);
+            });
+            column(context).gap(4.0).children(|context| {
+                text(context, "Density").font_size(11.0).color(theme.muted);
+                container(context).width(content_width).children(|context| {
+                    segmented(
+                        context,
+                        "docs-demo-showcase-density",
+                        &mut state.density,
+                        &["Compact", "Comfortable"],
+                    );
+                });
+            });
+            column(context).gap(4.0).children(|context| {
+                row(context).gap(8.0).align(AlignItems::Center).children(|context| {
+                    text(context, "Interface scale").font_size(11.0).color(theme.muted);
+                    spacer(context);
+                    text(context, &format!("{:.0}%", state.scale))
+                        .font_size(11.0)
+                        .color(theme.muted);
+                });
+                container(context).width(content_width).children(|context| {
+                    slider(
+                        context,
+                        "docs-demo-showcase-scale",
+                        &mut state.scale,
+                        80.0,
+                        140.0,
+                    );
+                });
+            });
+            row(context).gap(10.0).align(AlignItems::Center).children(|context| {
+                if button_primary(context, "Save changes").clicked {
+                    state.saves += 1;
+                    probe.set(state.saves as i32);
+                    toasts_state
+                        .borrow_mut()
+                        .push_message(context, "Settings saved");
+                }
+                text(
+                    context,
+                    &format!("Saved {} time(s)", state.saves),
+                )
+                .font_size(11.0)
+                .color(theme.muted);
+            });
+        });
+    } else {
+        column(context).gap(14.0).children(|context| {
+            row(context).gap(12.0).align(AlignItems::Center).children(|context| {
+                container(context).width(130.0).children(|context| {
+                    text(context, "Display name").font_size(12.0).color(theme.muted);
+                });
+                container(context).width(240.0).children(|context| {
+                    text_field(context, "docs-demo-showcase-name", &mut state.name);
+                });
+            });
+            row(context).gap(12.0).align(AlignItems::Center).children(|context| {
+                container(context).width(130.0).children(|context| {
+                    text(context, "Notifications").font_size(12.0).color(theme.muted);
+                });
+                switch(
+                    context,
+                    "docs-demo-showcase-notifications",
+                    &mut state.notifications,
+                );
+            });
+            row(context).gap(12.0).align(AlignItems::Center).children(|context| {
+                container(context).width(130.0).children(|context| {
+                    text(context, "Auto-save").font_size(12.0).color(theme.muted);
+                });
+                switch(context, "docs-demo-showcase-autosave", &mut state.autosave);
+            });
+            row(context).gap(12.0).align(AlignItems::Center).children(|context| {
+                container(context).width(130.0).children(|context| {
+                    text(context, "Density").font_size(12.0).color(theme.muted);
+                });
+                container(context).width(240.0).children(|context| {
+                    segmented(
+                        context,
+                        "docs-demo-showcase-density",
+                        &mut state.density,
+                        &["Compact", "Comfortable"],
+                    );
+                });
+            });
+            row(context).gap(12.0).align(AlignItems::Center).children(|context| {
+                container(context).width(130.0).children(|context| {
+                    text(context, "Interface scale").font_size(12.0).color(theme.muted);
+                });
+                container(context).width(200.0).children(|context| {
+                    slider(
+                        context,
+                        "docs-demo-showcase-scale",
+                        &mut state.scale,
+                        80.0,
+                        140.0,
+                    );
+                });
+                text(context, &format!("{:.0}%", state.scale))
+                    .font_size(11.0)
+                    .color(theme.muted);
+            });
+            row(context).gap(10.0).align(AlignItems::Center).children(|context| {
+                if button_primary(context, "Save changes").clicked {
+                    state.saves += 1;
+                    probe.set(state.saves as i32);
+                    toasts_state
+                        .borrow_mut()
+                        .push_message(context, "Settings saved");
+                }
+                text(
+                    context,
+                    &format!("Saved {} time(s)", state.saves),
+                )
+                .font_size(11.0)
+                .color(theme.muted);
+            });
+        });
+    }
 }
 
 #[no_mangle]

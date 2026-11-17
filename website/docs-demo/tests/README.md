@@ -12,19 +12,23 @@ harness at it:
 
 ```sh
 cd website && python3 -m http.server 8080     # in the container
-DEMO_BASE=http://localhost:8080 ego-browser nodejs < website/docs-demo/tests/functional.mjs
+website/docs-demo/tests/run.sh http://localhost:8080
 ```
 
-`ego-browser` runs on the Mac. OrbStack forwards container ports to the
-Mac's localhost, so `http://localhost:8080` works from both sides. Without
-`DEMO_BASE` the harness runs against `https://myrust.pages.dev` — use that
-to check a deployment (`DEMO_BASE=https://…` for preview deployments).
+`tests/run.sh` takes the base URL as its argument and defaults to
+`https://myrust.pages.dev`. It splices the URL into a temporary copy of
+`functional.mjs` because `ego-browser nodejs` does not inherit the shell
+environment — `DEMO_BASE=… ego-browser nodejs` silently reads nothing and
+runs against production.
+
+`ego-browser` runs on the Mac; `run.sh` SSHes there when it is not running
+on macOS itself. OrbStack forwards container ports to the Mac's localhost,
+so a server in the container is reachable at the same port from the Mac.
 
 It exits after printing one line per step and `SUMMARY passed=N failed=M`.
 
-After a deploy, run it once against production (no `DEMO_BASE`) — that is
-the only check that the shipped wasm still behaves like the one tested
-locally.
+After a deploy, run `tests/run.sh` with no argument — that is the only check
+that the shipped wasm still behaves like the one tested locally.
 
 ## How it works
 

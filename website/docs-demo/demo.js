@@ -883,7 +883,7 @@ function cssFamilyOf(name) {
   var measureCanvas = document.createElement("canvas");
   var measureCtx = measureCanvas.getContext("2d");
   var measureDecoder = new TextDecoder();
-  WebAssembly.instantiateStreaming(fetch("./demo.wasm?v=2961c99948"), {
+  WebAssembly.instantiateStreaming(fetch("./demo.wasm?v=a462c0f015"), {
     env: {
       myrust_now_ms: function () { return performance.now(); },
       myrust_measure_text: function (ptr, len, size) {
