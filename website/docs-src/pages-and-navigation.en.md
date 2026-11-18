@@ -42,7 +42,7 @@ There is no page cache, lazy page construction aside from the selected closure, 
 
 The router emits one `Role::Group` node labelled with the current page id; page contents emit their own nodes. Back/forward are `Role::Button` with labels `back`/`forward` and values `enabled`/`disabled`.
 
-The router does not move focus on navigation, announce the new page, or expose a landmark/live region. A platform screen reader is not connected; these are metadata nodes only.
+The router does not move focus on navigation, announce the new page, or expose a landmark/live region. On Linux the window publishes its nodes to AT-SPI, but a page change is still not announced as a live region.
 
 ## Transitions
 

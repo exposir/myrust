@@ -19,9 +19,9 @@ Input is coalesced per frame; a click requires a press frame and a release frame
 
 ## What assistive technology sees
 
-`ViewFrame::access_nodes` is the exact per-frame list a platform AT bridge would consume: `Role`, `label`, optional string `value`, `disabled`, `focused` and `bounds`. There is no semantic tree, action API or platform bridge in the test harness.
+`ViewFrame::access_nodes` is the exact per-frame list a platform AT bridge consumes: `Role`, `label`, optional string `value`, `disabled`, `focused`, `key` and `bounds`. The test harness reads it directly; the Linux runtime publishes the same list to AT-SPI.
 
-Tests can assert roles/labels/values emitted by controls. They cannot exercise AT-SPI/UIA/NSAccessibility because no bridge is connected; see the Accessibility guide for the exact roles and missing states.
+Tests can assert roles/labels/values emitted by controls. AT-SPI/UIA/NSAccessibility are not part of the harness; see the Accessibility guide for the exact roles and the Linux bridge.
 
 ## Testing the built app
 

@@ -78,6 +78,11 @@ const demos = [
   { slug: "rating", h: 110, steps: [{ c: { xy: [370, 40] }, e: { probe: 5 } }] },
   { slug: "text-input", h: 220, steps: [
     { c: { text: "Name" } }, { type: "Rust", e: { probe: 4 } },
+    // A space is text inside a field, and the Space key elsewhere.
+    { type: " ", e: { probe: 5 } },
+    // An input method commits text through the hidden textarea; the field
+    // sees it as ordinary text ("你好" is six bytes).
+    { ime: "你好", e: { probe: 11 } },
     { c: { text: "Notes, on as many lines as you like" } },
     { type: "ab" }, { key: "Enter" }, { type: "cd", e: { probe: 2, text: "Enter in the name submits it. Notes: 5 characters" } }] },
   { slug: "text-input-primitives", h: 200, steps: [
@@ -220,6 +225,21 @@ const demos = [
     { drop: [{ name: "note.txt", content: "hello\nworld", type: "text/plain" },
              { name: "blob.bin", size: 2500, type: "application/octet-stream" }],
       e: { probe: 2, text: "2.5 KB" } }] },
+  { slug: "2048", h: 640, steps: [
+    { c: { text: "2048" } },
+    { key: "ArrowRight", e: { probeRange: [1, 5] } },
+    { key: "ArrowDown", e: { probeRange: [1, 5] } },
+    { c: { text: "New Game" }, e: { probe: 0 } }] },
+  // The snake probe is 1 once a turn is accepted and the score after a meal.
+  { slug: "snake", h: 640, steps: [
+    { c: { text: "Snake" } },
+    { key: "ArrowUp", e: { probeRange: [1, 100] } },
+    { c: { text: "New Game" }, e: { probe: 0 } }] },
+  // A hard drop locks the piece and scores two points per cell fallen.
+  { slug: "tetris", h: 680, steps: [
+    { c: { text: "Tetris" } },
+    { key: "Space", e: { probeRange: [1, 10000] } },
+    { c: { text: "New Game" }, e: { probe: 0 } }] },
 ];
 
 const task = await taskSpace("docs-demo-functional");
@@ -321,6 +341,21 @@ for (const demo of demos) {
       await sleep(280);
     }
     if (step.type !== undefined) { await page.keyboard.type(step.type); await sleep(200); }
+    if (step.ime !== undefined) {
+      const committed = await page.evaluate(data => {
+        const input = document.querySelector("textarea");
+        if (!input || document.activeElement !== input) return false;
+        input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+        input.dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data }));
+        input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data }));
+        return true;
+      }, step.ime);
+      if (!committed) {
+        console.log("F " + demo.slug + " ime-unfocused");
+        failed++; continue;
+      }
+      await sleep(250);
+    }
     if (step.key) { await page.keyboard.press(step.key); await sleep(140); }
 
     const after = await page.evaluate(() => ({

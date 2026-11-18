@@ -32,6 +32,9 @@ process.
 | Streaming chart | `example-chart-streaming` | `DisplayList` lines redrawn from animated state |
 | Gallery | `example-gallery` | Built-in widgets and raw drawing commands: button, checkbox, switch, radio group, select, tabs, accordion, list, table, tree, outline, grid, grid view, split view, sidebar, breadcrumbs, stepper, rating, range slider, number input, decimal input, search field, combobox, autocomplete, token field, editable text, pages/router, history buttons, find bar, markdown, rich text, meter, avatar, bar/line charts, image, icon, transition, inspector, frame stats, transformed hit, RTL row, locale formatting, control-id migration, link, toggle, segmented control, toolbar, calendar, date input, time input, color picker, code editor, diff viewer, drag/drop, reorder list, text-input primitives, slider, progress, spinner, badge, collapsible, menu button, context menu, tooltip, popover, toast, dialog, alert dialog, form field, text field |
 | Showcase | `example-showcase` | A small application — sidebar navigation, overview dashboard with a live chart, filterable and sortable project table, settings form — also drawn in the browser under the site's Demo tab |
+| 2048 | `example-2048` | The 2048 puzzle — stable tile ids, slide animation, arrow/WASD keys and drag input, best score and unfinished game saved under the data directory; the same game core also runs in the browser |
+| Snake | `example-snake` | The snake game — turns queued and checked against the live direction, speed that rises with every meal; rules in a dependency-free crate shared with the browser demo |
+| Tetris | `example-tetris` | Falling blocks — seven-piece queue, rotation with wall kicks, a landing shadow, line-clear scoring; rules in a dependency-free crate shared with the browser demo |
 
 ## Coverage against mygo
 
@@ -41,7 +44,7 @@ they need capabilities the current API does not provide.
 | Not ported | Reason |
 |---|---|
 | `blackhole`, `wind`, `chat-glow`, `liquid-glass`, `effort-slider` | Shader and effect rendering; the native presenter draws geometry and text only. |
-| `farm`, `mayoi` | Game loops, sprites, and collision input beyond the current widget set. |
+| `farm`, `mayoi` | Sprite art and sound; the frame loop and grid input they need are shown by the 2048, Snake and Tetris examples, but neither game itself is ported. |
 | `piano`, `video`, `terminal` | No audio, video, or PTY backends. |
 | `notes`, `documents`, `code-editor`, `text-buffer`, `markdown-chat` | No rich-text document model; the native text field is single-line. |
 | `launcher`, `frameless`, `flyout`, `menubar-flyout`, `menubar-native`, `permissionflow` | No frameless drag regions, separate popover/panel windows, menu-bar-only mode, or permission APIs. In-window menus and popovers exist; tray icons and global shortcuts exist, but the window behaviors around them do not. |

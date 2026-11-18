@@ -11,3 +11,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 myrust-ui = { path = "../myrust-ui" }
+example-2048 = { path = "../examples/game-2048" }
+example-snake = { path = "../examples/snake" }
+example-tetris = { path = "../examples/tetris" }

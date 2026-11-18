@@ -46,10 +46,11 @@ use tao::{
 use crate::{
     desktop::menu::{self, Menu, MenuEvent},
     ipc::{self, IpcReply, IpcRouter},
+    a11y::{AccessRequest, AccessRequestKind, AccessSender, Bridge as AccessBridge},
     ui::{
         create_renderer, CpuFrame, CpuRasterizer, DisplayList, DrawCommand, InputState,
         InputTranslator, Key, NativeInput, NativeUi, PointerButton, RenderSize, RenderStats,
-        Renderer, RendererBackend, RendererKind, Size, Transform,
+        Renderer, RendererBackend, RendererKind, Size, TextInputState, Transform, UiEvent,
     },
     webview::{FileDropEvent, IpcMessageHandler, PageHandle, WebViewConfig, WebViewHandle},
 };
@@ -582,6 +583,38 @@ impl App {
                         }
                     }
                 }
+                Event::UserEvent(UserEvent::A11yAction { window_id, request }) => {
+                    if let Some(window) = windows.get_mut(window_id) {
+                        if let Some(native) = window.native_ui.as_ref() {
+                            match request.kind {
+                                AccessRequestKind::Focus => {
+                                    if let Some(key) = request.key.clone() {
+                                        if let Err(error) =
+                                            native.ui.input(UiEvent::Focus { id: key })
+                                        {
+                                            tracing::warn!(%error, "accessibility focus failed");
+                                        }
+                                    }
+                                }
+                                AccessRequestKind::Click => {
+                                    if let Some((x, y)) = request.center {
+                                        let _ = native.ui.input(UiEvent::PointerPressed {
+                                            x,
+                                            y,
+                                            button: PointerButton::Left,
+                                        });
+                                        let _ = native.ui.input(UiEvent::PointerReleased {
+                                            x,
+                                            y,
+                                            button: PointerButton::Left,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        window.window.request_redraw();
+                    }
+                }
                 Event::UserEvent(UserEvent::ReloadAll) => {
                     windows.reload_all();
                 }
@@ -783,6 +816,18 @@ struct NativeUiWindow {
     logical_size: Size,
     scale_factor: f64,
     cpu_frame: Option<CpuFrame>,
+    /// Caret of the focused text field, for the window's input method.
+    text_input: Option<TextInputState>,
+    /// Whether the window has keyboard focus, as the accessibility tree
+    /// reports it.
+    window_focused: bool,
+    /// Platform accessibility bridge for this window.
+    a11y: AccessBridge,
+    /// The display list the current pixels were drawn from. An equal one
+    /// reuses those pixels instead of rasterizing the frame again.
+    last_display: Option<DisplayList>,
+    /// How many frames this window has actually rasterized.
+    rasterized_frames: u64,
     last_stats: RenderStats,
     last_input_consumed: bool,
     needs_animation_frame: bool,
@@ -792,7 +837,13 @@ struct NativeUiWindow {
 }
 
 impl NativeUiWindow {
-    fn new(ui: NativeUi, physical_size: RenderSize, scale_factor: f64) -> Result<Self> {
+    fn new(
+        ui: NativeUi,
+        physical_size: RenderSize,
+        scale_factor: f64,
+        title: &str,
+        a11y_send: AccessSender,
+    ) -> Result<Self> {
         let physical_size = normalize_render_size(physical_size);
         let scale_factor = normalize_scale_factor(scale_factor);
         let requested_renderer = ui.renderer_kind();
@@ -824,6 +875,11 @@ impl NativeUiWindow {
             logical_size,
             scale_factor,
             cpu_frame: None,
+            text_input: None,
+            window_focused: false,
+            a11y: AccessBridge::new(title, a11y_send),
+            last_display: None,
+            rasterized_frames: 0,
             last_stats: RenderStats::default(),
             last_input_consumed: false,
             needs_animation_frame: false,
@@ -845,6 +901,8 @@ impl NativeUiWindow {
             .map_err(|error| error.to_string())?;
         self.last_input_consumed = frame.input_consumed;
         self.needs_animation_frame = frame.needs_animation_frame;
+        self.text_input = frame.text_input;
+        self.a11y.update(&frame.access_nodes, self.window_focused);
         if !self.access_nodes_logged && !frame.access_nodes.is_empty() {
             tracing::info!(
                 count = frame.access_nodes.len(),
@@ -853,22 +911,34 @@ impl NativeUiWindow {
             self.access_nodes_logged = true;
         }
         let display = scaled_display(&frame.display, self.scale_factor as f32);
-        let background = self.ui.theme().background;
-        let cpu_frame = CpuRasterizer::rasterize(&display, self.physical_size, background)
-            .map_err(|error| error.to_string())?;
-        self.cpu_frame = Some(cpu_frame);
-        match self.renderer.render(&display) {
-            Ok(stats) => {
-                self.last_stats = stats;
-                self.last_error = None;
-                Ok(())
-            }
-            Err(error) => {
-                let message = error.to_string();
-                self.last_error = Some(message.clone());
-                Err(message)
+        let unchanged = self.last_display.as_ref() == Some(&display)
+            && self
+                .cpu_frame
+                .as_ref()
+                .is_some_and(|frame| {
+                    frame.width == self.physical_size.width
+                        && frame.height == self.physical_size.height
+                });
+        if !unchanged {
+            let background = self.ui.theme().background;
+            let cpu_frame = CpuRasterizer::rasterize(&display, self.physical_size, background)
+                .map_err(|error| error.to_string())?;
+            self.cpu_frame = Some(cpu_frame);
+            self.last_display = Some(display.clone());
+            self.rasterized_frames += 1;
+            match self.renderer.render(&display) {
+                Ok(stats) => {
+                    self.last_stats = stats;
+                    self.last_error = None;
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    self.last_error = Some(message.clone());
+                    return Err(message);
+                }
             }
         }
+        Ok(())
     }
 
     fn resize(&mut self, physical_size: RenderSize, scale_factor: f64) -> bool {
@@ -913,6 +983,11 @@ impl NativeUiWindow {
                 self.modifiers = *modifiers;
                 return false;
             }
+            WindowEvent::Focused(focused) => {
+                self.window_focused = *focused;
+                self.a11y.set_window_focused(*focused);
+                return false;
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 return self.dispatch_input(NativeInput::CursorMoved {
                     x: position.x,
@@ -939,6 +1014,11 @@ impl NativeUiWindow {
                     _ => (0.0, 0.0),
                 };
                 return self.dispatch_input(NativeInput::Wheel { delta_x, delta_y });
+            }
+            WindowEvent::ReceivedImeText(text) => {
+                // An input method's committed text. Preedit is not drawn: the
+                // text field shows only committed text for now.
+                return self.dispatch_input(NativeInput::Text(text.clone()));
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let mut dispatched = false;
@@ -1144,11 +1224,25 @@ impl WindowManager {
             Some(WindowContent::NativeUi(ui)) => {
                 let scale_factor = window.scale_factor();
                 let physical_size = window.inner_size();
+                let proxy = self.proxy.clone();
+                let a11y_send: AccessSender = Arc::new(move |request: AccessRequest| {
+                    if proxy
+                        .send_event(UserEvent::A11yAction {
+                            window_id: id,
+                            request,
+                        })
+                        .is_err()
+                    {
+                        tracing::warn!(?id, "failed to deliver accessibility action");
+                    }
+                });
                 native_ui = Some(
                     NativeUiWindow::new(
                         ui,
                         RenderSize::new(physical_size.width, physical_size.height),
                         scale_factor,
+                        &config.title,
+                        a11y_send,
                     )
                     .context("failed to initialize native UI window")?,
                 );
@@ -1299,6 +1393,14 @@ impl WindowManager {
         }
         render_result.map_err(anyhow::Error::msg)?;
         present_result?;
+        // Put the input method's candidate window under the caret. Linux is
+        // a no-op in tao; macOS and Windows move it there.
+        if let Some(field) = native.text_input {
+            window.window.set_ime_position(LogicalPosition::new(
+                field.cursor_x as f64,
+                field.cursor_y as f64,
+            ));
+        }
         if native.last_input_consumed || native.needs_animation_frame {
             window.window.request_redraw();
         }
@@ -1651,6 +1753,10 @@ enum UserEvent {
     },
     ReloadAll,
     NativeUiRepaint(WindowId),
+    A11yAction {
+        window_id: WindowId,
+        request: AccessRequest,
+    },
     Quit,
 }
 
@@ -1776,7 +1882,14 @@ mod tests {
     #[test]
     fn native_ui_window_consumes_display_list_through_renderer() {
         let mut window =
-            NativeUiWindow::new(test_native_ui(), RenderSize::new(320, 200), 1.0).unwrap();
+            NativeUiWindow::new(
+                test_native_ui(),
+                RenderSize::new(320, 200),
+                1.0,
+                "test",
+                Arc::new(|_| {}),
+            )
+            .unwrap();
         assert_eq!(window.renderer.backend(), RendererBackend::Software);
         // The button's border and face are two rounded rects over its
         // label, beside the column's own text: four commands, two texts.
@@ -1786,11 +1899,35 @@ mod tests {
         assert_eq!(window.last_stats.command_counts.text, 2);
     }
 
+    #[test]
+    fn unchanged_frames_reuse_the_pixels() {
+        let mut window = NativeUiWindow::new(
+            test_native_ui(),
+            RenderSize::new(320, 200),
+            1.0,
+            "test",
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        // Constructing the window renders its first frame.
+        assert_eq!(window.rasterized_frames, 1);
+        window.render().unwrap();
+        assert_eq!(
+            window.rasterized_frames, 1,
+            "an identical display list keeps the pixels it already has"
+        );
+        // A resize needs pixels of the new size even when the list is the
+        // same, so the frame is rasterized again.
+        assert!(window.resize(RenderSize::new(400, 240), 1.0));
+        window.render().unwrap();
+        assert_eq!(window.rasterized_frames, 2);
+    }
+
     #[cfg(not(feature = "gpu"))]
     #[test]
     fn native_ui_auto_falls_back_without_gpu_feature() {
         let ui = test_native_ui().with_renderer_kind(crate::ui::RendererKind::Auto);
-        let window = NativeUiWindow::new(ui, RenderSize::new(100, 80), 1.0).unwrap();
+        let window = NativeUiWindow::new(ui, RenderSize::new(100, 80), 1.0, "test", Arc::new(|_| {})).unwrap();
         assert_eq!(window.renderer.backend(), RendererBackend::Software);
     }
 
@@ -1798,7 +1935,7 @@ mod tests {
     #[test]
     fn explicit_wgpu_request_falls_back_and_reports_the_error() {
         let ui = test_native_ui().with_renderer_kind(crate::ui::RendererKind::Wgpu);
-        let window = NativeUiWindow::new(ui, RenderSize::new(100, 80), 1.0).unwrap();
+        let window = NativeUiWindow::new(ui, RenderSize::new(100, 80), 1.0, "test", Arc::new(|_| {})).unwrap();
         assert_eq!(window.renderer.backend(), RendererBackend::Software);
         assert!(window
             .effective_error()

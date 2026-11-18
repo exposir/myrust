@@ -19,9 +19,9 @@ assert_eq!(frame.access_nodes[0].role, myrust_core::ui::Role::Group);
 
 ## What assistive technology sees
 
-`ViewFrame::access_nodes` 就是平台 AT 桥会消费的逐帧列表：`Role`、`label`、可选字符串 `value`、`disabled`、`focused`、`bounds`。测试 harness 没有语义树、action API 或平台桥。
+`ViewFrame::access_nodes` 就是平台 AT 桥消费的逐帧列表：`Role`、`label`、可选字符串 `value`、`disabled`、`focused`、`key`、`bounds`。测试 harness 直接读它；Linux 运行时把同一份列表发布到 AT-SPI。
 
-测试可断言控件发出的 role/label/value。不能测试 AT-SPI/UIA/NSAccessibility，因为没有连接桥；具体 role 与缺失状态见 Accessibility。
+测试可断言控件发出的 role/label/value。AT-SPI/UIA/NSAccessibility 不在 harness 范围内；具体 role 与 Linux 桥见 Accessibility。
 
 ## Testing the built app
 

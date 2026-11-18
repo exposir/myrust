@@ -12,6 +12,7 @@ use super::event::{InteractiveRegion, UiEvent};
 use super::layout::{LayoutResult, Size};
 use super::paint::DisplayList;
 use super::render::{RenderStats, RendererKind};
+use super::text_input::TextInputState;
 use super::theme::Theme;
 
 /// Complete output of one immediate-mode frame.
@@ -27,6 +28,10 @@ pub struct ViewFrame {
     pub stats: RenderStats,
     /// Accessibility metadata for this frame.
     pub access_nodes: Vec<AccessNode>,
+    /// Caret and geometry of the text field that has the focus, for a host
+    /// that places its platform text input (IME candidates, a touch keyboard)
+    /// there.
+    pub text_input: Option<TextInputState>,
     /// Whether another frame is needed to finish an active animation.
     ///
     /// The application requests a best-effort redraw while this is true. There
@@ -196,6 +201,7 @@ impl NativeUi {
         }
         let mut frame = context.produce().map_err(NativeUiError::Render)?;
         frame.input_consumed = input_consumed;
+        frame.text_input = context.focused_text_input();
         context.end_frame();
         Ok(frame)
     }

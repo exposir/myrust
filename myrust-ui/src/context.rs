@@ -1210,6 +1210,16 @@ impl Context {
         })
     }
 
+    /// Returns the caret and geometry of the text field that has the focus.
+    ///
+    /// The runtime attaches this to each [`ViewFrame`](crate::ViewFrame) so a
+    /// presenter can place its platform text-input control (an IME candidate
+    /// window, a touch keyboard) where the field is.
+    pub fn focused_text_input(&self) -> Option<TextInputState> {
+        let id = self.focused_id.as_deref()?;
+        self.text_input_state(id)
+    }
+
     /// Sets a byte-range selection on a text field for custom controls.
     pub fn set_text_input_selection(&mut self, id: &str, start: usize, end: usize) {
         let state = self
@@ -9485,6 +9495,10 @@ impl Context {
             UiEvent::TextInput { text } => {
                 self.input.text.push_str(&text);
             }
+            UiEvent::Focus { id } => {
+                self.focused_id = Some(id);
+                self.focus_visible = true;
+            }
             UiEvent::Key { key } => {
                 if key == Key::Tab {
                     self.cycle_focus(false);
@@ -9621,6 +9635,10 @@ impl Context {
                     value: pending.value.clone(),
                     disabled: false,
                     focused: pending.focused,
+                    key: self
+                        .nodes
+                        .get(&pending.node_id)
+                        .and_then(|node| node.key.clone()),
                     bounds: Rect::new(result.x, result.y, result.width, result.height),
                 })
             })
@@ -9635,6 +9653,8 @@ impl Context {
             interactions,
             stats,
             access_nodes,
+            // Filled by the runtime once the frame is produced.
+            text_input: None,
             needs_animation_frame: self.needs_animation_frame(),
             input_consumed: false,
         })
@@ -10186,7 +10206,8 @@ impl Context {
         self.focused_id = Some(self.focus_order[next].clone());
     }
 
-    fn key_pressed(&self, key: Key) -> bool {
+    /// Returns whether a named key was pressed for this frame.
+    pub fn key_pressed(&self, key: Key) -> bool {
         !self.widgets_disabled && self.input.keys.contains(&key)
     }
 

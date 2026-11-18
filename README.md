@@ -187,6 +187,14 @@ done right, with real TTF text, SVG paths, a CPU rasterizer, and a flexbox-style
 engine. Every widget is a live WASM demo at
 **[myrust.pages.dev/docs/ui/](https://myrust.pages.dev/docs/ui/)** (87 documented pages).
 
+The API shape and the demo catalogue follow [mygo](https://github.com/egoist/mygo),
+egoist's immediate-mode desktop UI for Go. `NativeUi::new(|ctx| ...)` mirrors mygo's
+`View(callback)`; the `column`/`row`/`container`/widget constructors mirror its `Context`
+methods; and the docs demos are ports of its examples where this API can express them
+(see [`examples/README.md`](examples/README.md) for which ones, and why the rest are not
+stubs). mygo builds on Go's own rendering stack — this is an independent Rust
+implementation with its own layout solver, TTF rasterizer, and display list.
+
 ```rust
 use myrust_ui::*;
 
@@ -318,9 +326,9 @@ let _guard = SingleInstance::acquire("myrust-app")?;
 - `Renderer` reports Text, SVG path, and image commands as unsupported through `RenderStats`; the separate CPU presenter (`CpuRasterizer`) draws TTF text, SVG paths, and supported geometry independently from those statistics.
 - `Theme::system()` only detects light versus dark appearance. It does not read the system accent color or high-contrast preference.
 - Animation is scalar/easing infrastructure plus button hover/pressed interpolation; content transitions, timeline orchestration, and spring physics are not implemented. Reduced motion checks `MYRUST_REDUCE_MOTION` and the existing neutral appearance layer, but native macOS and Windows reduced-motion APIs are not implemented. Animation redraw is best-effort through `request_redraw`; there is no timer-driven frame scheduler, and Linux wakeup behavior still depends on the host event loop.
-- Accessibility output is semantic data only. No AT-SPI, UIA, or NSAccessibility bridge is connected, so platform assistive technologies cannot observe the emitted nodes.
+- Accessibility output is semantic data from the immediate-mode runtime. On Linux the desktop runtime publishes it to AT-SPI through AccessKit (`a11y` feature, on by default), with `Focus` and `Click` actions for widgets that carry a key. macOS and Windows have no bridge yet, so their assistive technologies cannot observe the nodes.
 - Hit testing remains a linear reverse-order scan of previous-frame widget regions. Tab order follows widget construction order. Duplicate explicit ids share interaction/focus/widget state and are therefore risky.
-- Text fields have no selection, clipboard operations, undo/redo, IME composition, dead-key composition, or text shaping. Slider and scroll behavior have no inertia or animation. Accessibility is exposed as semantic data without a platform bridge, and optimized spatial hit testing is not implemented.
+- Text fields have no selection, clipboard operations, undo/redo, inline IME preedit, dead-key composition, or text shaping; hosts deliver committed text (the Linux desktop forwards input-method commits, and the browser demo composes in a hidden textarea). Slider and scroll behavior have no inertia or animation. macOS and Windows accessibility bridges are not implemented, and optimized spatial hit testing is not implemented.
 
 ### Roadmap
 
@@ -328,7 +336,7 @@ let _guard = SingleInstance::acquire("myrust-app")?;
 |-------|-------|
 | **✓ Phase 1** | Multi-window WebView, typed IPC, desktop APIs, CLI |
 | **✓ Phase 2** | Menus, clipboard, drop/hot reload, window state, sessions, page APIs, deep links, downloads, protocols, system/media/login, updater, packaging descriptions, signing interfaces, single-instance forwarding |
-| **✓ Phase 3** | Immediate-mode `Context` + `NativeUi`, Theme/spacing/font tokens, hover animations and reduced-motion handling, semantic accessibility nodes, hover/focus/Tab and keyboard activation, TextField/Checkbox/Slider/ScrollView, pure-CPU layout, display lists, TTF/bitmap text, SVG icons, renderer abstraction, optional wgpu offscreen backend, CPU fallback/presenter, `WindowContent::NativeUi`, event/redraw wiring, `--native-ui` demo; platform AT bridges, native reduced-motion APIs, full text/SVG/image rendering, wgpu window presentation, IME, and cross-platform desktop validation remain incomplete |
+| **✓ Phase 3** | Immediate-mode `Context` + `NativeUi`, Theme/spacing/font tokens, hover animations and reduced-motion handling, semantic accessibility nodes, hover/focus/Tab and keyboard activation, TextField/Checkbox/Slider/ScrollView, pure-CPU layout, display lists, TTF/bitmap text, SVG icons, renderer abstraction, optional wgpu offscreen backend, CPU fallback/presenter, `WindowContent::NativeUi`, event/redraw wiring, `--native-ui` demo; Linux AT-SPI bridge, macOS/Windows AT bridges, native reduced-motion APIs, full text/SVG/image rendering, wgpu window presentation, inline IME preedit, and cross-platform desktop validation remain incomplete |
 | **Phase 4** | Packaging (.app, .dmg, .msi, .deb, PKGBUILD, code signing, delta updates) |
 
 ## License

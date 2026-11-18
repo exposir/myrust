@@ -1,0 +1,21 @@
+[package]
+name = "example-snake"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MyRust example: snake game"
+
+[lib]
+name = "example_snake"
+path = "src/lib.rs"
+
+[[bin]]
+name = "example-snake"
+path = "src/main.rs"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+myrust-core = { path = "../../myrust-core" }
+dirs.workspace = true
+serde.workspace = true
+serde_json.workspace = true

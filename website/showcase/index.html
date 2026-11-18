@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Built with MyRust · Showcase</title>
+<meta name="description" content="Apps built with MyRust's native UI and system WebView.">
+<script src="/assets/theme-init.js"></script>
+<link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjEyMCAxMDAgMTYwIDE5MCI+PHBhdGggZmlsbD0iIzIyMjIyNiIgZD0iTTIwMCAyODAgMTMwLjcyIDI0MCAxMzAuNzIgMTYwIDIwMCAxMjAgMjY5LjI4IDE2MCAyNjkuMjggMjQwWiIvPjwvc3ZnPg==" type="image/svg+xml">
+<link rel="stylesheet" href="/docs/ui/docs.css">
+<link rel="stylesheet" href="/docs/ui/custom.css">
+<style>
+  :root {
+    --showcase-line: color-mix(in oklab, var(--border) 82%, transparent);
+    --showcase-wash: color-mix(in oklab, var(--muted) 45%, transparent);
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html { scroll-padding-top: 5rem; }
+  body.showcase {
+    min-height: 100vh;
+    background:
+      radial-gradient(circle at 12% -8%, color-mix(in oklab, var(--accent) 11%, transparent), transparent 30rem),
+      linear-gradient(var(--background), var(--background));
+    color: var(--foreground);
+  }
+  .showcase-shell {
+    width: min(100%, 72rem);
+    margin-inline: auto;
+    border-inline: 1px solid var(--border);
+  }
+  .showcase-header {
+    position: sticky;
+    top: 0;
+    z-index: 40;
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    min-height: 3.5rem;
+    padding: 0 1rem;
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in oklab, var(--background) 84%, transparent);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+  }
+  .showcase-wordmark {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--foreground);
+    font-size: 1.0625rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    text-decoration: none;
+  }
+  .showcase-wordmark svg { width: 20px; height: 24px; }
+  .showcase-nav {
+    display: flex;
+    align-items: center;
+    gap: 1.25rem;
+    margin-left: auto;
+    font-size: 0.875rem;
+  }
+  .showcase-nav a {
+    color: var(--muted-foreground);
+    text-decoration: none;
+    transition: color 0.15s ease;
+  }
+  .showcase-nav a:hover,
+  .showcase-nav a[aria-current="page"] { color: var(--foreground); }
+  .showcase-main {
+    padding: 2rem 1rem 1.5rem;
+  }
+  .showcase-intro {
+    max-width: 48rem;
+  }
+  .showcase-kicker {
+    display: none;
+    color: var(--muted-foreground);
+    font-family: "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+  .showcase-title {
+    margin: 0;
+    font-size: clamp(2.5rem, 5.2vw, 4rem);
+    font-weight: 620;
+    letter-spacing: -0.055em;
+    line-height: 0.96;
+    text-wrap: balance;
+  }
+  .showcase-lede {
+    max-width: 42rem;
+    margin: 0.8rem 0 0;
+    color: var(--muted-foreground);
+    font-size: clamp(0.95rem, 1.6vw, 1.05rem);
+    line-height: 1.6;
+    text-wrap: pretty;
+  }
+  .showcase-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+    margin-top: 1.6rem;
+  }
+  .project-card {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--card);
+    color: inherit;
+    text-decoration: none;
+    transition: border-color 0.18s ease, transform 0.18s ease;
+  }
+  .project-card:hover {
+    border-color: var(--showcase-line);
+    transform: translateY(-3px);
+  }
+  .project-shot {
+    position: relative;
+    aspect-ratio: 16 / 8.5;
+    overflow: hidden;
+    border-bottom: 1px solid var(--border);
+    background: #f7f7f5;
+  }
+  .project-shot img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    object-position: center;
+    transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .project-card:hover .project-shot img { transform: scale(1.012); }
+  .project-copy {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    padding: 0.95rem 1.1rem;
+  }
+  .project-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+  .project-heading h2 {
+    margin: 0;
+    font-size: 1.25rem;
+    font-weight: 650;
+    letter-spacing: -0.025em;
+  }
+  .project-arrow {
+    display: inline-flex;
+    width: 1.75rem;
+    height: 1.75rem;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--muted-foreground);
+    transition: color 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
+  }
+  .project-arrow svg { width: 14px; height: 14px; }
+  .project-card:hover .project-arrow {
+    border-color: color-mix(in oklab, var(--foreground) 32%, var(--border));
+    color: var(--foreground);
+    transform: translate(2px, -2px);
+  }
+  .project-description {
+    margin: 0.45rem 0 0.9rem;
+    color: var(--muted-foreground);
+    font-size: 0.875rem;
+    line-height: 1.55;
+    text-wrap: pretty;
+  }
+  .project-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-top: auto;
+  }
+  .project-tag {
+    padding: 0.18rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--muted) 55%, transparent);
+    color: var(--muted-foreground);
+    font-family: "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    line-height: 1.5;
+    text-transform: uppercase;
+  }
+  .showcase-footer {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1.5rem 1rem;
+    border-top: 1px solid var(--border);
+    color: var(--muted-foreground);
+    font-family: "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+  .showcase-footer a {
+    color: inherit;
+    text-decoration: none;
+  }
+  .showcase-footer a:hover { color: var(--foreground); }
+  @media (min-width: 640px) {
+    .showcase-header { padding-inline: 1.5rem; }
+    .showcase-main { padding-inline: 1.5rem; }
+    .showcase-footer { padding-inline: 1.5rem; }
+  }
+  @media (min-width: 800px) {
+    .showcase-main { padding: 1.75rem 2.5rem 1.5rem; }
+    .showcase-header { padding-inline: 1.5rem; }
+    .showcase-footer { padding-inline: 1.5rem; }
+  }
+  @media (max-width: 760px) {
+    .showcase-grid { grid-template-columns: 1fr; margin-top: 2rem; }
+    .showcase-main { padding-top: 2.5rem; }
+    .showcase-nav { gap: 0.9rem; font-size: 0.8125rem; }
+  }
+  @media (max-width: 430px) {
+    .showcase-header { gap: 0.75rem; padding-inline: 0.75rem; }
+    .showcase-wordmark { font-size: 1rem; }
+    .showcase-nav { gap: 0.7rem; }
+    .showcase-main { padding-inline: 0.75rem; }
+    .showcase-footer { padding-inline: 0.75rem; }
+  }
+</style>
+</head>
+<body class="showcase">
+  <div class="showcase-shell">
+    <header class="showcase-header">
+      <a class="showcase-wordmark" href="/">
+        <svg viewBox="120 100 160 190" aria-hidden="true">
+          <path fill="currentColor" d="M200 280 130.72 240 130.72 160 200 120 269.28 160 269.28 240Z"/>
+          <g fill="var(--background)">
+            <circle cx="165.36" cy="260" r="16"/><circle cx="130.72" cy="200" r="16"/>
+            <circle cx="165.36" cy="140" r="16"/><circle cx="234.64" cy="140" r="16"/>
+            <circle cx="269.28" cy="200" r="16"/><circle cx="234.64" cy="260" r="16"/>
+          </g>
+        </svg>
+        MyRust
+      </a>
+      <nav class="showcase-nav" aria-label="Site">
+        <a href="/docs/ui/">Docs</a>
+        <a href="/showcase/" aria-current="page">Showcase</a>
+        <a href="/demo/">Demo</a>
+        <a href="https://github.com/exposir/myrust">GitHub</a>
+      </nav>
+    </header>
+
+    <main class="showcase-main">
+      <div class="showcase-intro">
+        <p class="showcase-kicker">Showcase</p>
+        <h1 class="showcase-title">Built with MyRust.</h1>
+        <p class="showcase-lede">
+          Small desktop apps with Rust underneath: native UI drawn by MyRust, or a web frontend in the system view.
+        </p>
+      </div>
+
+      <section class="showcase-grid" aria-label="Apps built with MyRust">
+        <a class="project-card" href="/2048/">
+          <div class="project-shot">
+            <img src="/assets/showcase/2048.png" alt="2048 game board built with MyRust" loading="eager">
+          </div>
+          <div class="project-copy">
+            <div class="project-heading">
+              <h2>2048</h2>
+              <span class="project-arrow" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg>
+              </span>
+            </div>
+            <p class="project-description">
+              The classic 2048 puzzle — arrow keys, WASD, or a drag — with one Rust game core behind both the native window and the web build.
+            </p>
+            <div class="project-tags" aria-label="Platforms">
+              <span class="project-tag">native</span>
+              <span class="project-tag">web</span>
+            </div>
+          </div>
+        </a>
+
+        <a class="project-card" href="/snake/">
+          <div class="project-shot">
+            <img src="/assets/showcase/snake.png" alt="Snake game board built with MyRust" loading="eager">
+          </div>
+          <div class="project-copy">
+            <div class="project-heading">
+              <h2>Snake</h2>
+              <span class="project-arrow" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg>
+              </span>
+            </div>
+            <p class="project-description">
+              Snake on a 20×20 board — arrows or WASD, speed that climbs with every meal — sharing one rule engine with the native window.
+            </p>
+            <div class="project-tags" aria-label="Platforms">
+              <span class="project-tag">native</span>
+              <span class="project-tag">web</span>
+            </div>
+          </div>
+        </a>
+
+        <a class="project-card" href="/tetris/">
+          <div class="project-shot">
+            <img src="/assets/showcase/tetris.png" alt="Tetris board built with MyRust" loading="eager">
+          </div>
+          <div class="project-copy">
+            <div class="project-heading">
+              <h2>Tetris</h2>
+              <span class="project-arrow" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg>
+              </span>
+            </div>
+            <p class="project-description">
+              Falling blocks with wall kicks, a landing shadow and the original line-clear scoring, drawn by the same Rust core in both places.
+            </p>
+            <div class="project-tags" aria-label="Platforms">
+              <span class="project-tag">native</span>
+              <span class="project-tag">web</span>
+            </div>
+          </div>
+        </a>
+
+        <a class="project-card" href="/demo/">
+          <div class="project-shot">
+            <img src="/assets/showcase/acme-studio.png" alt="Acme Studio showcase application" loading="eager">
+          </div>
+          <div class="project-copy">
+            <div class="project-heading">
+              <h2>Acme Studio</h2>
+              <span class="project-arrow" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg>
+              </span>
+            </div>
+            <p class="project-description">
+              A full showcase interface built from MyRust's native controls and rendered as WebAssembly.
+            </p>
+            <div class="project-tags" aria-label="Platforms">
+              <span class="project-tag">web</span>
+            </div>
+          </div>
+        </a>
+      </section>
+    </main>
+
+    <footer class="showcase-footer">
+      <span>MyRust · MIT License</span>
+      <span><a href="/">Back to home</a></span>
+    </footer>
+  </div>
+</body>
+</html>

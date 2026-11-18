@@ -1,4 +1,4 @@
-MyRust emits `AccessNode` metadata every frame. It is a flat vector of `role`, `label`, `value`, `disabled`, `focused` and `bounds`; it is not connected to AT-SPI, UIA or NSAccessibility.
+MyRust emits `AccessNode` metadata every frame. It is a flat vector of `role`, `label`, `value`, `disabled`, `focused`, `key` and `bounds`. On Linux the desktop runtime publishes it to AT-SPI through AccessKit (`myrust-core`'s `a11y` feature, on by default): screen readers see the nodes as children of one window node, and widgets that carry a key accept `Focus` and `Click` actions. macOS and Windows have no bridge yet.
 
 ```rust
 let frame = ui.render(Size::new(640.0, 360.0))?;
@@ -83,4 +83,8 @@ No live region, alert, status or announcement API exists. Toasts and dialogs hav
 
 No landmark roles, live-region flags, atomic/relevant properties, error announcements or accessibility rules are implemented. `AccessNode` is a per-frame flat list, not a semantic tree with relationships.
 
-A platform AT bridge would need role/action mapping, focus/selection events, window handles and tree diffing; see the `Inspector` for debugging snapshots, not for AT.
+## The Linux bridge
+
+The bridge maps every role except the generic `column`/`row`/`grid` groups, which are skipped to keep the tree readable. It sends the tree whole each frame; AccessKit diffs it and raises platform events. Focus actions move keyboard focus to the widget key, and click actions press and release at the node's centre. Ids follow the frame's node order, so a widget that keeps its position keeps its id.
+
+There are no selection ranges, live-region events, position-in-set, description or expanded-state mappings yet. macOS would need an NSAccessibility adapter and Windows a UIA one; both are unimplemented.

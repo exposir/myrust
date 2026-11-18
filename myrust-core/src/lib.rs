@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 /// Application lifecycle and native window management.
+pub mod a11y;
 pub mod app;
 /// Native desktop integrations.
 pub mod desktop;

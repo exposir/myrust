@@ -98,15 +98,61 @@ function cssFamilyOf(name) {
   "use strict";
   var canvas = document.getElementById("canvas");
   var title = document.getElementById("title");
+  // MyRust's web surface draws with WebGL 2, as MyGo's web backend does
+  // (`internal/web/surface.go`, `internal/gpu/gl`): one instanced quad per
+  // paint op, signed distances for rounded coverage, and Canvas 2D only for
+  // the text, SVG and shadow coverage masks that WebGL cannot rasterize --
+  // the same split MyGo makes (`internal/text/canvas_js.go`). A browser
+  // without WebGL 2 falls back to the Canvas 2D renderer below, and
+  // `?renderer=canvas` forces that path.
+  // Instance stride and batch cap for the WebGL 2 presenter below.
+  var GFLOAT = 36;
+  var GCAP = 4096;
+  var forcedCanvas = new URLSearchParams(location.search).get("renderer") === "canvas";
+  var glr = forcedCanvas ? null : makeGlRenderer(canvas);
+  window.__demoGl = !!glr;
+
+  // textCtx measures and rasterizes text in both modes: WebGL has no text
+  // rasterizer, so glyph coverage always comes from Canvas 2D. In canvas
+  // mode it is the visible context itself.
   // MyGo rasterizes its canvas with full 8-bit coverage; Chrome's GPU
   // canvas answers with four levels (0, 64, 128, 191, 255) at the edge of a
   // curve, which shows as a stair on every rounded corner. A CPU-backed
   // context takes the analytic path instead and matches MyGo's edges.
-  var ctx = canvas.getContext("2d", { willReadFrequently: true });
+  var ctx = glr
+    ? document.createElement("canvas").getContext("2d", { willReadFrequently: true })
+    : canvas.getContext("2d", { willReadFrequently: true });
+
+  // A hidden textarea takes the keyboard, as it does in MyGo's web surface
+  // (`internal/web/surface.go`): browsers show input methods, compose text
+  // and place candidates in an editable element, not in a canvas. Nothing
+  // here is drawn; the wasm UI draws its own caret.
+  var input = document.createElement("textarea");
+  ["autocomplete|off", "autocorrect|off", "autocapitalize|off",
+   "spellcheck|false", "inputmode|none"].forEach(function (pair) {
+    var parts = pair.split("|");
+    input.setAttribute(parts[0], parts[1]);
+  });
+  input.setAttribute("aria-label", "MyRust UI text input");
+  input.style.cssText =
+    "position:fixed;left:0;top:0;width:1px;height:16px;padding:0;margin:0;" +
+    "border:0;outline:0;background:transparent;color:transparent;" +
+    "caret-color:transparent;resize:none;overflow:hidden;white-space:pre;" +
+    "z-index:10;opacity:0;font:16px/1 system-ui,sans-serif;";
+  canvas.parentNode.appendChild(input);
+
+  function focusDemo() {
+    if (document.activeElement === input) return;
+    try { input.focus({ preventScroll: true }); } catch (error) { input.focus(); }
+  }
+  window.__demoFocus = focusDemo;
+
+  input.addEventListener("focus", function () { canvas.setAttribute("data-focus", "true"); });
+  input.addEventListener("blur", function () { canvas.setAttribute("data-focus", "false"); });
   var slug = new URLSearchParams(location.search).get("demo") || "tabs";
-  var demoIds = { tabs: 0, markdown: 1, views: 2, layout: 3, text: 4, styling: 5, input: 6, "drag-and-drop": 7, "pages-and-navigation": 8, overlays: 9, accessibility: 10, "right-to-left": 11, languages: 12, "drawing-and-animation": 13, transitions: 14, motion: 15, transforms: 16, "custom-widgets": 17, "windows-with-native-ui": 18, testing: 19, inspector: 20, rendering: 21, migration: 22, performance: 23, button: 24, link: 25, "menu-button": 26, "context-menu": 27, toggle: 28, "segmented-control": 29, toolbar: 30, checkbox: 31, switch: 32, radio: 33, select: 34, slider: 35, "range-slider": 36, stepper: 37, rating: 38, "text-input": 39, "text-input-primitives": 40, "number-input": 41, "decimal-input": 42, "search-field": 43, combobox: 44, autocomplete: 45, "token-field": 46, "editable-text": 47, "find-bar": 48, "rich-text-editor": 49, "code-editor": 50, "diff-viewer": 51, calendar: 52, "date-input": 53, "time-input": 54, "color-picker": 55, list: 56, table: 57, tree: 58, outline: 59, "grid-view": 60, "scroll-view": 61, grid: 62, "split-view": 63, collapsible: 64, accordion: 65, form: 66, sidebar: 67, breadcrumbs: 68, "back-and-forward-buttons": 69, dialog: 70, "alert-dialog": 71, popover: 72, tooltip: 73, toast: 74, "progress-bar": 75, spinner: 76, meter: 77, badge: 78, charts: 79, image: 80, icon: 81, avatar: 82, showcase: 83 };
+  var demoIds = { tabs: 0, markdown: 1, views: 2, layout: 3, text: 4, styling: 5, input: 6, "drag-and-drop": 7, "pages-and-navigation": 8, overlays: 9, accessibility: 10, "right-to-left": 11, languages: 12, "drawing-and-animation": 13, transitions: 14, motion: 15, transforms: 16, "custom-widgets": 17, "windows-with-native-ui": 18, testing: 19, inspector: 20, rendering: 21, migration: 22, performance: 23, button: 24, link: 25, "menu-button": 26, "context-menu": 27, toggle: 28, "segmented-control": 29, toolbar: 30, checkbox: 31, switch: 32, radio: 33, select: 34, slider: 35, "range-slider": 36, stepper: 37, rating: 38, "text-input": 39, "text-input-primitives": 40, "number-input": 41, "decimal-input": 42, "search-field": 43, combobox: 44, autocomplete: 45, "token-field": 46, "editable-text": 47, "find-bar": 48, "rich-text-editor": 49, "code-editor": 50, "diff-viewer": 51, calendar: 52, "date-input": 53, "time-input": 54, "color-picker": 55, list: 56, table: 57, tree: 58, outline: 59, "grid-view": 60, "scroll-view": 61, grid: 62, "split-view": 63, collapsible: 64, accordion: 65, form: 66, sidebar: 67, breadcrumbs: 68, "back-and-forward-buttons": 69, dialog: 70, "alert-dialog": 71, popover: 72, tooltip: 73, toast: 74, "progress-bar": 75, spinner: 76, meter: 77, badge: 78, charts: 79, image: 80, icon: 81, avatar: 82, showcase: 83, 2048: 84, snake: 85, tetris: 86 };
   var slugId = demoIds[slug] !== undefined ? demoIds[slug] : 0;
-  var labels = { tabs: "Tabs", markdown: "Markdown", views: "Views", layout: "Layout", text: "Text", styling: "Styling and themes", input: "Input", "drag-and-drop": "Drag and drop", "pages-and-navigation": "Pages and navigation", overlays: "Overlays", accessibility: "Accessibility", "right-to-left": "Right to left", languages: "Languages", "drawing-and-animation": "Drawing and animation", transitions: "Transitions", motion: "Motion", transforms: "Transforms", "custom-widgets": "Custom widgets", "windows-with-native-ui": "Windows with native UI", testing: "Testing", inspector: "Inspector", rendering: "Rendering", migration: "Migration", performance: "Performance", button: "Button", link: "Link", "menu-button": "Menu button", "context-menu": "Context menu", toggle: "Toggle", "segmented-control": "Segmented control", toolbar: "Toolbar", checkbox: "Checkbox", switch: "Switch", radio: "Radio", select: "Select", slider: "Slider", "range-slider": "Range slider", stepper: "Stepper", rating: "Rating", "text-input": "Text input", "text-input-primitives": "Text-input primitives", "number-input": "Number input", "decimal-input": "Decimal input", "search-field": "Search field", combobox: "Combobox", autocomplete: "Autocomplete", "token-field": "Token field", "editable-text": "Editable text", "find-bar": "Find bar", "rich-text-editor": "Rich text editor", "code-editor": "Code editor", "diff-viewer": "Diff viewer", calendar: "Calendar", "date-input": "Date input", "time-input": "Time input", "color-picker": "Color picker", list: "List", table: "Table", tree: "Tree", outline: "Outline", "grid-view": "Grid view", "scroll-view": "Scroll view", grid: "Grid", "split-view": "Split view", collapsible: "Collapsible", accordion: "Accordion", form: "Form", sidebar: "Sidebar", breadcrumbs: "Breadcrumbs", "back-and-forward-buttons": "Back and forward buttons", dialog: "Dialog", "alert-dialog": "Alert dialog", popover: "Popover", tooltip: "Tooltip", toast: "Toast", "progress-bar": "Progress bar", spinner: "Spinner", meter: "Meter", badge: "Badge", charts: "Charts", image: "Image", icon: "Icon", avatar: "Avatar", showcase: "Showcase" };
+  var labels = { tabs: "Tabs", markdown: "Markdown", views: "Views", layout: "Layout", text: "Text", styling: "Styling and themes", input: "Input", "drag-and-drop": "Drag and drop", "pages-and-navigation": "Pages and navigation", overlays: "Overlays", accessibility: "Accessibility", "right-to-left": "Right to left", languages: "Languages", "drawing-and-animation": "Drawing and animation", transitions: "Transitions", motion: "Motion", transforms: "Transforms", "custom-widgets": "Custom widgets", "windows-with-native-ui": "Windows with native UI", testing: "Testing", inspector: "Inspector", rendering: "Rendering", migration: "Migration", performance: "Performance", button: "Button", link: "Link", "menu-button": "Menu button", "context-menu": "Context menu", toggle: "Toggle", "segmented-control": "Segmented control", toolbar: "Toolbar", checkbox: "Checkbox", switch: "Switch", radio: "Radio", select: "Select", slider: "Slider", "range-slider": "Range slider", stepper: "Stepper", rating: "Rating", "text-input": "Text input", "text-input-primitives": "Text-input primitives", "number-input": "Number input", "decimal-input": "Decimal input", "search-field": "Search field", combobox: "Combobox", autocomplete: "Autocomplete", "token-field": "Token field", "editable-text": "Editable text", "find-bar": "Find bar", "rich-text-editor": "Rich text editor", "code-editor": "Code editor", "diff-viewer": "Diff viewer", calendar: "Calendar", "date-input": "Date input", "time-input": "Time input", "color-picker": "Color picker", list: "List", table: "Table", tree: "Tree", outline: "Outline", "grid-view": "Grid view", "scroll-view": "Scroll view", grid: "Grid", "split-view": "Split view", collapsible: "Collapsible", accordion: "Accordion", form: "Form", sidebar: "Sidebar", breadcrumbs: "Breadcrumbs", "back-and-forward-buttons": "Back and forward buttons", dialog: "Dialog", "alert-dialog": "Alert dialog", popover: "Popover", tooltip: "Tooltip", toast: "Toast", "progress-bar": "Progress bar", spinner: "Spinner", meter: "Meter", badge: "Badge", charts: "Charts", image: "Image", icon: "Icon", avatar: "Avatar", showcase: "Showcase", 2048: "2048", snake: "Snake", tetris: "Tetris" };
   var name = labels[slug] || labels.tabs;
   if (true) {
     document.querySelector(".titlebar").style.display = "none";
@@ -246,7 +292,7 @@ function cssFamilyOf(name) {
     }
     return Array.from(text);
   }
-  function textPens(text) {
+  function textPens(mctx, text) {
     var clusters = [];
     var pen = 0;
     var pieces = text.split(/(\s+)/);
@@ -258,19 +304,19 @@ function cssFamilyOf(name) {
       var w = new Array(n + 1);
       w[0] = 0;
       if (n === 1) {
-        w[1] = ctx.measureText(cs[0]).width;
+        w[1] = mctx.measureText(cs[0]).width;
       } else {
-        w[n] = ctx.measureText(pieces[p]).width;
+        w[n] = mctx.measureText(pieces[p]).width;
         if (n > 33) {
           for (var k = 1; k < n; k++) {
-            w[k] = w[k - 1] + ctx.measureText(cs[k - 1]).width;
+            w[k] = w[k - 1] + mctx.measureText(cs[k - 1]).width;
           }
         } else {
           var through = cs[0];
           for (var k = 1; k < n; k++) {
             through += cs[k];
-            var prefix = ctx.measureText(through).width;
-            var alone = ctx.measureText(cs[k]).width;
+            var prefix = mctx.measureText(through).width;
+            var alone = mctx.measureText(cs[k]).width;
             w[k] = Math.max(prefix - alone, w[k - 1]);
           }
         }
@@ -282,76 +328,124 @@ function cssFamilyOf(name) {
     }
     return clusters;
   }
-  // fillTextClustered draws a run cluster by cluster, each at the quarter
-  // of a device pixel MyGo's placement picks. It returns false where the
-  // run must be drawn whole, with color glyphs or a rotated transform.
-  function fillTextClustered(text, x, baseline, color, ctm) {
-    if (!(ctm[0] > 0) || !(ctm[3] > 0) || ctm[1] !== 0 || ctm[2] !== 0) return false;
-    if (hasColorGlyphs(text)) return false;
-    var clusters = textPens(text);
-    var sx = ctm[0], offset = ctm[4];
+  // buildTextRun rasterizes a run cluster by cluster, each at the quarter
+  // of a device pixel MyGo's placement picks, into a Canvas 2D coverage
+  // mask (`internal/text/canvas_js.go`). It returns the mask and where it
+  // belongs, or null where the run must be drawn whole with plain fillText
+  // (color glyphs, a rotated transform, an oversized mask).
+  //
+  // The clusters of one run never overlap, so they share a single mask: one
+  // clear, one pass of fills, one tint. Rasterizing each cluster on its own
+  // meant four canvas operations and one texture upload per glyph, which is
+  // what made a paragraph of text cost milliseconds.
+  function buildTextRun(mctx, text, x, baseline, color, ctm, off) {
+    if (!(ctm[0] > 0) || !(ctm[3] > 0) || ctm[1] !== 0 || ctm[2] !== 0) return null;
+    if (hasColorGlyphs(text)) return null;
+    var clusters = textPens(mctx, text);
+    var sx = ctm[0], sy = ctm[3], pad = 2;
+    // Place every cluster first: the mask's box has to hold all of them.
+    var placed = [];
+    var left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
     for (var i = 0; i < clusters.length; i++) {
       var cluster = clusters[i];
       if (!cluster.text.trim()) continue;
-      var device = (x + cluster.x) * sx + offset;
+      var device = (x + cluster.x) * sx + ctm[4];
       var whole = Math.floor(device);
       var q = Math.floor((device - whole) * 4 + 0.5);
       var origin = whole + (q === 4 ? 1 : q / 4);
-      if (!fillTextShaded(cluster.text, (origin - offset) / sx, baseline, color, ctm)) {
-        return false;
-      }
+      var cx = (origin - ctm[4]) / sx;
+      var m = mctx.measureText(cluster.text);
+      var l = cx - (m.actualBoundingBoxLeft || 0);
+      var r = cx + (m.actualBoundingBoxRight || 0);
+      var t = baseline - (m.actualBoundingBoxAscent || 0);
+      var b = baseline + (m.actualBoundingBoxDescent || 0);
+      if (!(r > l) || !(b > t)) continue;
+      placed.push({ text: cluster.text, x: cx });
+      if (l < left) left = l;
+      if (t < top) top = t;
+      if (r > right) right = r;
+      if (b > bottom) bottom = b;
     }
-    return true;
-  }
-  // fillTextShaded draws text as MyGo's canvas engine does: the glyphs
-  // rasterized in the gray of the text's shade, the coverage tinted with
-  // the color. It returns false where the text must fill itself, under a
-  // rotated transform or with color glyphs.
-  function fillTextShaded(text, x, baseline, color, ctm) {
-    if (!(ctm[0] > 0) || !(ctm[3] > 0) || ctm[1] !== 0 || ctm[2] !== 0) return false;
-    if (hasColorGlyphs(text)) return false;
-    var m = ctx.measureText(text);
-    var left = x - (m.actualBoundingBoxLeft || 0);
-    var right = x + (m.actualBoundingBoxRight || 0);
-    var top = baseline - (m.actualBoundingBoxAscent || 0);
-    var bottom = baseline + (m.actualBoundingBoxDescent || 0);
-    if (!(right > left) || !(bottom > top)) return false;
-    // The mask's own grid must land on whole device pixels, or drawing it
-    // back resamples the coverage it carries.
-    var sx = ctm[0], sy = ctm[3], pad = 2;
+    if (placed.length === 0) return null;
     var x0 = Math.floor(left * sx + ctm[4]) - pad;
     var y0 = Math.floor(top * sy + ctm[5]) - pad;
     var w = Math.ceil(right * sx + ctm[4]) + pad - x0;
     var h = Math.ceil(bottom * sy + ctm[5]) + pad - y0;
-    if (w > 4096 || h > 4096) return false;
-    var off = shadeCanvas;
-    if (!off) off = shadeCanvas = document.createElement("canvas");
-    if (off.width < w || off.height < h) {
-      off.width = Math.max(off.width, w);
-      off.height = Math.max(off.height, h);
+    if (w > 4096 || h > 4096) return null;
+    var target = off || document.createElement("canvas");
+    if (!off) {
+      target.width = w;
+      target.height = h;
+    } else if (target.width < w || target.height < h) {
+      target.width = Math.max(target.width, w);
+      target.height = Math.max(target.height, h);
     }
-    // MyGo's engine keeps its scratch canvas in software, for the readback
-    // it makes (`internal/text/canvas_js.go` newCanvas: willReadFrequently),
-    // whose glyph coverage the hardware canvas rounds differently.
-    var octx = off.getContext("2d", { willReadFrequently: true });
+    var octx = target.getContext("2d", { willReadFrequently: true });
     octx.setTransform(1, 0, 0, 1, 0, 0);
     octx.clearRect(0, 0, w, h);
     octx.setTransform(sx, 0, 0, sy, ctm[4] - x0, ctm[5] - y0);
-    octx.font = ctx.font;
+    octx.font = mctx.font;
     octx.textBaseline = "alphabetic";
     octx.textAlign = "start";
     var gray = shadeOf(color);
     octx.fillStyle = "rgb(" + gray + "," + gray + "," + gray + ")";
-    octx.fillText(text, x, baseline);
+    for (var k = 0; k < placed.length; k++) octx.fillText(placed[k].text, placed[k].x, baseline);
     // Where the gray covers, the color shows: the coverage is the alpha.
     octx.setTransform(1, 0, 0, 1, 0, 0);
     octx.globalCompositeOperation = "source-in";
     octx.fillStyle = rgba(color);
     octx.fillRect(0, 0, w, h);
     octx.globalCompositeOperation = "source-over";
-    ctx.drawImage(off, 0, 0, w, h,
-      (x0 - ctm[4]) / sx, (y0 - ctm[5]) / sy, w / sx, h / sy);
-    return true;
+    return { canvas: target, x0: x0, y0: y0, w: w, h: h, sx: sx, sy: sy, tx: ctm[4], ty: ctm[5] };
+  }
+
+  // paintTextRun2d blits a run's mask where it belongs, in local
+  // coordinates, so the visible Canvas 2D frame gets the same pixels.
+  function paintTextRun2d(run) {
+    ctx.drawImage(run.canvas, 0, 0, run.w, run.h,
+      (run.x0 - run.tx) / run.sx, (run.y0 - run.ty) / run.sy, run.w / run.sx, run.h / run.sy);
+  }
+
+  // buildPlainRun rasterizes a run whole with fillText under its own
+  // transform, in device pixels, for the runs the clustered mask cannot
+  // take: color glyphs, rotated transforms, a forced plain draw. The GPU
+  // presenter draws the result as one textured quad.
+  function buildPlainRun(mctx, text, x, baseline, color, ctm) {
+    if (!text) return null;
+    var m = mctx.measureText(text);
+    var ascent = ascentOf(mctx);
+    var descent = m.fontBoundingBoxDescent > 0 ? m.fontBoundingBoxDescent : ascent * 0.3;
+    var l = x - Math.max(m.actualBoundingBoxLeft || 0, 0) - 1;
+    var r = x + Math.max(m.actualBoundingBoxRight || 0, 0) + 1;
+    var t = baseline - Math.max(m.actualBoundingBoxAscent || 0, ascent) - 1;
+    var b = baseline + Math.max(m.actualBoundingBoxDescent || 0, descent) + 1;
+    if (!(r > l) || !(b > t)) return null;
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (var i = 0; i < 4; i++) {
+      var px = (i & 1) ? r : l;
+      var py = (i & 2) ? b : t;
+      var dx = ctm[0] * px + ctm[2] * py + ctm[4];
+      var dy = ctm[1] * px + ctm[3] * py + ctm[5];
+      if (dx < minX) minX = dx;
+      if (dy < minY) minY = dy;
+      if (dx > maxX) maxX = dx;
+      if (dy > maxY) maxY = dy;
+    }
+    var x0 = Math.floor(minX), y0 = Math.floor(minY);
+    var w = Math.ceil(maxX) - x0, h = Math.ceil(maxY) - y0;
+    if (w <= 0 || h <= 0 || w > 4096 || h > 4096) return null;
+    var target = document.createElement("canvas");
+    target.width = w;
+    target.height = h;
+    var ictx = target.getContext("2d");
+    ictx.setTransform(1, 0, 0, 1, 0, 0);
+    ictx.setTransform(ctm[0], ctm[1], ctm[2], ctm[3], ctm[4] - x0, ctm[5] - y0);
+    ictx.font = mctx.font;
+    ictx.textBaseline = "alphabetic";
+    ictx.textAlign = "start";
+    ictx.fillStyle = rgba(color);
+    ictx.fillText(text, x, baseline);
+    return { canvas: target, x0: x0, y0: y0, w: w, h: h };
   }
 
   function multiplyCtm(a, b) {
@@ -365,31 +459,432 @@ function cssFamilyOf(name) {
     ];
   }
 
-  function roundedSubpath(x, y, w, h, radii) {
+  function roundedSubpath(c2d, x, y, w, h, radii) {
     var limit = Math.min(w, h) / 2;
     var r = radii.map(function (value) { return Math.max(0, Math.min(value, limit)); });
-    if (ctx.roundRect) {
-      ctx.roundRect(x, y, w, h, r);
+    if (c2d.roundRect) {
+      c2d.roundRect(x, y, w, h, r);
       return;
     }
-    ctx.moveTo(x + r[0], y);
-    ctx.lineTo(x + w - r[1], y);
-    ctx.arcTo(x + w, y, x + w, y + r[1], r[1]);
-    ctx.lineTo(x + w, y + h - r[2]);
-    ctx.arcTo(x + w, y + h, x + w - r[2], y + h, r[2]);
-    ctx.lineTo(x + r[3], y + h);
-    ctx.arcTo(x, y + h, x, y + h - r[3], r[3]);
-    ctx.lineTo(x, y + r[0]);
-    ctx.arcTo(x, y, x + r[0], y, r[0]);
-    ctx.closePath();
+    c2d.moveTo(x + r[0], y);
+    c2d.lineTo(x + w - r[1], y);
+    c2d.arcTo(x + w, y, x + w, y + r[1], r[1]);
+    c2d.lineTo(x + w, y + h - r[2]);
+    c2d.arcTo(x + w, y + h, x + w - r[2], y + h, r[2]);
+    c2d.lineTo(x + r[3], y + h);
+    c2d.arcTo(x, y + h, x, y + h - r[3], r[3]);
+    c2d.lineTo(x, y + r[0]);
+    c2d.arcTo(x, y, x + r[0], y, r[0]);
+    c2d.closePath();
   }
 
-  function roundedPath(x, y, w, h, radii) {
-    ctx.beginPath();
-    roundedSubpath(x, y, w, h, radii);
+  function roundedPath(c2d, x, y, w, h, radii) {
+    c2d.beginPath();
+    roundedSubpath(c2d, x, y, w, h, radii);
   }
 
   function render() {
+    if (glr) renderGl();
+    else if (ctx) renderCanvas();
+  }
+
+
+  // ---- WebGL 2 presenter --------------------------------------------------
+  //
+  // MyGo's web backend draws every op as one instanced quad through a
+  // signed-distance shader (`internal/gpu/gl`): fills, borders, lines and
+  // gradients from distances, text/SVG/shadow coverage as Canvas 2D-built
+  // textures (`internal/text/canvas_js.go`). The functions below mirror
+  // that arrangement for MyRust's display list; when WebGL 2 is missing or
+  // the shader fails to build, the page stays on the Canvas 2D renderer.
+  function makeGlRenderer(canvas) {
+    var gl = null;
+    try {
+      gl = canvas.getContext("webgl2", {
+        alpha: false, premultipliedAlpha: false, antialias: false,
+        depth: false, stencil: false, preserveDrawingBuffer: true,
+        powerPreference: "default"
+      });
+    } catch (error) { gl = null; }
+    if (!gl || (gl.isContextLost && gl.isContextLost())) return null;
+
+    var vertex = [
+      "#version 300 es",
+      "layout(location = 0) in vec4 aRect;",
+      "layout(location = 1) in vec4 aRadii;",
+      "layout(location = 2) in vec4 aColor;",
+      "layout(location = 3) in vec4 aGrad;",
+      "layout(location = 4) in vec4 aDev;",
+      "layout(location = 5) in vec4 aInv;",
+      "layout(location = 6) in vec4 aInvT;",
+      "layout(location = 7) in vec4 aSeg;",
+      "layout(location = 8) in vec4 aHalf;",
+      "uniform vec2 uSize;",
+      "out vec2 vLocal;",
+      "out vec2 vDev;",
+      "flat out vec4 vRect;",
+      "flat out vec4 vRadii;",
+      "flat out vec4 vColor;",
+      "flat out vec4 vGrad;",
+      "flat out vec4 vSeg;",
+      "flat out vec4 vHalf;",
+      "flat out vec4 vParams;",
+      "void main() {",
+      "  vec2 corner = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1));",
+      "  vec2 dev = aDev.xy + corner * aDev.zw;",
+      "  vLocal = vec2(aInv.x * dev.x + aInv.y * dev.y + aInvT.x,",
+      "                aInv.z * dev.x + aInv.w * dev.y + aInvT.y);",
+      "  vDev = dev;",
+      "  vRect = aRect; vRadii = aRadii; vColor = aColor;",
+      "  vGrad = aGrad; vSeg = aSeg; vHalf = aHalf;",
+      "  vParams = vec4(aInvT.z, aInvT.w, 0.0, 0.0);",
+      "  gl_Position = vec4(dev.x / uSize.x * 2.0 - 1.0,",
+      "                     1.0 - dev.y / uSize.y * 2.0, 0.0, 1.0);",
+      "}"
+    ].join("\n");
+
+    var fragment = [
+      "#version 300 es",
+      "precision highp float;",
+      "in vec2 vLocal;",
+      "in vec2 vDev;",
+      "flat in vec4 vRect;",
+      "flat in vec4 vRadii;",
+      "flat in vec4 vColor;",
+      "flat in vec4 vGrad;",
+      "flat in vec4 vSeg;",
+      "flat in vec4 vHalf;",
+      "flat in vec4 vParams;",
+      "uniform sampler2D uTex;",
+      "uniform sampler2D uLut;",
+      "out vec4 fragColor;",
+      "float sdRoundBox(vec2 p, vec2 b, vec4 radii) {",
+      "  vec2 rr = (p.x > 0.0) ? vec2(radii.y, radii.z) : vec2(radii.x, radii.w);",
+      "  float r = (p.y > 0.0) ? rr.y : rr.x;",
+      "  vec2 q = abs(p) - b + r;",
+      "  return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;",
+      "}",
+      "float segDistance(vec2 p, vec2 a, vec2 b) {",
+      "  vec2 pa = p - a, ba = b - a;",
+      "  float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-12), 0.0, 1.0);",
+      "  return length(pa - ba * h);",
+      "}",
+      "void main() {",
+      "  float kind = vParams.x;",
+      "  float scale = vParams.y;",
+      "  vec4 color = vColor;",
+      "  float cover = 1.0;",
+      "  if (kind < 0.5) {",
+      "    vec2 b = vRect.zw * 0.5;",
+      "    cover = clamp(0.5 - sdRoundBox(vLocal - vRect.xy - b, b, vRadii) * scale, 0.0, 1.0);",
+      "  } else if (kind < 1.5) {",
+      "    float d = segDistance(vLocal, vSeg.xy, vSeg.zw) - vHalf.x;",
+      "    cover = clamp(0.5 - d * scale, 0.0, 1.0);",
+      "  } else if (kind < 2.5) {",
+      "    vec2 b = vRect.zw * 0.5;",
+      "    cover = clamp(0.5 - sdRoundBox(vLocal - vRect.xy - b, b, vRadii) * scale, 0.0, 1.0);",
+      "    vec2 grad = vGrad.zw - vGrad.xy;",
+      "    float dd = dot(grad, grad);",
+      "    float t = dd > 0.0 ? dot(vLocal - vGrad.xy, grad) / dd : 0.0;",
+      "    color = texture(uLut, vec2(clamp(t, 0.0, 1.0), 0.5));",
+      "  } else {",
+      "    vec2 uv = (vDev - vGrad.xy) / vGrad.zw;",
+      "    vec4 texel = texture(uTex, uv);",
+      "    if (kind < 3.5) {",
+      "      color = texel;",
+      "    } else {",
+      "      color = vec4(vColor.rgb, texel.a * vColor.a);",
+      "    }",
+      "  }",
+      "  fragColor = vec4(color.rgb, color.a * cover);",
+      "  if (fragColor.a <= 0.0) discard;",
+      "}"
+    ].join("\n");
+
+    function compile(type, source) {
+      var shader = gl.createShader(type);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        console.error("MyRust WebGL shader:", gl.getShaderInfoLog(shader));
+        gl.deleteShader(shader);
+        return null;
+      }
+      return shader;
+    }
+    var vs = compile(gl.VERTEX_SHADER, vertex);
+    var fs = compile(gl.FRAGMENT_SHADER, fragment);
+    if (!vs || !fs) { if (vs) gl.deleteShader(vs); if (fs) gl.deleteShader(fs); return null; }
+    var program = gl.createProgram();
+    gl.attachShader(program, vs);
+    gl.attachShader(program, fs);
+    gl.linkProgram(program);
+    gl.deleteShader(vs);
+    gl.deleteShader(fs);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      console.error("MyRust WebGL program:", gl.getProgramInfoLog(program));
+      gl.deleteProgram(program);
+      return null;
+    }
+    gl.useProgram(program);
+    var uSize = gl.getUniformLocation(program, "uSize");
+    gl.uniform1i(gl.getUniformLocation(program, "uTex"), 0);
+    gl.uniform1i(gl.getUniformLocation(program, "uLut"), 1);
+    gl.enable(gl.BLEND);
+    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.STENCIL_TEST);
+    gl.disable(gl.CULL_FACE);
+
+    var vao = gl.createVertexArray();
+    var buffer = gl.createBuffer();
+    var stride = GFLOAT * 4;
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    var offsets = [0, 4, 8, 12, 16, 20, 24, 28, 32];
+    for (var a = 0; a < offsets.length; a++) {
+      gl.enableVertexAttribArray(a);
+      gl.vertexAttribPointer(a, 4, gl.FLOAT, false, stride, offsets[a] * 4);
+      gl.vertexAttribDivisor(a, 1);
+    }
+    gl.bindVertexArray(null);
+
+    var instances = new Float32Array(GFLOAT * 512);
+    var count = 0;
+    var bufferBytes = 0;
+    var frame = 0;
+    var frameW = 1, frameH = 1;
+    var clip = [];
+    var maskCache = new Map();
+    var maskPixels = 0;
+    var lutCache = new Map();
+
+    function color4(color) {
+      return [color[0] / 255, color[1] / 255, color[2] / 255, color[3] / 255];
+    }
+
+    function transformOf(ctm) {
+      var a = ctm[0], b = ctm[2], c = ctm[1], d = ctm[3];
+      var det = a * d - b * c;
+      if (!isFinite(det) || Math.abs(det) < 1e-9) return null;
+      var A = d / det, B = -b / det, C = -c / det, D = a / det;
+      return {
+        A: A, B: B, C: C, D: D,
+        bx: -(A * ctm[4] + B * ctm[5]),
+        by: -(C * ctm[4] + D * ctm[5]),
+        scale: Math.sqrt(Math.abs(det))
+      };
+    }
+
+    function deviceBox(x, y, w, h, ctm, margin) {
+      var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (var i = 0; i < 4; i++) {
+        var px = (i & 1) ? x + w : x;
+        var py = (i & 2) ? y + h : y;
+        var dx = ctm[0] * px + ctm[2] * py + ctm[4];
+        var dy = ctm[1] * px + ctm[3] * py + ctm[5];
+        if (dx < minX) minX = dx;
+        if (dy < minY) minY = dy;
+        if (dx > maxX) maxX = dx;
+        if (dy > maxY) maxY = dy;
+      }
+      minX -= margin; minY -= margin; maxX += margin; maxY += margin;
+      return [minX, minY, maxX - minX, maxY - minY];
+    }
+
+    function addInstance(rect, radii, color, grad, dev, inv, kind, scale, seg, half) {
+      if ((count + 1) * GFLOAT > instances.length) {
+        var grown = new Float32Array(instances.length * 2);
+        grown.set(instances.subarray(0, count * GFLOAT));
+        instances = grown;
+      }
+      var o = count * GFLOAT;
+      var data = instances;
+      data[o] = rect[0]; data[o + 1] = rect[1]; data[o + 2] = rect[2]; data[o + 3] = rect[3];
+      data[o + 4] = radii[0]; data[o + 5] = radii[1]; data[o + 6] = radii[2]; data[o + 7] = radii[3];
+      data[o + 8] = color[0]; data[o + 9] = color[1]; data[o + 10] = color[2]; data[o + 11] = color[3];
+      data[o + 12] = grad[0]; data[o + 13] = grad[1]; data[o + 14] = grad[2]; data[o + 15] = grad[3];
+      data[o + 16] = dev[0]; data[o + 17] = dev[1]; data[o + 18] = dev[2]; data[o + 19] = dev[3];
+      data[o + 20] = inv.A; data[o + 21] = inv.B; data[o + 22] = inv.C; data[o + 23] = inv.D;
+      data[o + 24] = inv.bx; data[o + 25] = inv.by; data[o + 26] = kind; data[o + 27] = scale;
+      data[o + 28] = seg[0]; data[o + 29] = seg[1]; data[o + 30] = seg[2]; data[o + 31] = seg[3];
+      data[o + 32] = half;
+      count += 1;
+      if (count >= GCAP) flush();
+    }
+
+    function flush() {
+      if (!count) return;
+      gl.bindVertexArray(vao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+      var needed = count * GFLOAT * 4;
+      if (needed > bufferBytes) {
+        gl.bufferData(gl.ARRAY_BUFFER, needed, gl.DYNAMIC_DRAW);
+        bufferBytes = needed;
+      }
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, instances.subarray(0, count * GFLOAT));
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
+      count = 0;
+    }
+
+    function upload(canvas) {
+      var tex = gl.createTexture();
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      return tex;
+    }
+
+    function cachedTexture(key, build) {
+      var hit = maskCache.get(key);
+      if (hit) { hit.used = frame; return hit; }
+      var run = build();
+      if (!run) return null;
+      var tex = upload(run.canvas);
+      var entry = { tex: tex, x0: run.x0, y0: run.y0, w: run.w, h: run.h, used: frame,
+        pixels: run.w * run.h };
+      maskCache.set(key, entry);
+      maskPixels += entry.pixels;
+      while (maskCache.size > 128 || maskPixels > 24000000) {
+        var oldest = maskCache.keys().next().value;
+        var evicted = maskCache.get(oldest);
+        maskCache.delete(oldest);
+        maskPixels -= evicted.pixels;
+        gl.deleteTexture(evicted.tex);
+      }
+      return entry;
+    }
+
+    function gradientLut(stops) {
+      var key = stops.map(function (stop) {
+        return stop.offset + ":" + stop.color.join(",");
+      }).join("|");
+      var hit = lutCache.get(key);
+      if (hit) return hit;
+      var canvas = document.createElement("canvas");
+      canvas.width = 1024;
+      canvas.height = 1;
+      var lctx = canvas.getContext("2d", { willReadFrequently: true });
+      var grad = lctx.createLinearGradient(0, 0, 1024, 0);
+      for (var i = 0; i < stops.length; i++) {
+        var c = stops[i].color;
+        grad.addColorStop(Math.max(0, Math.min(1, stops[i].offset)),
+          "rgba(" + c[0] + "," + c[1] + "," + c[2] + "," + (c[3] / 255) + ")");
+      }
+      lctx.fillStyle = grad;
+      lctx.fillRect(0, 0, 1024, 1);
+      var entry = { tex: upload(canvas) };
+      lutCache.set(key, entry);
+      if (lutCache.size > 64) {
+        var oldest = lutCache.keys().next().value;
+        var evicted = lutCache.get(oldest);
+        lutCache.delete(oldest);
+        gl.deleteTexture(evicted.tex);
+      }
+      return entry;
+    }
+
+    function applyClip() {
+      flush();
+      var r = clip.length ? clip[clip.length - 1] : [0, 0, frameW, frameH];
+      var x0 = Math.max(0, Math.round(r[0]));
+      var y0 = Math.max(0, Math.round(r[1]));
+      var x1 = Math.min(frameW, Math.max(x0, Math.round(r[2])));
+      var y1 = Math.min(frameH, Math.max(y0, Math.round(r[3])));
+      gl.enable(gl.SCISSOR_TEST);
+      gl.scissor(x0, frameH - y1, x1 - x0, y1 - y0);
+    }
+
+    return {
+      begin: function (w, h) {
+        frame += 1;
+        frameW = w; frameH = h;
+        gl.viewport(0, 0, w, h);
+        gl.uniform2f(uSize, w, h);
+        gl.disable(gl.SCISSOR_TEST);
+        gl.clearColor(1, 1, 1, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        clip.length = 0;
+        count = 0;
+      },
+      end: function () { flush(); },
+      box: function (rect, radii, color, ctm) {
+        var t = transformOf(ctm);
+        if (!t) return;
+        var limit = Math.min(rect[2], rect[3]) / 2;
+        var r = radii.map(function (value) { return Math.max(0, Math.min(value, limit)); });
+        addInstance(rect, r, color4(color), [0, 0, 0, 0],
+          deviceBox(rect[0], rect[1], rect[2], rect[3], ctm, 1.5), t, 0, t.scale,
+          [0, 0, 0, 0], 0);
+      },
+      line: function (x1, y1, x2, y2, width, color, ctm) {
+        var t = transformOf(ctm);
+        if (!t) return;
+        var d1x = ctm[0] * x1 + ctm[2] * y1 + ctm[4];
+        var d1y = ctm[1] * x1 + ctm[3] * y1 + ctm[5];
+        var d2x = ctm[0] * x2 + ctm[2] * y2 + ctm[4];
+        var d2y = ctm[1] * x2 + ctm[3] * y2 + ctm[5];
+        var pad = width / 2 * t.scale + 1.5;
+        var minX = Math.min(d1x, d2x) - pad, minY = Math.min(d1y, d2y) - pad;
+        var maxX = Math.max(d1x, d2x) + pad, maxY = Math.max(d1y, d2y) + pad;
+        addInstance([0, 0, 0, 0], [0, 0, 0, 0], color4(color), [0, 0, 0, 0],
+          [minX, minY, maxX - minX, maxY - minY], t, 1, t.scale,
+          [x1, y1, x2, y2], width / 2);
+      },
+      gradient: function (rect, radii, start, end, lut, ctm) {
+        var t = transformOf(ctm);
+        if (!t) return;
+        if (start[0] === end[0] && start[1] === end[1]) return;
+        flush();
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, lut.tex);
+        var limit = Math.min(rect[2], rect[3]) / 2;
+        var r = radii.map(function (value) { return Math.max(0, Math.min(value, limit)); });
+        addInstance(rect, r, [1, 1, 1, 1], start.concat(end),
+          deviceBox(rect[0], rect[1], rect[2], rect[3], ctm, 1.5), t, 2, t.scale,
+          [0, 0, 0, 0], 0);
+        flush();
+      },
+      mask: function (entry, tint) {
+        flush();
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, entry.tex);
+        var inv = { A: 1, B: 0, C: 0, D: 1, bx: -entry.x0, by: -entry.y0, scale: 1 };
+        addInstance([0, 0, entry.w, entry.h], [0, 0, 0, 0],
+          tint ? color4(tint) : [1, 1, 1, 1],
+          [entry.x0, entry.y0, entry.w, entry.h],
+          [entry.x0, entry.y0, entry.w, entry.h], inv,
+          tint ? 4 : 3, 1, [0, 0, 0, 0], 0);
+        flush();
+      },
+      cachedTexture: cachedTexture,
+      gradientLut: gradientLut,
+      pushClip: function (x, y, w, h) {
+        var r = [x, y, x + w, y + h];
+        if (clip.length) {
+          var p = clip[clip.length - 1];
+          r = [Math.max(p[0], r[0]), Math.max(p[1], r[1]),
+               Math.min(p[2], r[2]), Math.min(p[3], r[3])];
+        }
+        clip.push(r);
+        applyClip();
+      },
+      popClip: function () {
+        if (clip.length) {
+          clip.pop();
+          applyClip();
+        }
+      }
+    };
+  }
+
+  function renderCanvas() {
     if (!wasm) return;
     var rect = canvas.getBoundingClientRect();
     if (rect.width < 1 || rect.height < 1) return;
@@ -400,6 +895,8 @@ function cssFamilyOf(name) {
     if (wasm.demo_set_disabled) wasm.demo_set_disabled(disabledDemo ? 1 : 0);
     if (wasm.demo_get_disabled) window.__r10disabled = wasm.demo_get_disabled();
     if (!wasm.demo_render(slugId, rect.width, rect.height, dpr)) return;
+    wantsFrame = !!(wasm.demo_needs_frame && wasm.demo_needs_frame());
+    syncTextInput();
     var commandLen = wasm.demo_command_len();
     if (!commandLen) return;
     var commandPtr = wasm.demo_command_ptr();
@@ -452,7 +949,7 @@ function cssFamilyOf(name) {
         if (rw > 0 && rh > 0) {
           var box = snapRect(ctm, x, y, rw, rh, dpr);
           if (window.__lastCommands) window.__lastCommands.push({ t: "RR", raw: [x, y, rw, rh], box: box, ctm: ctm.slice(), color: color });
-          roundedPath(box[0], box[1], box[2], box[3], [tl, tr, br, bl]);
+          roundedPath(ctx, box[0], box[1], box[2], box[3], [tl, tr, br, bl]);
           ctx.fillStyle = rgba(color);
           ctx.fill();
         }
@@ -469,7 +966,7 @@ function cssFamilyOf(name) {
           var circleBox = snapRect(ctm, cx - radius, cy - radius, radius * 2, radius * 2, dpr);
           var circleR = Math.min(circleBox[2], circleBox[3]) / 2;
           if (window.__lastCommands) window.__lastCommands.push({ t: "Circle", raw: [cx, cy, radius], box: circleBox, ctm: ctm.slice(), color: color });
-          roundedPath(circleBox[0], circleBox[1], circleBox[2], circleBox[3], [circleR, circleR, circleR, circleR]);
+          roundedPath(ctx, circleBox[0], circleBox[1], circleBox[2], circleBox[3], [circleR, circleR, circleR, circleR]);
           ctx.fillStyle = rgba(color);
           ctx.fill();
         }
@@ -561,18 +1058,28 @@ function cssFamilyOf(name) {
           for (var lineIndex = 0; lineIndex < lines.length; lineIndex++) {
             if (!lines[lineIndex]) continue;
             var lineBaseline = snapDevice(ty + lineIndex * lineHeight + ascentOf(ctx), ctm[5], ctm[3]);
-            if (!window.__plainText && fillTextClustered(lines[lineIndex], tx, lineBaseline, color, ctm)) {
+            if (!shadeCanvas) shadeCanvas = document.createElement("canvas");
+            var run = window.__plainText ? null
+              : buildTextRun(ctx, lines[lineIndex], tx, lineBaseline, color, ctm, shadeCanvas);
+            if (run) {
               // Drawn through the shade's coverage, as MyGo does.
+              paintTextRun2d(run);
             } else {
               ctx.fillStyle = rgba(color);
               ctx.fillText(lines[lineIndex], tx, lineBaseline);
             }
           }
-        } else if (!window.__plainText && fillTextClustered(str, tx, baseline, color, ctm)) {
-          // Drawn through the shade's coverage, as MyGo does.
         } else {
-          ctx.fillStyle = rgba(color);
-          ctx.fillText(str, tx, baseline);
+          if (!shadeCanvas) shadeCanvas = document.createElement("canvas");
+          var single = window.__plainText ? null
+            : buildTextRun(ctx, str, tx, baseline, color, ctm, shadeCanvas);
+          if (single) {
+            // Drawn through the shade's coverage, as MyGo does.
+            paintTextRun2d(single);
+          } else {
+            ctx.fillStyle = rgba(color);
+            ctx.fillText(str, tx, baseline);
+          }
         }
       } else if (tag === 5) { // SvgPath
         var x = view.getFloat32(state.off, true); state.off += 4;
@@ -679,7 +1186,7 @@ function cssFamilyOf(name) {
         ctx.fillStyle = gradient;
         if (rtl > 0 || rtr > 0 || rbr > 0 || rbl > 0) {
           // MyGo's FillGradient rounds its box with the theme radius.
-          roundedPath(gsnap[0], gsnap[1], gsnap[2], gsnap[3], [rtl, rtr, rbr, rbl]);
+          roundedPath(ctx, gsnap[0], gsnap[1], gsnap[2], gsnap[3], [rtl, rtr, rbr, rbl]);
           ctx.fill();
         } else {
           ctx.fillRect(gsnap[0], gsnap[1], gsnap[2], gsnap[3]);
@@ -751,7 +1258,7 @@ function cssFamilyOf(name) {
           // (`ui/paint.go` shadow), so its edge lands on the same device
           // pixels as the face that covers it.
           var sbox = snapRect(ctm, sx, sy, sw, sh, dpr);
-          roundedSubpath(sbox[0], sbox[1], sbox[2], sbox[3], [sr, sr, sr, sr]);
+          roundedSubpath(ctx, sbox[0], sbox[1], sbox[2], sbox[3], [sr, sr, sr, sr]);
           ctx.fillStyle = "#ffffff";
           ctx.fill();
           ctx.restore();
@@ -766,9 +1273,413 @@ function cssFamilyOf(name) {
     }
   }
 
+
+  // deviceBoxOf returns the device-space AABB of a local box under ctm,
+  // grown by margin in device pixels.
+  function deviceBoxOf(x, y, w, h, ctm, margin) {
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (var i = 0; i < 4; i++) {
+      var px = (i & 1) ? x + w : x;
+      var py = (i & 2) ? y + h : y;
+      var dx = ctm[0] * px + ctm[2] * py + ctm[4];
+      var dy = ctm[1] * px + ctm[3] * py + ctm[5];
+      if (dx < minX) minX = dx;
+      if (dy < minY) minY = dy;
+      if (dx > maxX) maxX = dx;
+      if (dy > maxY) maxY = dy;
+    }
+    minX -= margin; minY -= margin; maxX += margin; maxY += margin;
+    return [minX, minY, maxX - minX, maxY - minY];
+  }
+
+  // drawGlIcon blits one SVG icon through the presenter, as MyGo's
+  // drawIcon does: the box snapped to device pixels, the SVG rasterized
+  // into a mask of that whole size, the mask blitted at a whole position.
+  function drawGlIcon(presenter, pathData, roundCaps, fill, stroke, strokeWidth,
+                      rw, rh, dx0, dy0, mw, mh) {
+    var key = "I|" + pathData + "|" + roundCaps + "|" + (fill ? fill.join(",") : "-") + "|" +
+      (stroke ? stroke.join(",") : "-") + "|" + strokeWidth + "|" + rw + "|" + rh + "|" +
+      dx0 + "|" + dy0 + "|" + mw + "|" + mh;
+    var entry = presenter.cachedTexture(key, function () {
+      var c = document.createElement("canvas");
+      c.width = mw;
+      c.height = mh;
+      var ictx = c.getContext("2d");
+      ictx.setTransform(1, 0, 0, 1, 0, 0);
+      ictx.setTransform(mw / rw, 0, 0, mh / rh, 0, 0);
+      ictx.lineCap = roundCaps ? "round" : "butt";
+      ictx.lineJoin = roundCaps ? "round" : "miter";
+      var p = new Path2D(pathData);
+      if (fill) { ictx.fillStyle = rgba(fill); ictx.fill(p); }
+      if (stroke) { ictx.lineWidth = strokeWidth; ictx.strokeStyle = rgba(stroke); ictx.stroke(p); }
+      return { canvas: c, x0: dx0, y0: dy0, w: mw, h: mh };
+    });
+    if (entry) presenter.mask(entry, null);
+  }
+
+  // drawGlText paints one run through the GPU presenter: the clustered
+  // coverage mask when it applies, otherwise a whole-run fillText mask for
+  // color glyphs and rotated transforms.
+  function drawGlText(mctx, presenter, str, x, baseline, color, ctm) {
+    if (!str) return;
+    var plain = !!window.__plainText;
+    var key = (plain ? "TP|" : "TC|") + mctx.font + "|" + rgba(color) + "|" + str + "|" +
+      x + "|" + baseline + "|" + ctm.join(",");
+    var entry = presenter.cachedTexture(key, function () {
+      var run = plain ? null : buildTextRun(mctx, str, x, baseline, color, ctm, null);
+      if (!run) run = buildPlainRun(mctx, str, x, baseline, color, ctm);
+      return run;
+    });
+    if (entry) presenter.mask(entry, null);
+  }
+
+  // pathBounds returns the geometry bounds of SVG path data, through the
+  // browser's own path parser: charts and hand-built paths carry no
+  // viewport box, so the mask has to come from the path itself.
+  var bboxCache = new Map();
+  var bboxSvg = null;
+  var bboxPath = null;
+  function pathBounds(pathData) {
+    var hit = bboxCache.get(pathData);
+    if (hit) return hit;
+    if (!bboxSvg) {
+      var ns = "http://www.w3.org/2000/svg";
+      bboxSvg = document.createElementNS(ns, "svg");
+      bboxSvg.setAttribute("width", "0");
+      bboxSvg.setAttribute("height", "0");
+      bboxSvg.style.cssText = "position:absolute;left:0;top:0;width:0;height:0;overflow:hidden";
+      bboxPath = document.createElementNS(ns, "path");
+      bboxSvg.appendChild(bboxPath);
+      document.body.appendChild(bboxSvg);
+    }
+    bboxPath.setAttribute("d", pathData);
+    var box;
+    try { box = bboxPath.getBBox(); } catch (error) { return null; }
+    var bounds = { x: box.x, y: box.y, width: box.width, height: box.height };
+    if (bboxCache.size > 512) bboxCache.clear();
+    bboxCache.set(pathData, bounds);
+    return bounds;
+  }
+
+  // renderGl paints the display list through the WebGL 2 presenter. It
+  // walks the same commands, with the same snapping and tracing, as the
+  // Canvas 2D renderer above; text, SVG and shadow coverage masks are
+  // cached by content across frames.
+  function renderGl() {
+    if (!wasm) return;
+    var rect = canvas.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return;
+    var dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    var w = Math.round(rect.width * dpr), h = Math.round(rect.height * dpr);
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    window.__r10dbg = {disabled: disabledDemo, has: !!wasm.demo_set_disabled};
+    if (wasm.demo_set_disabled) wasm.demo_set_disabled(disabledDemo ? 1 : 0);
+    if (wasm.demo_get_disabled) window.__r10disabled = wasm.demo_get_disabled();
+    if (!wasm.demo_render(slugId, rect.width, rect.height, dpr)) return;
+    wantsFrame = !!(wasm.demo_needs_frame && wasm.demo_needs_frame());
+    syncTextInput();
+    var commandLen = wasm.demo_command_len();
+    if (!commandLen) return;
+    var commandPtr = wasm.demo_command_ptr();
+    var bytes = new Uint8Array(wasm.memory.buffer, commandPtr, commandLen);
+    var view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    var state = { off: 0 };
+    var ctm = [dpr, 0, 0, dpr, 0, 0];
+    if (window.__traceCommands) { window.__lastCommands = []; }
+    var ctmStack = [];
+    var scissorDepth = 0;
+    pixelWidth = w; pixelHeight = h;
+    glr.begin(w, h);
+
+    while (state.off < commandLen) {
+      var tag = bytes[state.off++];
+      if (tag === 0) { // Rect
+        var x = view.getFloat32(state.off, true); state.off += 4;
+        var y = view.getFloat32(state.off, true); state.off += 4;
+        var rw = view.getFloat32(state.off, true); state.off += 4;
+        var rh = view.getFloat32(state.off, true); state.off += 4;
+        var color = readColor(bytes, state);
+        var box = snapRect(ctm, x, y, rw, rh, dpr);
+        if (window.__lastCommands) window.__lastCommands.push({ t: "Rect", raw: [x, y, rw, rh], box: box, ctm: ctm.slice(), color: color });
+        glr.box(box, [0, 0, 0, 0], color, ctm);
+      } else if (tag === 1) { // RoundedRect
+        var x = view.getFloat32(state.off, true); state.off += 4;
+        var y = view.getFloat32(state.off, true); state.off += 4;
+        var rw = view.getFloat32(state.off, true); state.off += 4;
+        var rh = view.getFloat32(state.off, true); state.off += 4;
+        var tl = view.getFloat32(state.off, true); state.off += 4;
+        var tr = view.getFloat32(state.off, true); state.off += 4;
+        var br = view.getFloat32(state.off, true); state.off += 4;
+        var bl = view.getFloat32(state.off, true); state.off += 4;
+        var color = readColor(bytes, state);
+        if (rw > 0 && rh > 0) {
+          var box = snapRect(ctm, x, y, rw, rh, dpr);
+          if (window.__lastCommands) window.__lastCommands.push({ t: "RR", raw: [x, y, rw, rh], box: box, ctm: ctm.slice(), color: color });
+          glr.box(box, [tl, tr, br, bl], color, ctm);
+        }
+      } else if (tag === 2) { // Circle
+        var cx = view.getFloat32(state.off, true); state.off += 4;
+        var cy = view.getFloat32(state.off, true); state.off += 4;
+        var radius = view.getFloat32(state.off, true); state.off += 4;
+        var color = readColor(bytes, state);
+        if (radius > 0) {
+          var circleBox = snapRect(ctm, cx - radius, cy - radius, radius * 2, radius * 2, dpr);
+          var circleR = Math.min(circleBox[2], circleBox[3]) / 2;
+          if (window.__lastCommands) window.__lastCommands.push({ t: "Circle", raw: [cx, cy, radius], box: circleBox, ctm: ctm.slice(), color: color });
+          glr.box(circleBox, [circleR, circleR, circleR, circleR], color, ctm);
+        }
+      } else if (tag === 3) { // Line
+        var x1 = view.getFloat32(state.off, true); state.off += 4;
+        var y1 = view.getFloat32(state.off, true); state.off += 4;
+        var x2 = view.getFloat32(state.off, true); state.off += 4;
+        var y2 = view.getFloat32(state.off, true); state.off += 4;
+        var width = view.getFloat32(state.off, true); state.off += 4;
+        var color = readColor(bytes, state);
+        if (width > 0) {
+          var horizontal = Math.abs(y2 - y1) < 0.01;
+          var vertical = Math.abs(x2 - x1) < 0.01;
+          var sx1 = x1, sy1 = y1, sx2 = x2, sy2 = y2;
+          if (axisAligned(ctm)) {
+            if (horizontal) {
+              sy1 = sy2 = snapRule(y1, ctm[5], ctm[3], width, dpr);
+              sx1 = snapAxis(x1, ctm[4], ctm[0]);
+              sx2 = snapAxis(x2, ctm[4], ctm[0]);
+            } else if (vertical) {
+              sx1 = sx2 = snapRule(x1, ctm[4], ctm[0], width, dpr);
+              sy1 = snapAxis(y1, ctm[5], ctm[3]);
+              sy2 = snapAxis(y2, ctm[5], ctm[3]);
+            }
+          }
+          if (window.__lastCommands) window.__lastCommands.push({ t: "Line", raw: [x1, y1, x2, y2, width], snapped: [sx1, sy1, sx2, sy2], ctm: ctm.slice(), color: color });
+          glr.line(sx1, sy1, sx2, sy2, width, color, ctm);
+        }
+      } else if (tag === 4) { // Text
+        var tx = view.getFloat32(state.off, true); state.off += 4;
+        var ty = view.getFloat32(state.off, true); state.off += 4;
+        var fontSize = view.getFloat32(state.off, true); state.off += 4;
+        var weight = view.getUint16(state.off, true); state.off += 2;
+        var italic = bytes[state.off++] === 1;
+        var mono = bytes[state.off++] === 1;
+        var color = readColor(bytes, state);
+        var maxWidth = view.getFloat32(state.off, true); state.off += 4;
+        /* alignment = */ state.off += 1;
+        var hasFamily = bytes[state.off++];
+        var family = null;
+        if (hasFamily) {
+          var flen = view.getUint32(state.off, true); state.off += 4;
+          family = new TextDecoder().decode(bytes.subarray(state.off, state.off + flen));
+          state.off += flen;
+        }
+        var tlen = view.getUint32(state.off, true); state.off += 4;
+        var str = new TextDecoder().decode(bytes.subarray(state.off, state.off + tlen));
+        state.off += tlen;
+        ctx.textBaseline = "alphabetic";
+        ctx.textAlign = "start";
+        ctx.font = (italic ? "italic " : "") + (weight > 0 ? weight : 400) + " " + fontSize +
+          "px " + (family ? cssFamilyOf(family) : cssFamilyOf(mono ? "monospace" : null));
+        if (window.__lastCommands) window.__lastCommands.push({ t: "Text", str: str, raw: [tx, ty], size: fontSize, weight: weight, ctm: ctm.slice() });
+        var baseline = snapDevice(ty + ascentOf(ctx), ctm[5], ctm[3]);
+        var lines = maxWidth > 0 && isFinite(maxWidth)
+          ? wrapCanvasText(ctx, str, maxWidth)
+          : [str];
+        if (lines.length > 1) {
+          var lineHeight = lineHeightOf(ctx);
+          for (var lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+            if (!lines[lineIndex]) continue;
+            var lineBaseline = snapDevice(ty + lineIndex * lineHeight + ascentOf(ctx), ctm[5], ctm[3]);
+            drawGlText(ctx, glr, lines[lineIndex], tx, lineBaseline, color, ctm);
+          }
+        } else {
+          drawGlText(ctx, glr, str, tx, baseline, color, ctm);
+        }
+      } else if (tag === 5) { // SvgPath
+        var x = view.getFloat32(state.off, true); state.off += 4;
+        var y = view.getFloat32(state.off, true); state.off += 4;
+        var rw = view.getFloat32(state.off, true); state.off += 4;
+        var rh = view.getFloat32(state.off, true); state.off += 4;
+        var hasFill = bytes[state.off++];
+        var fill = hasFill ? readColor(bytes, state) : null;
+        var hasStroke = bytes[state.off++];
+        var stroke = hasStroke ? readColor(bytes, state) : null;
+        var strokeWidth = view.getFloat32(state.off, true); state.off += 4;
+        var plen = view.getUint32(state.off, true); state.off += 4;
+        var pathData = new TextDecoder().decode(bytes.subarray(state.off, state.off + plen));
+        state.off += plen;
+        var roundCaps = pathData.indexOf("!round!") === 0;
+        if (roundCaps) pathData = pathData.slice(7);
+        var icon = axisAligned(ctm) && Math.abs(ctm[0] - dpr) > 1e-4;
+        if (icon && rw > 0 && rh > 0) {
+          var dx0 = Math.round(x * ctm[0] + ctm[4]);
+          var dy0 = Math.round(y * ctm[3] + ctm[5]);
+          var mw = Math.round((x + rw) * ctm[0] + ctm[4]) - dx0;
+          var mh = Math.round((y + rh) * ctm[3] + ctm[5]) - dy0;
+          if (mw > 0 && mh > 0 && mw <= 512 && mh <= 512) {
+            if (window.__lastCommands) window.__lastCommands.push({ t: "Svg", raw: [x, y, rw, rh], ctm: ctm.slice(), stroke: stroke, fill: fill, path: pathData.slice(0, 80), mask: [dx0, dy0, mw, mh] });
+            drawGlIcon(glr, pathData, roundCaps, fill, stroke, strokeWidth, rw, rh, dx0, dy0, mw, mh);
+            continue;
+          }
+        }
+        // A path that is not an icon keeps its fractional position and its
+        // own stroke caps: rasterize it into a device-space mask.
+        if (window.__lastCommands) window.__lastCommands.push({ t: "Svg", raw: [x, y, rw, rh], ctm: ctm.slice(), stroke: stroke, fill: fill, path: pathData.slice(0, 80) });
+        var mat = multiplyCtm(ctm, [1, 0, 0, 1, x, y]);
+        var bounds = pathBounds(pathData);
+        if (bounds && (bounds.width > 0 || bounds.height > 0)) {
+          var pad = (stroke ? strokeWidth / 2 : 0) + 1;
+          var dev = deviceBoxOf(bounds.x, bounds.y, bounds.width, bounds.height, mat, pad);
+          var px0 = Math.floor(dev[0]);
+          var py0 = Math.floor(dev[1]);
+          var pw = Math.ceil(dev[0] + dev[2]) - px0;
+          var ph = Math.ceil(dev[1] + dev[3]) - py0;
+          if (pw > 0 && ph > 0 && pw <= 4096 && ph <= 4096) {
+            var key = "S|" + pathData + "|" + (fill ? fill.join(",") : "-") + "|" +
+              (stroke ? stroke.join(",") : "-") + "|" + strokeWidth + "|" + roundCaps + "|" +
+              mat.join(",") + "|" + px0 + "," + py0 + "," + pw + "," + ph;
+            var entry = glr.cachedTexture(key, function () {
+              var c = document.createElement("canvas");
+              c.width = pw;
+              c.height = ph;
+              var ictx = c.getContext("2d");
+              ictx.setTransform(1, 0, 0, 1, 0, 0);
+              ictx.setTransform(mat[0], mat[1], mat[2], mat[3], mat[4] - px0, mat[5] - py0);
+              ictx.lineCap = "round";
+              ictx.lineJoin = "round";
+              var p = new Path2D(pathData);
+              if (fill) { ictx.fillStyle = rgba(fill); ictx.fill(p); }
+              if (stroke) { ictx.lineWidth = strokeWidth; ictx.strokeStyle = rgba(stroke); ictx.stroke(p); }
+              return { canvas: c, x0: px0, y0: py0, w: pw, h: ph };
+            });
+            if (entry) glr.mask(entry, null);
+          }
+        }
+      } else if (tag === 6) { // LinearGradient
+        var x = view.getFloat32(state.off, true); state.off += 4;
+        var y = view.getFloat32(state.off, true); state.off += 4;
+        var rw = view.getFloat32(state.off, true); state.off += 4;
+        var rh = view.getFloat32(state.off, true); state.off += 4;
+        var gsx = view.getFloat32(state.off, true); state.off += 4;
+        var gsy = view.getFloat32(state.off, true); state.off += 4;
+        var gex = view.getFloat32(state.off, true); state.off += 4;
+        var gey = view.getFloat32(state.off, true); state.off += 4;
+        var rtl = view.getFloat32(state.off, true); state.off += 4;
+        var rtr = view.getFloat32(state.off, true); state.off += 4;
+        var rbr = view.getFloat32(state.off, true); state.off += 4;
+        var rbl = view.getFloat32(state.off, true); state.off += 4;
+        var stopCount = view.getUint16(state.off, true); state.off += 2;
+        var stops = [];
+        for (var i = 0; i < stopCount; i++) {
+          var offset = view.getFloat32(state.off, true); state.off += 4;
+          var stopColor = readColor(bytes, state);
+          stops.push({ offset: Math.max(0, Math.min(1, offset)), color: stopColor });
+        }
+        if (window.__lastCommands) window.__lastCommands.push({ t: "Grad", raw: [x, y, rw, rh], rad: [rtl, rtr, rbr, rbl], ctm: ctm.slice() });
+        var gsnap = snapRect(ctm, x, y, rw, rh, dpr);
+        var lut = glr.gradientLut(stops);
+        glr.gradient(gsnap, [rtl, rtr, rbr, rbl],
+          [x + gsx * rw, y + gsy * rh], [x + gex * rw, y + gey * rh], lut, ctm);
+      } else if (tag === 7) { // ScissorPush, physical AABB
+        var x = view.getFloat32(state.off, true); state.off += 4;
+        var y = view.getFloat32(state.off, true); state.off += 4;
+        var rw = view.getFloat32(state.off, true); state.off += 4;
+        var rh = view.getFloat32(state.off, true); state.off += 4;
+        if (window.__lastCommands) window.__lastCommands.push({ t: "Scissor", raw: [x, y, rw, rh], ctm: ctm.slice() });
+        glr.pushClip(x, y, Math.max(0, rw), Math.max(0, rh));
+        scissorDepth += 1;
+      } else if (tag === 8) { // ScissorPop
+        if (scissorDepth > 0) {
+          glr.popClip();
+          scissorDepth -= 1;
+        }
+      } else if (tag === 9) { // TransformPush
+        var m = [
+          view.getFloat32(state.off, true), view.getFloat32(state.off + 4, true),
+          view.getFloat32(state.off + 8, true), view.getFloat32(state.off + 12, true),
+          view.getFloat32(state.off + 16, true), view.getFloat32(state.off + 20, true)
+        ];
+        state.off += 24;
+        ctmStack.push(ctm.slice());
+        ctm = multiplyCtm(ctm, m);
+      } else if (tag === 10) { // TransformPop
+        if (ctmStack.length) ctm = ctmStack.pop();
+      } else if (tag === 11) { // Shadow
+        var sx = view.getFloat32(state.off, true); state.off += 4;
+        var sy = view.getFloat32(state.off, true); state.off += 4;
+        var sw = view.getFloat32(state.off, true); state.off += 4;
+        var sh = view.getFloat32(state.off, true); state.off += 4;
+        var sr = view.getFloat32(state.off, true); state.off += 4;
+        var sdx = view.getFloat32(state.off, true); state.off += 4;
+        var sdy = view.getFloat32(state.off, true); state.off += 4;
+        var sblur = view.getFloat32(state.off, true); state.off += 4;
+        var scol = readColor(bytes, state);
+        if (window.__lastCommands) window.__lastCommands.push({ t: "Shadow", raw: [sx, sy, sw, sh, sr, sdx, sdy, sblur], color: scol });
+        if (sw > 0 && sh > 0 && sblur > 0 && scol[3] > 0) {
+          var sbox = snapRect(ctm, sx, sy, sw, sh, dpr);
+          var margin = sblur * dpr * 2 + Math.max(Math.abs(sdx * dpr), Math.abs(sdy * dpr)) + 3;
+          var dev = deviceBoxOf(sbox[0], sbox[1], sbox[2], sbox[3], ctm, margin);
+          var hx0 = Math.floor(dev[0]);
+          var hy0 = Math.floor(dev[1]);
+          var hw = Math.ceil(dev[0] + dev[2]) - hx0;
+          var hh = Math.ceil(dev[1] + dev[3]) - hy0;
+          if (hw > 0 && hh > 0 && hw <= 4096 && hh <= 4096) {
+            var key = "H|" + sbox.join(",") + "|" + sdx + "|" + sdy + "|" + sblur + "|" +
+              scol.join(",") + "|" + ctm.join(",") + "|" + hx0 + "," + hy0 + "," + hw + "," + hh;
+            var entry = glr.cachedTexture(key, function () {
+              var c = document.createElement("canvas");
+              c.width = hw;
+              c.height = hh;
+              var ictx = c.getContext("2d");
+              ictx.setTransform(1, 0, 0, 1, 0, 0);
+              ictx.setTransform(ctm[0], ctm[1], ctm[2], ctm[3], ctm[4] - hx0, ctm[5] - hy0);
+              ictx.shadowColor = "rgba(255,255,255,1)";
+              ictx.shadowBlur = sblur * dpr;
+              ictx.shadowOffsetX = sdx * dpr;
+              ictx.shadowOffsetY = sdy * dpr;
+              ictx.beginPath();
+              roundedSubpath(ictx, sbox[0], sbox[1], sbox[2], sbox[3], [sr, sr, sr, sr]);
+              ictx.fillStyle = "#ffffff";
+              ictx.fill();
+              return { canvas: c, x0: hx0, y0: hy0, w: hw, h: hh };
+            });
+            if (entry) glr.mask(entry, scol);
+          }
+        }
+      } else {
+        throw new Error("unknown WebGL command tag " + tag);
+      }
+    }
+    while (scissorDepth > 0) {
+      glr.popClip();
+      scissorDepth -= 1;
+    }
+    glr.end();
+  }
+
+  // MyGo moves its textarea to the caret so input methods show candidates
+  // where the field is, and switches inputmode so a touch keyboard appears
+  // only while a field takes text.
+  var lastTextActive = false;
+  function syncTextInput() {
+    if (!wasm.demo_text_input) return;
+    var active = wasm.demo_text_input() === 1;
+    if (active !== lastTextActive) {
+      lastTextActive = active;
+      input.setAttribute("inputmode", active ? "text" : "none");
+    }
+    if (!active) return;
+    input.style.left = wasm.demo_caret_x() + "px";
+    input.style.top = wasm.demo_caret_y() + "px";
+    input.style.height = Math.max(wasm.demo_caret_height(), 1) + "px";
+  }
+
+  // The wasm sets this when the frame it just produced is mid-animation. A
+  // static demo is polled every 80 ms to save power; an animation is drawn
+  // every frame, or a 100 ms slide would show one intermediate pose and look
+  // like a jump.
+  var wantsFrame = false;
+
   function schedule() {
     var now = performance.now();
-    if (now - lastDraw >= 80) { lastDraw = now; render(); }
+    if (wantsFrame || now - lastDraw >= 80) { lastDraw = now; render(); }
     requestAnimationFrame(schedule);
   }
 
@@ -779,7 +1690,7 @@ function cssFamilyOf(name) {
 
   canvas.addEventListener("pointerdown", function (event) {
     event.preventDefault();
-    canvas.focus();
+    focusDemo();
     var p = point(event);
     wasm.demo_pointer(1, p.x, p.y);
     render();
@@ -858,18 +1769,59 @@ function cssFamilyOf(name) {
     ArrowDown: 7, Escape: 8, Backspace: 9, Delete: 10, Home: 11, End: 12,
     PageUp: 13, PageDown: 14
   };
-  canvas.addEventListener("keydown", function (event) {
-    if (keys[event.key] !== undefined) {
+  function textFieldFocused() {
+    return !!(wasm && wasm.demo_text_input && wasm.demo_text_input() === 1);
+  }
+
+  function sendText(text) {
+    for (var index = 0; index < text.length; index++) {
+      var code = text.codePointAt(index);
+      if (code > 0xffff) index++;
+      wasm.demo_text(code);
+    }
+    render();
+  }
+
+  // Keys go to the textarea so an input method can compose in it; printable
+  // characters arrive through `beforeinput`, with the browser keeping the
+  // caret and selection the way an editable element does.
+  var composing = false;
+  input.addEventListener("keydown", function (event) {
+    // While an input method owns the keys, leave them to it: arrows move
+    // through its candidates, not through the UI.
+    if (event.isComposing || event.keyCode === 229) return;
+    var code = keys[event.key];
+    if (code !== undefined) {
+      // Inside a text field a space is text; elsewhere it is the Space key,
+      // which pauses Snake and drops a Tetris piece.
+      if (event.key === " " && textFieldFocused()) return;
       event.preventDefault();
-      wasm.demo_key(keys[event.key]);
+      wasm.demo_key(code);
       render();
       return;
     }
-    if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
-      event.preventDefault();
-      wasm.demo_text(event.key.codePointAt(0));
-      render();
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    // A printable key is inserted into the textarea; `beforeinput` sends it.
+  });
+
+  input.addEventListener("beforeinput", function (event) {
+    if (event.isComposing || composing) return;
+    if (event.inputType === "insertText" || event.inputType === "insertFromPaste") {
+      if (event.data) {
+        event.preventDefault();
+        sendText(event.data);
+      }
     }
+  });
+
+  input.addEventListener("compositionstart", function () {
+    composing = true;
+  });
+
+  input.addEventListener("compositionend", function (event) {
+    composing = false;
+    input.value = "";
+    if (event.data) sendText(event.data);
   });
 
   function resize() {
@@ -883,7 +1835,7 @@ function cssFamilyOf(name) {
   var measureCanvas = document.createElement("canvas");
   var measureCtx = measureCanvas.getContext("2d");
   var measureDecoder = new TextDecoder();
-  WebAssembly.instantiateStreaming(fetch("./demo.wasm?v=a462c0f015"), {
+  WebAssembly.instantiateStreaming(fetch("./demo.wasm?v=829908d0dd"), {
     env: {
       myrust_now_ms: function () { return performance.now(); },
       myrust_measure_text: function (ptr, len, size) {
@@ -966,7 +1918,9 @@ function cssFamilyOf(name) {
     var start = function () {
       canvas.setAttribute("data-ready", "true");
       render();
-      setInterval(render, 100);
+      // One loop: schedule() polls at 80 ms when idle and draws every frame
+      // while the wasm is mid-animation. A separate interval would render
+      // the same frame twice.
       requestAnimationFrame(schedule);
     };
     if (document.fonts && document.fonts.load) {

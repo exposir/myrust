@@ -62,6 +62,8 @@ pub struct AccessNode {
     pub disabled: bool,
     /// Whether the widget currently has keyboard focus.
     pub focused: bool,
+    /// Widget key, when the node has one, so a platform bridge can act on it.
+    pub key: Option<String>,
     /// Logical screen-space bounds.
     pub bounds: Rect,
 }

@@ -45,6 +45,15 @@ thread_local! {
     /// Bytes the page writes before calling an export that takes a string
     /// (a dropped file's name, size and first line).
     static HOST_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    /// Set by the frame that asks for another one, read by the page after
+    /// `demo_render`. Without it the host can only poll, and a 100 ms
+    /// animation sampled every 80 ms jumps instead of sliding.
+    static WANTS_FRAME: Cell<u32> = const { Cell::new(0) };
+    /// The focused text field's caret in CSS pixels: 1 when a field has the
+    /// focus, then x, y and height. The page puts its hidden textarea there so
+    /// an input method shows its candidates at the caret, as MyGo's web
+    /// surface does (`internal/web/surface.go` SetTextInput).
+    static TEXT_INPUT: Cell<[f32; 4]> = const { Cell::new([0.0; 4]) };
 }
 
 /// Capacity of the buffer `demo_host_buffer` hands to the page.
@@ -152,6 +161,9 @@ struct DemoApp {
     /// whether a drag currently hovers its zone.
     dropped: Option<Rc<RefCell<Vec<DroppedFile>>>>,
     drag_hover: Option<Rc<Cell<bool>>>,
+    game_2048: Option<Rc<RefCell<Game2048State>>>,
+    game_snake: Option<Rc<RefCell<SnakeState>>>,
+    game_tetris: Option<Rc<RefCell<TetrisState>>>,
 }
 
 /// A file dropped on the drag-and-drop demo. A browser exposes its name,
@@ -171,6 +183,9 @@ impl DemoApp {
         let drag_hover = (slug == 7).then(|| Rc::new(Cell::new(false)));
         let toasts = (slug == 83).then(|| Rc::new(RefCell::new(ToastQueue::new())));
         let showcase = (slug == 83).then(|| Rc::new(RefCell::new(ShowcaseState::new())));
+        let game_2048 = (slug == 84).then(|| Rc::new(RefCell::new(Game2048State::new(Rc::clone(&probe)))));
+        let game_snake = (slug == 85).then(|| Rc::new(RefCell::new(SnakeState::new(Rc::clone(&probe)))));
+        let game_tetris = (slug == 86).then(|| Rc::new(RefCell::new(TetrisState::new(Rc::clone(&probe)))));
         let ui = match slug {
             0 => {
                 let view_selected = Rc::clone(selected.as_ref().expect("tabs selection"));
@@ -980,6 +995,22 @@ impl DemoApp {
                     showcase_demo(context, &view_frame, &view_probe, &view_toasts, &view_state)
                 })
             }
+            84 => {
+                let view_frame = Rc::clone(&frame);
+                let view_probe = Rc::clone(&probe);
+                let view_state = Rc::clone(game_2048.as_ref().expect("2048 state"));
+                NativeUi::new(move |context| {
+                    game_2048_demo(context, &view_frame, &view_probe, &view_state)
+                })
+            }
+            85 => {
+                let view_state = Rc::clone(game_snake.as_ref().expect("snake state"));
+                NativeUi::new(move |context| snake_demo(context, &view_state))
+            }
+            86 => {
+                let view_state = Rc::clone(game_tetris.as_ref().expect("tetris state"));
+                NativeUi::new(move |context| tetris_demo(context, &view_state))
+            }
             _ => {
                 let done = Rc::new(Cell::new(2_i32));
                 let view_done = Rc::clone(&done);
@@ -998,7 +1029,9 @@ impl DemoApp {
             theme.border = Color::rgb(217, 217, 222);
             theme
         })
-        .with_preview(true);
+        // The game pages are applications, not demo cards: they own the
+        // whole window, so the preview's padding would leave a white frame.
+        .with_preview(!matches!(slug, 84..=86));
         Self {
             slug,
             ui,
@@ -1007,6 +1040,9 @@ impl DemoApp {
             probe,
             dropped,
             drag_hover,
+            game_2048,
+            game_snake,
+            game_tetris,
         }
     }
 }
@@ -1715,6 +1751,20 @@ pub extern "C" fn demo_render(slug: u32, width: f32, height: f32, dpr: f32) -> u
             Ok(frame) => frame,
             Err(_) => return false,
         };
+        WANTS_FRAME.with(|wants| {
+            wants.set(if frame.needs_animation_frame { 1 } else { 0 })
+        });
+        TEXT_INPUT.with(|slot| {
+            slot.set(match frame.text_input {
+                Some(field) => [
+                    1.0,
+                    field.cursor_x,
+                    field.cursor_y,
+                    field.bounds.height.max(1.0),
+                ],
+                None => [0.0; 4],
+            })
+        });
         let bytes = serialize_commands(&frame.display.commands, dpr, ui_font.as_deref());
         COMMAND_BUFFER.with(|buffer| *buffer.borrow_mut() = bytes);
         true
@@ -1730,6 +1780,38 @@ pub extern "C" fn demo_render(slug: u32, width: f32, height: f32, dpr: f32) -> u
 #[no_mangle]
 pub extern "C" fn demo_command_ptr() -> *const u8 {
     COMMAND_BUFFER.with(|buffer| buffer.borrow().as_ptr())
+}
+
+/// Returns 1 when a text field has the focus, so the page focuses its hidden
+/// textarea and input methods compose there.
+#[no_mangle]
+pub extern "C" fn demo_text_input() -> u32 {
+    TEXT_INPUT.with(|slot| u32::from(slot.get()[0] > 0.0))
+}
+
+/// The focused text field's caret, in CSS pixels from the page's top-left.
+#[no_mangle]
+pub extern "C" fn demo_caret_x() -> f32 {
+    TEXT_INPUT.with(|slot| slot.get()[1])
+}
+
+/// The focused text field's caret top, in CSS pixels.
+#[no_mangle]
+pub extern "C" fn demo_caret_y() -> f32 {
+    TEXT_INPUT.with(|slot| slot.get()[2])
+}
+
+/// The focused text field's line height, in CSS pixels.
+#[no_mangle]
+pub extern "C" fn demo_caret_height() -> f32 {
+    TEXT_INPUT.with(|slot| slot.get()[3])
+}
+
+/// Returns 1 when the last frame asked for another one, so the page can
+/// drive an animation at display rate instead of polling it.
+#[no_mangle]
+pub extern "C" fn demo_needs_frame() -> u32 {
+    WANTS_FRAME.with(|wants| wants.get())
 }
 
 /// Returns the byte length of the serialized canvas2D command buffer.
@@ -7528,6 +7610,910 @@ fn showcase_settings(
     }
 }
 
+use example_2048::{Direction as GameDirection, Game as Game2048, Pcg32};
+
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "env")]
+extern "C" {
+    fn myrust_now_ms() -> f64;
+}
+
+/// Seeds a game from the host clock, as the reference does. A fixed seed
+/// would deal the same opening board on every "New Game".
+fn game_rng() -> Pcg32 {
+    #[cfg(target_arch = "wasm32")]
+    let millis = unsafe { myrust_now_ms() };
+    #[cfg(not(target_arch = "wasm32"))]
+    let millis: f64 = 0.0;
+    Pcg32::new((millis.max(0.0) * 1_000_000.0) as u64, 0x9e37_79b9_7f4a_7c15)
+}
+
+struct Game2048State {
+    game: Game2048,
+    best: usize,
+    probe: Rc<Cell<i32>>,
+    press_start: Option<(f32, f32)>,
+    scale: f32,
+    move_time: Option<myrust_ui::Instant>,
+    prev_positions: std::collections::HashMap<usize, (usize, usize)>,
+}
+
+impl Game2048State {
+    fn new(probe: Rc<Cell<i32>>) -> Self {
+        Self {
+            game: Game2048::new(game_rng()),
+            best: 0,
+            probe,
+            press_start: None,
+            scale: 1.0,
+            move_time: None,
+            prev_positions: std::collections::HashMap::new(),
+        }
+    }
+
+    fn on_move(&mut self, dir: GameDirection) {
+        if self.game.terminated() {
+            return;
+        }
+        let mut prev = std::collections::HashMap::new();
+        for t in &self.game.tiles {
+            prev.insert(t.id, (t.row, t.col));
+        }
+        let (moved, _) = self.game.move_dir(dir);
+        if moved {
+            self.prev_positions = prev;
+            self.move_time = Some(myrust_ui::Instant::now());
+            self.best = self.best.max(self.game.score);
+            let next_probe = self.probe.get() + 1;
+            self.probe.set(next_probe);
+        }
+    }
+
+    fn restart(&mut self) {
+        self.game = Game2048::new(game_rng());
+        self.probe.set(0);
+        self.prev_positions.clear();
+        self.move_time = None;
+        self.press_start = None;
+    }
+
+    fn on_pointer(&mut self, kind: u32, x: f32, y: f32) {
+        if self.game.terminated() {
+            self.press_start = None;
+            return;
+        }
+        match kind {
+            1 => {
+                self.press_start = Some((x, y));
+            }
+            2 => {
+                if let Some((px, py)) = self.press_start.take() {
+                    let dx = x - px;
+                    let dy = y - py;
+                    let min_drag = 10.0 * self.scale;
+                    let ax = dx.abs();
+                    let ay = dy.abs();
+                    if ax.max(ay) >= min_drag {
+                        let dir = if ax > ay {
+                            if dx > 0.0 {
+                                GameDirection::Right
+                            } else {
+                                GameDirection::Left
+                            }
+                        } else if dy > 0.0 {
+                            GameDirection::Down
+                        } else {
+                            GameDirection::Up
+                        };
+                        self.on_move(dir);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn tile_colors(value: usize) -> (Color, Color) {
+    let bg = match value {
+        2 => Color::rgb(238, 228, 218),
+        4 => Color::rgb(237, 224, 200),
+        8 => Color::rgb(242, 177, 121),
+        16 => Color::rgb(245, 149, 99),
+        32 => Color::rgb(246, 124, 95),
+        64 => Color::rgb(246, 94, 59),
+        128 => Color::rgb(237, 207, 114),
+        256 => Color::rgb(237, 204, 97),
+        512 => Color::rgb(237, 200, 80),
+        1024 => Color::rgb(237, 197, 63),
+        2048 => Color::rgb(237, 194, 46),
+        _ => Color::rgb(60, 58, 50),
+    };
+    let fg = if value <= 4 {
+        Color::rgb(119, 110, 101)
+    } else {
+        Color::rgb(249, 246, 242)
+    };
+    (bg, fg)
+}
+
+fn tile_font_size(digits: usize) -> f32 {
+    match digits {
+        0..=2 => 55.0,
+        3 => 45.0,
+        4 => 35.0,
+        5 => 30.0,
+        _ => 24.0,
+    }
+}
+
+fn game_2048_demo(
+    context: &mut Context,
+    frame: &Rc<Cell<u64>>,
+    _probe: &Rc<Cell<i32>>,
+    state_ref: &Rc<RefCell<Game2048State>>,
+) {
+    let mut state = state_ref.borrow_mut();
+    let tick = frame.get().wrapping_add(1);
+    frame.set(tick);
+
+    let canvas = context.available_size();
+    let width = canvas.width.max(1.0);
+    let height = canvas.height.max(1.0);
+
+    let mut s = ((width - 32.0) / 500.0).min((height - 32.0) / 790.0);
+    s = s.clamp(0.45, 1.6);
+    state.scale = s;
+
+    let page_bg = Color::rgb(250, 248, 239);
+    let ink = Color::rgb(119, 110, 101);
+    let board_bg = Color::rgb(187, 173, 160);
+    let cell_bg = Color::rgba(238, 228, 218, 89);
+    let white = Color::rgb(255, 255, 255);
+    let label_ink = Color::rgb(238, 228, 218);
+
+    let elapsed_ms = state.move_time.map_or(999.0, |t| t.elapsed().as_secs_f32() * 1000.0);
+    let animating = elapsed_ms < 100.0;
+    if animating {
+        context.request_animation_frame();
+    }
+    let anim_progress = if animating {
+        let p = elapsed_ms / 100.0;
+        p * p * (3.0 - 2.0 * p)
+    } else {
+        1.0
+    };
+
+    container(context)
+        .size(width, height)
+        .align(AlignItems::Center)
+        .justify(JustifyContent::Center)
+        .background(page_bg, 0.0)
+        .children(|context| {
+            column(context)
+                .width(500.0 * s)
+                .gap(16.0 * s)
+                .children(|context| {
+                    // 1. Heading: "2048" + SCORE & BEST
+                    row(context)
+                        .justify(JustifyContent::SpaceBetween)
+                        .align(AlignItems::Center)
+                        .children(|context| {
+                            text(context, "2048")
+                                .font_size(80.0 * s)
+                                .bold()
+                                .color(ink);
+                            row(context).gap(5.0 * s).children(|context| {
+                                container(context)
+                                    .padding_xy(16.0 * s, 8.0 * s)
+                                    .background(board_bg, 3.0 * s)
+                                    .align(AlignItems::Center)
+                                    .column()
+                                    .children(|context| {
+                                        text(context, "SCORE")
+                                            .font_size(13.0 * s)
+                                            .bold()
+                                            .color(label_ink);
+                                        text(context, &state.game.score.to_string())
+                                            .font_size(25.0 * s)
+                                            .bold()
+                                            .color(white);
+                                    });
+                                container(context)
+                                    .padding_xy(16.0 * s, 8.0 * s)
+                                    .background(board_bg, 3.0 * s)
+                                    .align(AlignItems::Center)
+                                    .column()
+                                    .children(|context| {
+                                        text(context, "BEST")
+                                            .font_size(13.0 * s)
+                                            .bold()
+                                            .color(label_ink);
+                                        text(context, &state.best.to_string())
+                                            .font_size(25.0 * s)
+                                            .bold()
+                                            .color(white);
+                                    });
+                            });
+                        });
+
+                    // 2. Intro: "Join the numbers..." + New Game button
+                    row(context)
+                        .justify(JustifyContent::SpaceBetween)
+                        .align(AlignItems::Center)
+                        .gap(12.0 * s)
+                        .children(|context| {
+                            text(context, "Join the numbers and get to the 2048 tile!")
+                                .font_size(16.0 * s)
+                                .color(ink)
+                                .max_width((500.0 * s - 8.0).max(120.0));
+                            if game_2048_button(context, s, "New Game") {
+                                state.restart();
+                            }
+                        });
+
+                    // 3. Board
+                    let board_w = 500.0 * s;
+                    let gap = 15.0 * s;
+                    let cell_w = (board_w - gap * 5.0) / 4.0;
+                    let cell_step = cell_w + gap;
+
+                    container(context)
+                        .size(board_w, board_w)
+                        .background(board_bg, 6.0 * s)
+                        .padding(gap)
+                        .column()
+                        .gap(gap)
+                        .children(|context| {
+                            let grid_tiles = state.game.grid();
+                            for r in 0..4 {
+                                row(context).gap(gap).children(|context| {
+                                    for c in 0..4 {
+                                        container(context)
+                                            .size(cell_w, cell_w)
+                                            .background(cell_bg, 3.0 * s)
+                                            .align(AlignItems::Center)
+                                            .justify(JustifyContent::Center)
+                                            .children(|context| {
+                                                if let Some(t) = &grid_tiles[r][c] {
+                                                    let (dx, dy) = if animating {
+                                                        if let Some(&(pr, pc)) = state.prev_positions.get(&t.id) {
+                                                            let ox = (pc as f32 - c as f32) * (1.0 - anim_progress) * cell_step;
+                                                            let oy = (pr as f32 - r as f32) * (1.0 - anim_progress) * cell_step;
+                                                            (ox, oy)
+                                                        } else {
+                                                            (0.0, 0.0)
+                                                        }
+                                                    } else {
+                                                        (0.0, 0.0)
+                                                    };
+
+                                                    let (bg, fg) = tile_colors(t.value);
+                                                    let val_str = t.value.to_string();
+                                                    let fsize = tile_font_size(val_str.len()) * s;
+
+                                                    context.transform(
+                                                        Transform::translate(Point::new(dx, dy)),
+                                                        |context| {
+                                                            container(context)
+                                                                .size(cell_w, cell_w)
+                                                                .background(bg, 3.0 * s)
+                                                                .align(AlignItems::Center)
+                                                                .justify(JustifyContent::Center)
+                                                                .children(|context| {
+                                                                    text(context, &val_str)
+                                                                        .font_size(fsize)
+                                                                        .bold()
+                                                                        .color(fg);
+                                                                });
+                                                        },
+                                                    );
+                                                }
+                                            });
+                                    }
+                                });
+                            }
+                        });
+
+                    // Terminated overlay message
+                    if state.game.terminated() {
+                        row(context)
+                            .justify(JustifyContent::SpaceBetween)
+                            .align(AlignItems::Center)
+                            .children(|context| {
+                                if state.game.over {
+                                    text(context, "Game over!").font_size(24.0 * s).bold().color(ink);
+                                    if game_2048_button(context, s, "Try again") {
+                                        state.restart();
+                                    }
+                                } else if state.game.won {
+                                    text(context, "You win!").font_size(24.0 * s).bold().color(ink);
+                                    row(context).gap(8.0 * s).children(|context| {
+                                        if game_2048_button(context, s, "Keep going") {
+                                            state.game.keep_playing = true;
+                                        }
+                                        if game_2048_button(context, s, "Try again") {
+                                            state.restart();
+                                        }
+                                    });
+                                }
+                            });
+                    }
+
+                    // 4. How to play
+                    text(
+                        context,
+                        "How to play: Use the arrow keys, or drag, to move the tiles. When two tiles with the same number touch, they merge into one!",
+                    )
+                    .font_size(15.0 * s)
+                    .color(ink)
+                    .max_width(500.0 * s);
+                });
+        });
+}
+
+fn game_2048_button(context: &mut Context, s: f32, label: &str) -> bool {
+    let state = context.clickable(&format!("docs-demo-2048-button-{label}"));
+    let background = if state.hovered {
+        Color::rgb(151, 132, 113)
+    } else {
+        Color::rgb(143, 122, 102)
+    };
+    let clicked = state.clicked;
+    state
+        .height(40.0 * s)
+        .padding_x(20.0 * s)
+        .background(background, 3.0 * s)
+        .align(AlignItems::Center)
+        .children(|context| {
+            text(context, label)
+                .font_size(18.0 * s)
+                .bold()
+                .color(Color::rgb(249, 246, 242))
+                .single_line();
+        });
+    clicked
+}
+
+
+use example_snake::{Direction as SnakeDirection, Game as SnakeGame, Pcg32 as SnakeRng};
+
+struct SnakeState {
+    game: SnakeGame,
+    best: usize,
+    last_tick: myrust_ui::Instant,
+    paused: bool,
+    probe: Rc<Cell<i32>>,
+    scale: f32,
+}
+
+impl SnakeState {
+    fn new(probe: Rc<Cell<i32>>) -> Self {
+        Self {
+            game: SnakeGame::new(
+                example_snake::DEFAULT_COLS,
+                example_snake::DEFAULT_ROWS,
+                snake_rng(),
+            ),
+            best: 0,
+            last_tick: myrust_ui::Instant::now(),
+            paused: false,
+            probe,
+            scale: 1.0,
+        }
+    }
+
+    fn restart(&mut self) {
+        self.game = SnakeGame::new(
+            example_snake::DEFAULT_COLS,
+            example_snake::DEFAULT_ROWS,
+            snake_rng(),
+        );
+        self.last_tick = myrust_ui::Instant::now();
+        self.paused = false;
+        self.probe.set(0);
+    }
+
+    fn toggle_pause(&mut self) {
+        if !self.game.started || self.game.over || self.game.won {
+            return;
+        }
+        self.paused = !self.paused;
+        self.last_tick = myrust_ui::Instant::now();
+    }
+
+    fn turn(&mut self, direction: SnakeDirection) {
+        if self.game.turn(direction) {
+            // The probe counts the tick that follows, so the functional suite
+            // can tell "the press did something" from "it was refused".
+            self.probe.set(self.probe.get().max(1));
+        }
+    }
+
+    fn advance(&mut self, now: myrust_ui::Instant) {
+        if !self.game.started || self.game.over || self.game.won || self.paused {
+            self.last_tick = now;
+            return;
+        }
+        let interval = self.game.tick_interval_ms();
+        let mut ticks = 0;
+        while ticks < 4 {
+            if now.duration_since(self.last_tick).as_secs_f32() * 1000.0 < interval {
+                break;
+            }
+            self.last_tick = now;
+            let result = self.game.tick();
+            if result.ate {
+                self.best = self.best.max(self.game.score);
+                self.probe.set(self.game.score as i32);
+            }
+            ticks += 1;
+        }
+    }
+}
+
+fn snake_rng() -> SnakeRng {
+    #[cfg(target_arch = "wasm32")]
+    let millis = unsafe { myrust_now_ms() };
+    #[cfg(not(target_arch = "wasm32"))]
+    let millis: f64 = 0.0;
+    SnakeRng::new((millis.max(0.0) * 1_000_000.0) as u64, 0x9e37_79b9_7f4a_7c15)
+}
+
+fn snake_demo(context: &mut Context, state_ref: &Rc<RefCell<SnakeState>>) {
+    let mut state = state_ref.borrow_mut();
+    let canvas = context.available_size();
+    let width = canvas.width.max(1.0);
+    let height = canvas.height.max(1.0);
+    let s = ((width - 32.0) / 500.0)
+        .min((height - 32.0) / 690.0)
+        .clamp(0.45, 1.6);
+    state.scale = s;
+
+    state.advance(myrust_ui::Instant::now());
+
+    let page_bg = Color::rgb(250, 248, 239);
+    let ink = Color::rgb(119, 110, 101);
+    let board_bg = Color::rgb(47, 43, 38);
+    let cell_bg = Color::rgb(59, 54, 48);
+    let body = Color::rgb(143, 122, 102);
+    let head = Color::rgb(238, 228, 218);
+    let food = Color::rgb(246, 94, 59);
+
+    if state.game.started && !state.game.over && !state.game.won && !state.paused {
+        context.request_animation_frame();
+    }
+
+    let board_width = 500.0 * s;
+    let gap = 6.0 * s;
+    let cols = state.game.cols;
+    let rows = state.game.rows;
+    let cell_width = (board_width - gap * (cols as f32 + 1.0)) / cols as f32;
+    let cell_radius = (cell_width * 0.22).max(2.0);
+    let snake: Vec<(usize, usize)> = state
+        .game
+        .snake
+        .iter()
+        .map(|cell| (cell.row, cell.col))
+        .collect();
+    let food_cell = (state.game.food.row, state.game.food.col);
+
+    let status = if state.game.won {
+        "You filled the board!"
+    } else if state.game.over {
+        "Game over"
+    } else if state.paused {
+        "Paused — Space to resume"
+    } else if !state.game.started {
+        "Press a direction to start"
+    } else {
+        "Arrows or WASD to steer, Space to pause, R to restart"
+    };
+
+    container(context)
+        .size(width, height)
+        .align(AlignItems::Center)
+        .justify(JustifyContent::Center)
+        .background(page_bg, 0.0)
+        .children(|context| {
+            column(context).width(board_width).gap(16.0 * s).children(|context| {
+                row(context)
+                    .justify(JustifyContent::SpaceBetween)
+                    .align(AlignItems::Center)
+                    .children(|context| {
+                        text(context, "Snake")
+                            .font_size(64.0 * s)
+                            .bold()
+                            .color(ink)
+                            .single_line();
+                        row(context).gap(5.0 * s).children(|context| {
+                            snake_score_box(context, s, "SCORE", state.game.score);
+                            snake_score_box(context, s, "BEST", state.best);
+                            snake_score_box(context, s, "LENGTH", state.game.snake.len());
+                        });
+                    });
+
+                // Controls on their own line, hint under the board: sharing a
+                // row overflowed the column once the hint wrapped.
+                row(context)
+                    .justify(JustifyContent::FlexEnd)
+                    .gap(8.0 * s)
+                    .children(|context| {
+                        let pause_label = if state.paused { "Resume" } else { "Pause" };
+                        if snake_button(context, s, pause_label) {
+                            state.toggle_pause();
+                        }
+                        if snake_button(context, s, "New Game") {
+                            state.restart();
+                        }
+                    });
+
+                let mut cells = Vec::with_capacity(rows * cols);
+                for row_index in 0..rows {
+                    for col_index in 0..cols {
+                        let is_food = (row_index, col_index) == food_cell;
+                        let segment = snake
+                            .iter()
+                            .position(|&cell| cell == (row_index, col_index));
+                        let (color, radius) = if is_food {
+                            (food, cell_width / 2.0)
+                        } else if let Some(index) = segment {
+                            if index == 0 {
+                                (head, cell_radius)
+                            } else {
+                                (body, cell_radius)
+                            }
+                        } else {
+                            (cell_bg, cell_radius * 0.6)
+                        };
+                        cells.push(DrawCommand::RoundedRect {
+                            x: gap + col_index as f32 * (cell_width + gap),
+                            y: gap + row_index as f32 * (cell_width + gap),
+                            width: cell_width,
+                            height: cell_width,
+                            radius: myrust_ui::Radius::all(radius),
+                            color,
+                        });
+                    }
+                }
+                container(context)
+                    .size(board_width, board_width)
+                    .background(board_bg, 6.0 * s)
+                    .draw(cells);
+
+                text(context, status)
+                    .font_size(15.0 * s)
+                    .color(ink)
+                    .max_width(board_width);
+            });
+        });
+}
+
+fn snake_button(context: &mut Context, s: f32, label: &str) -> bool {
+    let state = context.clickable(&format!("docs-demo-snake-button-{label}"));
+    let background = if state.hovered {
+        Color::rgb(151, 132, 113)
+    } else {
+        Color::rgb(143, 122, 102)
+    };
+    let clicked = state.clicked;
+    state
+        .height(40.0 * s)
+        .padding_x(20.0 * s)
+        .background(background, 3.0 * s)
+        .align(AlignItems::Center)
+        .children(|context| {
+            text(context, label)
+                .font_size(18.0 * s)
+                .bold()
+                .color(Color::rgb(249, 246, 242))
+                .single_line();
+        });
+    clicked
+}
+
+fn snake_score_box(context: &mut Context, s: f32, label: &str, value: usize) {
+    container(context)
+        .padding_xy(16.0 * s, 8.0 * s)
+        .background(Color::rgb(47, 43, 38), 3.0 * s)
+        .align(AlignItems::Center)
+        .column()
+        .children(|context| {
+            text(context, label)
+                .font_size(13.0 * s)
+                .bold()
+                .color(Color::rgb(238, 228, 218))
+                .single_line();
+            text(context, &value.to_string())
+                .font_size(25.0 * s)
+                .bold()
+                .color(Color::rgb(255, 255, 255))
+                .single_line();
+        });
+}
+
+
+use example_tetris::{Game as TetrisGame, Kind as TetrisKind, Pcg32 as TetrisRng};
+
+struct TetrisState {
+    game: TetrisGame,
+    best: usize,
+    last_drop: myrust_ui::Instant,
+    probe: Rc<Cell<i32>>,
+    scale: f32,
+}
+
+impl TetrisState {
+    fn new(probe: Rc<Cell<i32>>) -> Self {
+        Self {
+            game: TetrisGame::new(tetris_rng()),
+            best: 0,
+            last_drop: myrust_ui::Instant::now(),
+            probe,
+            scale: 1.0,
+        }
+    }
+
+    fn restart(&mut self) {
+        self.game = TetrisGame::new(tetris_rng());
+        self.last_drop = myrust_ui::Instant::now();
+        self.probe.set(0);
+    }
+
+    fn record(&mut self, step: example_tetris::Step) {
+        if step.locked || step.lines > 0 || step.over {
+            self.best = self.best.max(self.game.score);
+            self.probe.set(self.game.score as i32);
+        }
+    }
+
+    fn advance(&mut self, now: myrust_ui::Instant) {
+        if self.game.over || self.game.paused {
+            self.last_drop = now;
+            return;
+        }
+        let interval = self.game.drop_interval_ms();
+        let mut steps = 0;
+        while steps < 4 {
+            if now.duration_since(self.last_drop).as_secs_f32() * 1000.0 < interval {
+                break;
+            }
+            self.last_drop = now;
+            let step = self.game.step();
+            self.record(step);
+            steps += 1;
+            if step.over {
+                break;
+            }
+        }
+    }
+}
+
+fn tetris_rng() -> TetrisRng {
+    #[cfg(target_arch = "wasm32")]
+    let millis = unsafe { myrust_now_ms() };
+    #[cfg(not(target_arch = "wasm32"))]
+    let millis: f64 = 0.0;
+    TetrisRng::new((millis.max(0.0) * 1_000_000.0) as u64, 0x9e37_79b9_7f4a_7c15)
+}
+
+fn tetris_piece_color(kind: TetrisKind) -> Color {
+    match kind {
+        TetrisKind::I => Color::rgb(95, 191, 226),
+        TetrisKind::O => Color::rgb(237, 194, 46),
+        TetrisKind::T => Color::rgb(178, 122, 216),
+        TetrisKind::S => Color::rgb(124, 196, 108),
+        TetrisKind::Z => Color::rgb(232, 106, 90),
+        TetrisKind::J => Color::rgb(86, 126, 214),
+        TetrisKind::L => Color::rgb(238, 160, 66),
+    }
+}
+
+fn tetris_demo(context: &mut Context, state_ref: &Rc<RefCell<TetrisState>>) {
+    let mut state = state_ref.borrow_mut();
+    let canvas = context.available_size();
+    let width = canvas.width.max(1.0);
+    let height = canvas.height.max(1.0);
+    // The board is 10 wide and 20 tall, so the page is tall: 1190 units at
+    // scale 1 keeps the whole column in view.
+    let s = ((width - 32.0) / 500.0)
+        .min((height - 32.0) / 1190.0)
+        .clamp(0.4, 1.6);
+    state.scale = s;
+
+    state.advance(myrust_ui::Instant::now());
+
+    let page_bg = Color::rgb(250, 248, 239);
+    let ink = Color::rgb(119, 110, 101);
+    let board_bg = Color::rgb(47, 43, 38);
+    let cell_bg = Color::rgb(59, 54, 48);
+    let ghost = Color::rgb(78, 71, 62);
+
+    if !state.game.over && !state.game.paused {
+        context.request_animation_frame();
+    }
+
+    let board_width = 500.0 * s;
+    let gap = 2.0 * s;
+    let cols = example_tetris::COLS;
+    let rows = example_tetris::ROWS;
+    let cell_width = (board_width - gap * (cols as f32 + 1.0)) / cols as f32;
+    let board_height = cell_width * rows as f32 + gap * (rows as f32 + 1.0);
+    let radius = (cell_width * 0.2).max(2.0);
+
+    let ghost_piece = state.game.ghost();
+    let ghost_cells: Vec<(isize, isize)> = if state.game.over {
+        Vec::new()
+    } else {
+        ghost_piece.cells()
+    };
+    let active_cells: Vec<(isize, isize)> = state.game.piece.cells();
+
+    let status = if state.game.over {
+        "Stack topped out — New Game to try again"
+    } else if state.game.paused {
+        "Paused — P to resume"
+    } else {
+        "Arrows to move, Up/X to turn, Space to drop"
+    };
+
+    container(context)
+        .size(width, height)
+        .align(AlignItems::Center)
+        .justify(JustifyContent::Center)
+        .background(page_bg, 0.0)
+        .children(|context| {
+            column(context).width(board_width).gap(14.0 * s).children(|context| {
+                row(context)
+                    .justify(JustifyContent::SpaceBetween)
+                    .align(AlignItems::Center)
+                    .children(|context| {
+                        text(context, "Tetris")
+                            .font_size(52.0 * s)
+                            .bold()
+                            .color(ink)
+                            .single_line();
+                        row(context).gap(5.0 * s).children(|context| {
+                            tetris_score_box(context, s, "SCORE", state.game.score);
+                            tetris_score_box(context, s, "BEST", state.best);
+                            tetris_score_box(context, s, "LINES", state.game.lines);
+                            tetris_score_box(context, s, "LEVEL", state.game.level);
+                        });
+                    });
+
+                row(context)
+                    .justify(JustifyContent::FlexEnd)
+                    .align(AlignItems::Center)
+                    .gap(8.0 * s)
+                    .children(|context| {
+                        tetris_next_piece(context, s, state.game.next);
+                        let pause_label = if state.game.paused { "Resume" } else { "Pause" };
+                        if tetris_button(context, s, pause_label) {
+                            state.game.toggle_pause();
+                        }
+                        if tetris_button(context, s, "New Game") {
+                            state.restart();
+                        }
+                    });
+
+                let mut cells = Vec::with_capacity(rows * cols);
+                for row_index in 0..rows {
+                    for col_index in 0..cols {
+                        let at = (row_index as isize, col_index as isize);
+                        let settled = state.game.board[row_index][col_index];
+                        let active = active_cells.contains(&at);
+                        let ghosted = !active
+                            && ghost_cells.contains(&at)
+                            && state.game.piece.kind != TetrisKind::O;
+                        let color = if let Some(kind) = settled {
+                            tetris_piece_color(kind)
+                        } else if active {
+                            tetris_piece_color(state.game.piece.kind)
+                        } else if ghosted {
+                            ghost
+                        } else {
+                            cell_bg
+                        };
+                        cells.push(DrawCommand::RoundedRect {
+                            x: gap + col_index as f32 * (cell_width + gap),
+                            y: gap + row_index as f32 * (cell_width + gap),
+                            width: cell_width,
+                            height: cell_width,
+                            radius: myrust_ui::Radius::all(radius),
+                            color,
+                        });
+                    }
+                }
+                container(context)
+                    .size(board_width, board_height)
+                    .background(board_bg, 6.0 * s)
+                    .draw(cells);
+
+                text(context, status)
+                    .font_size(15.0 * s)
+                    .color(ink)
+                    .max_width(board_width);
+            });
+        });
+}
+
+/// The small preview of the coming piece, drawn in its own box.
+fn tetris_next_piece(context: &mut Context, s: f32, kind: TetrisKind) {
+    let cell = 14.0 * s;
+    let gap = 2.0 * s;
+    container(context)
+        .padding(6.0 * s)
+        .background(Color::rgb(47, 43, 38), 4.0 * s)
+        .column()
+        .gap(gap)
+        .children(|context| {
+            for row_index in 0..3 {
+                row(context).gap(gap).children(|context| {
+                    for col_index in 0..3 {
+                        let filled = if kind == TetrisKind::O {
+                            row_index < 2 && col_index < 2
+                        } else if kind == TetrisKind::I {
+                            row_index == 1
+                        } else {
+                            kind.rotation_cells(0).contains(&(row_index, col_index))
+                        };
+                        let color = if filled {
+                            tetris_piece_color(kind)
+                        } else {
+                            Color::rgba(59, 54, 48, 140)
+                        };
+                        container(context)
+                            .size(cell, cell)
+                            .background(color, 2.0 * s);
+                    }
+                });
+            }
+        });
+}
+
+fn tetris_button(context: &mut Context, s: f32, label: &str) -> bool {
+    let state = context.clickable(&format!("docs-demo-tetris-button-{label}"));
+    let background = if state.hovered {
+        Color::rgb(151, 132, 113)
+    } else {
+        Color::rgb(143, 122, 102)
+    };
+    let clicked = state.clicked;
+    state
+        .height(40.0 * s)
+        .padding_x(20.0 * s)
+        .background(background, 3.0 * s)
+        .align(AlignItems::Center)
+        .children(|context| {
+            text(context, label)
+                .font_size(18.0 * s)
+                .bold()
+                .color(Color::rgb(249, 246, 242))
+                .single_line();
+        });
+    clicked
+}
+
+fn tetris_score_box(context: &mut Context, s: f32, label: &str, value: usize) {
+    container(context)
+        .padding_xy(14.0 * s, 8.0 * s)
+        .background(Color::rgb(47, 43, 38), 3.0 * s)
+        .align(AlignItems::Center)
+        .column()
+        .children(|context| {
+            text(context, label)
+                .font_size(12.0 * s)
+                .bold()
+                .color(Color::rgb(238, 228, 218))
+                .single_line();
+            text(context, &value.to_string())
+                .font_size(22.0 * s)
+                .bold()
+                .color(Color::rgb(255, 255, 255))
+                .single_line();
+        });
+}
+
 #[no_mangle]
 pub extern "C" fn demo_probe() -> i32 {
     APP.with(|cell| {
@@ -7562,6 +8548,11 @@ pub extern "C" fn demo_pointer(kind: u32, x: f32, y: f32) {
     APP.with(|cell| {
         let app = cell.borrow();
         let Some(app) = app.as_ref() else { return };
+        if app.slug == 84 {
+            if let Some(state) = &app.game_2048 {
+                state.borrow_mut().on_pointer(kind, x, y);
+            }
+        }
         let event = match kind {
             1 => myrust_ui::UiEvent::PointerPressed {
                 x,
@@ -7623,6 +8614,65 @@ pub extern "C" fn demo_key(code: u32) {
     APP.with(|cell| {
         let app = cell.borrow();
         let Some(app) = app.as_ref() else { return };
+        if app.slug == 84 {
+            if let Some(state) = &app.game_2048 {
+                let dir = match code {
+                    4 => Some(example_2048::Direction::Left),
+                    5 => Some(example_2048::Direction::Right),
+                    6 => Some(example_2048::Direction::Up),
+                    7 => Some(example_2048::Direction::Down),
+                    _ => None,
+                };
+                if let Some(d) = dir {
+                    state.borrow_mut().on_move(d);
+                }
+            }
+        }
+        if app.slug == 85 {
+            if let Some(state) = &app.game_snake {
+                let mut snake = state.borrow_mut();
+                let dir = match code {
+                    4 => Some(SnakeDirection::Left),
+                    5 => Some(SnakeDirection::Right),
+                    6 => Some(SnakeDirection::Up),
+                    7 => Some(SnakeDirection::Down),
+                    _ => None,
+                };
+                if let Some(d) = dir {
+                    snake.turn(d);
+                }
+                if code == 3 {
+                    snake.toggle_pause();
+                }
+            }
+        }
+        if app.slug == 86 {
+            if let Some(state) = &app.game_tetris {
+                let mut tetris = state.borrow_mut();
+                match code {
+                    4 => {
+                        tetris.game.shift(-1);
+                    }
+                    5 => {
+                        tetris.game.shift(1);
+                    }
+                    6 => {
+                        tetris.game.rotate();
+                    }
+                    7 => {
+                        let step = tetris.game.step();
+                        tetris.record(step);
+                        tetris.last_drop = myrust_ui::Instant::now();
+                    }
+                    3 => {
+                        let step = tetris.game.hard_drop();
+                        tetris.record(step);
+                        tetris.last_drop = myrust_ui::Instant::now();
+                    }
+                    _ => {}
+                }
+            }
+        }
         let _ = app.ui.input(myrust_ui::UiEvent::Key { key });
     });
 }
@@ -7635,6 +8685,39 @@ pub extern "C" fn demo_text(codepoint: u32) {
     APP.with(|cell| {
         let app = cell.borrow();
         let Some(app) = app.as_ref() else { return };
+        if app.slug == 84 {
+            if let Some(state) = &app.game_2048 {
+                if character == 'r' || character == 'R' {
+                    state.borrow_mut().restart();
+                }
+            }
+        }
+        if app.slug == 85 {
+            if let Some(state) = &app.game_snake {
+                let mut snake = state.borrow_mut();
+                match character.to_ascii_lowercase() {
+                    'w' | 'k' => snake.turn(SnakeDirection::Up),
+                    'd' | 'l' => snake.turn(SnakeDirection::Right),
+                    's' | 'j' => snake.turn(SnakeDirection::Down),
+                    'a' | 'h' => snake.turn(SnakeDirection::Left),
+                    'r' => snake.restart(),
+                    _ => {}
+                }
+            }
+        }
+        if app.slug == 86 {
+            if let Some(state) = &app.game_tetris {
+                let mut tetris = state.borrow_mut();
+                match character.to_ascii_lowercase() {
+                    'x' => {
+                        tetris.game.rotate();
+                    }
+                    'p' => tetris.game.toggle_pause(),
+                    'r' => tetris.restart(),
+                    _ => {}
+                }
+            }
+        }
         let _ = app.ui.input(myrust_ui::UiEvent::TextInput {
             text: character.to_string(),
         });

@@ -7,12 +7,14 @@ license.workspace = true
 description = "Desktop application framework for myrust"
 
 [features]
-default = []
+default = ["a11y"]
+a11y = ["dep:accesskit", "dep:accesskit_unix"]
 gpu = ["dep:wgpu"]
 devtools = ["wry/devtools"]
 
 [dependencies]
 myrust-ui = { path = "../myrust-ui" }
+accesskit = { version = "0.25", optional = true }
 ab_glyph.workspace = true
 anyhow.workspace = true
 arboard.workspace = true
@@ -49,3 +51,4 @@ zip.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk.workspace = true
+accesskit_unix = { version = "0.24", optional = true }

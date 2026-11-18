@@ -1,4 +1,4 @@
-MyRust 每帧发出 `AccessNode` 元数据。它是 `role`、`label`、`value`、`disabled`、`focused`、`bounds` 的扁平 vector；未连接 AT-SPI、UIA 或 NSAccessibility。
+MyRust 每帧发出 `AccessNode` 元数据。它是 `role`、`label`、`value`、`disabled`、`focused`、`key`、`bounds` 的扁平 vector。Linux 上桌面运行时通过 AccessKit 把它发布到 AT-SPI（`myrust-core` 的 `a11y` feature，默认开启）：screen reader 看到的是一棵以窗口节点为根的树，带 key 的控件接受 `Focus` 与 `Click` 两种 action。macOS 与 Windows 还没有桥。
 
 ```rust
 let frame = ui.render(Size::new(640.0, 360.0))?;
@@ -83,4 +83,8 @@ slider、scroll view、split view、tab list 都不发 orientation 字段。视�
 
 没有 landmark role、live-region flag、atomic/relevant 属性、错误宣告或 accessibility rule。`AccessNode` 是逐帧扁平列表，不是带关系的语义树。
 
-平台 AT 桥需要 role/action 映射、焦点/选择事件、窗口句柄与树 diff；`Inspector` 只用于调试快照，不是 AT。
+## Linux 侧的桥
+
+桥会映射全部 role，但跳过通用的 `column`/`row`/`grid` 分组节点，保持树可读。每帧整棵发送，由 AccessKit 做 diff 并发出平台事件。Focus action 把键盘焦点移到控件 key，Click action 在节点中心按下并抬起。节点 id 跟随帧内顺序，位置稳定的控件 id 也就稳定。
+
+选中范围、live region 事件、position-in-set、description 和展开状态尚未映射。macOS 需要 NSAccessibility 适配器，Windows 需要 UIA 适配器，两者都未实现。

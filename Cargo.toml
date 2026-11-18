@@ -15,6 +15,9 @@ members = [
     "examples/gallery",
     "examples/showcase",
     "examples/drag-drop",
+    "examples/game-2048",
+    "examples/snake",
+    "examples/tetris",
 ]
 resolver = "2"
 

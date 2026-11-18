@@ -42,7 +42,7 @@ router(c, "pages", &mut app.router, &pages);
 
 router 发出一个 `Role::Group` 节点，label 为当前 page id；页面内容发出自己的节点。back/forward 是 `Role::Button`，label 为 `back`/`forward`，value 为 `enabled`/`disabled`。
 
-router 不在导航时移动焦点、宣告新页面或暴露 landmark/live region。未连接平台 screen reader；这些只是元数据节点。
+router 不在导航时移动焦点、宣告新页面或暴露 landmark/live region。Linux 上窗口会把节点发布到 AT-SPI，但页面切换仍然不会作为 live region 宣告。
 
 ## Transitions
 

@@ -144,6 +144,12 @@ pub enum UiEvent {
         /// Pressed key.
         key: Key,
     },
+    /// Moves keyboard focus to a named widget, as an accessibility action
+    /// from a screen reader does.
+    Focus {
+        /// Widget key.
+        id: String,
+    },
 }
 
 /// Converts physical cursor events into logical UI events.
@@ -377,6 +383,9 @@ impl UiEventRouter {
             }
             UiEvent::TextInput { .. } => None,
             UiEvent::Key { key } => Some(UiAction::Key { key: *key }),
+            // Focus applied by the runtime; the translator reports actions
+            // only, and a focus move is not one.
+            UiEvent::Focus { .. } => None,
         }
     }
 
