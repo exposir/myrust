@@ -10,8 +10,18 @@ use std::fmt;
 use super::layout::Point;
 use super::paint::{Color, DisplayList, DrawCommand, Rect, Transform};
 
+mod damage;
+
+#[cfg(feature = "gpu")]
+pub mod gpu_scene;
+
 #[cfg(feature = "gpu")]
 mod wgpu_backend;
+
+pub use damage::{diff, Damage};
+
+#[cfg(feature = "gpu")]
+pub use gpu_scene::GpuScene;
 
 #[cfg(feature = "gpu")]
 pub use wgpu_backend::{GpuInfo, WgpuRenderer};
@@ -577,6 +587,14 @@ impl TransformMatrix {
         Point::new(
             self.m11 * point.x + self.m12 * point.y + self.tx,
             self.m21 * point.x + self.m22 * point.y + self.ty,
+        )
+    }
+
+    /// Applies only the linear part, for direction vectors.
+    pub(crate) fn linear(self, point: Point) -> Point {
+        Point::new(
+            self.m11 * point.x + self.m12 * point.y,
+            self.m21 * point.x + self.m22 * point.y,
         )
     }
 

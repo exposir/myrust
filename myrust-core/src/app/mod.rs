@@ -7,6 +7,8 @@
 pub mod deep_link;
 /// Public event-driven filesystem watcher.
 pub mod file_watcher;
+#[cfg(feature = "gpu")]
+mod gpu_present;
 /// Recently opened documents and jump-list interfaces.
 pub mod recent_documents;
 /// Window geometry persistence.
@@ -802,7 +804,7 @@ struct ManagedWindow {
     webview: Option<WebViewHandle>,
     native_ui: Option<NativeUiWindow>,
     menu: Option<Menu>,
-    window: Window,
+    window: Arc<Window>,
     fullscreen: bool,
     decorations: bool,
 }
@@ -810,6 +812,10 @@ struct ManagedWindow {
 struct NativeUiWindow {
     ui: NativeUi,
     renderer: Box<dyn Renderer>,
+    /// GPU surface presenter; when present it produces and presents the pixels
+    /// and `renderer` only reports statistics.
+    #[cfg(feature = "gpu")]
+    gpu: Option<gpu_present::GpuPresenter>,
     translator: InputTranslator,
     modifiers: ModifiersState,
     physical_size: RenderSize,
@@ -843,32 +849,58 @@ impl NativeUiWindow {
         scale_factor: f64,
         title: &str,
         a11y_send: AccessSender,
+        window: Option<Arc<Window>>,
     ) -> Result<Self> {
         let physical_size = normalize_render_size(physical_size);
         let scale_factor = normalize_scale_factor(scale_factor);
         let requested_renderer = ui.renderer_kind();
-        let (renderer, fallback_reason) = match create_renderer(requested_renderer, physical_size) {
-            Ok(renderer) => (renderer, None),
-            Err(error) => {
-                tracing::warn!(
-                    requested = %requested_renderer,
-                    %error,
-                    "native UI renderer unavailable; falling back to software"
-                );
-                let renderer = create_renderer(RendererKind::Software, physical_size)
-                    .context("failed to create native UI software fallback")?;
-                (
-                    renderer,
-                    Some(format!(
-                        "{requested_renderer} renderer unavailable: {error}"
-                    )),
-                )
+
+        #[cfg(feature = "gpu")]
+        let (gpu, fallback_reason) =
+            create_gpu_presenter(requested_renderer, window, physical_size);
+        #[cfg(not(feature = "gpu"))]
+        let fallback_reason: Option<String> = {
+            let _ = window;
+            None
+        };
+
+        let mut renderer_fallback: Option<String> = None;
+        let renderer: Box<dyn Renderer> = {
+            #[cfg(feature = "gpu")]
+            {
+                if gpu.is_some() || fallback_reason.is_some() {
+                    // The GPU path presents the pixels itself; a failed GPU
+                    // attempt leaves the CPU rasterizer in charge. Either way
+                    // the `Renderer` only contributes statistics.
+                    create_renderer(RendererKind::Software, physical_size)
+                        .context("failed to create the software statistics renderer")?
+                } else {
+                    create_renderer_with_fallback(
+                        requested_renderer,
+                        physical_size,
+                        &mut renderer_fallback,
+                    )?
+                }
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                create_renderer_with_fallback(
+                    requested_renderer,
+                    physical_size,
+                    &mut renderer_fallback,
+                )?
             }
         };
+        #[cfg(feature = "gpu")]
+        let fallback_reason = fallback_reason.or(renderer_fallback);
+        #[cfg(not(feature = "gpu"))]
+        let fallback_reason = renderer_fallback;
         let logical_size = physical_to_logical(physical_size, scale_factor);
         let mut native = Self {
             ui,
             renderer,
+            #[cfg(feature = "gpu")]
+            gpu,
             translator: InputTranslator::new(scale_factor),
             modifiers: ModifiersState::empty(),
             physical_size,
@@ -911,6 +943,31 @@ impl NativeUiWindow {
             self.access_nodes_logged = true;
         }
         let display = scaled_display(&frame.display, self.scale_factor as f32);
+        #[cfg(feature = "gpu")]
+        if let Some(mut gpu) = self.gpu.take() {
+            let background = self.ui.theme().background;
+            match gpu.render(&display, self.physical_size, background) {
+                Ok(stats) => {
+                    self.gpu = Some(gpu);
+                    self.last_stats = stats;
+                    self.cpu_frame = None;
+                    self.last_display = Some(display);
+                    self.rasterized_frames += 1;
+                    self.last_error = None;
+                    return Ok(());
+                }
+                Err(error) => {
+                    let message = format!("GPU presentation failed: {error}");
+                    tracing::warn!(
+                        %error,
+                        "native GPU presentation failed; falling back to software"
+                    );
+                    self.fallback_reason = Some(message);
+                    // `gpu` is dropped; the CPU path below repaints this frame.
+                }
+            }
+        }
+        let background = self.ui.theme().background;
         let unchanged = self.last_display.as_ref() == Some(&display)
             && self
                 .cpu_frame
@@ -920,7 +977,6 @@ impl NativeUiWindow {
                         && frame.height == self.physical_size.height
                 });
         if !unchanged {
-            let background = self.ui.theme().background;
             let cpu_frame = CpuRasterizer::rasterize(&display, self.physical_size, background)
                 .map_err(|error| error.to_string())?;
             self.cpu_frame = Some(cpu_frame);
@@ -951,6 +1007,19 @@ impl NativeUiWindow {
         self.logical_size = physical_to_logical(physical_size, scale_factor);
         self.scale_factor = scale_factor;
         self.translator.set_scale_factor(scale_factor);
+        #[cfg(feature = "gpu")]
+        if let Some(mut gpu) = self.gpu.take() {
+            match gpu.resize(physical_size) {
+                Ok(()) => self.gpu = Some(gpu),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "native GPU surface resize failed; falling back to software"
+                    );
+                    self.fallback_reason = Some(format!("GPU presentation failed: {error}"));
+                }
+            }
+        }
         if let Err(error) = self.renderer.resize(physical_size) {
             tracing::warn!(%error, "native UI renderer resize failed");
             self.last_error = Some(error.to_string());
@@ -963,6 +1032,25 @@ impl NativeUiWindow {
         self.last_error
             .clone()
             .or_else(|| self.fallback_reason.clone())
+    }
+
+    fn uses_gpu(&self) -> bool {
+        #[cfg(feature = "gpu")]
+        {
+            self.gpu.is_some()
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            false
+        }
+    }
+
+    fn backend(&self) -> RendererBackend {
+        if self.uses_gpu() {
+            RendererBackend::Wgpu
+        } else {
+            self.renderer.backend()
+        }
     }
 
     fn handle_window_event(&mut self, event: &WindowEvent<'_>) -> bool {
@@ -1152,9 +1240,11 @@ impl WindowManager {
             }
         }
 
-        let window = builder
-            .build(target)
-            .with_context(|| format!("failed to create window `{}`", config.title))?;
+        let window = Arc::new(
+            builder
+                .build(target)
+                .with_context(|| format!("failed to create window `{}`", config.title))?,
+        );
         apply_platform_window_options(&window, &config)?;
         let tao_id = window.id();
         let menu = self.app_menu.clone();
@@ -1243,6 +1333,7 @@ impl WindowManager {
                         scale_factor,
                         &config.title,
                         a11y_send,
+                        Some(Arc::clone(&window)),
                     )
                     .context("failed to initialize native UI window")?,
                 );
@@ -1366,7 +1457,7 @@ impl WindowManager {
     }
 
     fn native_ui_backend(&self, id: WindowId) -> Result<RendererBackend> {
-        Ok(self.native_ui(id)?.renderer.backend())
+        Ok(self.native_ui(id)?.backend())
     }
 
     fn native_ui_last_error(&self, id: WindowId) -> Result<Option<String>> {
@@ -1383,11 +1474,16 @@ impl WindowManager {
             .as_mut()
             .ok_or_else(|| anyhow!("window {:?} has no native UI", id))?;
         let render_result = native.render();
-        let present_result = native
-            .cpu_frame
-            .as_ref()
-            .ok_or_else(|| anyhow!("native UI produced no CPU frame"))
-            .and_then(|frame| present_cpu_frame(&window.window, frame));
+        let present_result = if native.uses_gpu() {
+            // The GPU presenter already presented this frame.
+            Ok(())
+        } else {
+            native
+                .cpu_frame
+                .as_ref()
+                .ok_or_else(|| anyhow!("native UI produced no CPU frame"))
+                .and_then(|frame| present_cpu_frame(&window.window, frame))
+        };
         if let Err(error) = &present_result {
             native.last_error = Some(error.to_string());
         }
@@ -1576,6 +1672,50 @@ fn present_cpu_frame(window: &Window, frame: &CpuFrame) -> Result<()> {
     buffer
         .present()
         .map_err(|error| anyhow!("failed to present native software frame: {error:?}"))
+}
+
+fn create_renderer_with_fallback(
+    requested: RendererKind,
+    size: RenderSize,
+    fallback_reason: &mut Option<String>,
+) -> Result<Box<dyn Renderer>> {
+    match create_renderer(requested, size) {
+        Ok(renderer) => Ok(renderer),
+        Err(error) => {
+            tracing::warn!(
+                requested = %requested,
+                %error,
+                "native UI renderer unavailable; falling back to software"
+            );
+            *fallback_reason = Some(format!("{requested} renderer unavailable: {error}"));
+            create_renderer(RendererKind::Software, size)
+                .context("failed to create native UI software fallback")
+        }
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn create_gpu_presenter(
+    requested: RendererKind,
+    window: Option<Arc<Window>>,
+    size: RenderSize,
+) -> (Option<gpu_present::GpuPresenter>, Option<String>) {
+    if requested == RendererKind::Software {
+        return (None, None);
+    }
+    let Some(window) = window else {
+        return (None, None);
+    };
+    if env::var_os("NO_GPU").is_some_and(|value| value != std::ffi::OsStr::new("0")) {
+        return (None, Some("GPU presentation disabled by NO_GPU".to_owned()));
+    }
+    match gpu_present::GpuPresenter::new(window, size) {
+        Ok(presenter) => (Some(presenter), None),
+        Err(error) => {
+            tracing::warn!(%error, "native GPU presentation unavailable");
+            (None, Some(format!("GPU presentation unavailable: {error}")))
+        }
+    }
 }
 
 fn physical_to_logical(size: RenderSize, scale_factor: f64) -> Size {
@@ -1845,12 +1985,15 @@ mod tests {
     use crate::ui::{button, column, text, NativeUi};
 
     fn test_native_ui() -> NativeUi {
+        // These tests exercise window and paint behavior, so pin the renderer
+        // instead of letting it depend on whether the host has an adapter.
         NativeUi::new(|context| {
             column(context).children(|context| {
                 text(context, "native renderer");
                 button(context, "action");
             });
         })
+        .with_renderer_kind(RendererKind::Software)
     }
 
     #[test]
@@ -1881,15 +2024,15 @@ mod tests {
 
     #[test]
     fn native_ui_window_consumes_display_list_through_renderer() {
-        let mut window =
-            NativeUiWindow::new(
-                test_native_ui(),
-                RenderSize::new(320, 200),
-                1.0,
-                "test",
-                Arc::new(|_| {}),
-            )
-            .unwrap();
+        let mut window = NativeUiWindow::new(
+            test_native_ui(),
+            RenderSize::new(320, 200),
+            1.0,
+            "test",
+            Arc::new(|_| {}),
+            None,
+        )
+        .unwrap();
         assert_eq!(window.renderer.backend(), RendererBackend::Software);
         // The button's border and face are two rounded rects over its
         // label, beside the column's own text: four commands, two texts.
@@ -1907,6 +2050,7 @@ mod tests {
             1.0,
             "test",
             Arc::new(|_| {}),
+            None,
         )
         .unwrap();
         // Constructing the window renders its first frame.
@@ -1927,7 +2071,7 @@ mod tests {
     #[test]
     fn native_ui_auto_falls_back_without_gpu_feature() {
         let ui = test_native_ui().with_renderer_kind(crate::ui::RendererKind::Auto);
-        let window = NativeUiWindow::new(ui, RenderSize::new(100, 80), 1.0, "test", Arc::new(|_| {})).unwrap();
+        let window = NativeUiWindow::new(ui, RenderSize::new(100, 80), 1.0, "test", Arc::new(|_| {}), None).unwrap();
         assert_eq!(window.renderer.backend(), RendererBackend::Software);
     }
 
@@ -1935,7 +2079,7 @@ mod tests {
     #[test]
     fn explicit_wgpu_request_falls_back_and_reports_the_error() {
         let ui = test_native_ui().with_renderer_kind(crate::ui::RendererKind::Wgpu);
-        let window = NativeUiWindow::new(ui, RenderSize::new(100, 80), 1.0, "test", Arc::new(|_| {})).unwrap();
+        let window = NativeUiWindow::new(ui, RenderSize::new(100, 80), 1.0, "test", Arc::new(|_| {}), None).unwrap();
         assert_eq!(window.renderer.backend(), RendererBackend::Software);
         assert!(window
             .effective_error()

@@ -311,12 +311,33 @@ impl CpuRasterizer {
                         y2,
                         width,
                         color,
-                    } => canvas.draw_line(
+                    } => {
+                        let scale = transform.scale_factor();
+                        canvas.draw_line_device(
+                            scissor,
+                            transform.apply(Point::new(*x1, *y1)),
+                            transform.apply(Point::new(*x2, *y2)),
+                            *width * scale,
+                            *color,
+                        )
+                    }
+                    DrawCommand::Shadow {
+                        x,
+                        y,
+                        width,
+                        height,
+                        radius,
+                        offset_x,
+                        offset_y,
+                        blur,
+                        color,
+                    } => canvas.fill_shadow(
                         transform,
                         scissor,
-                        Point::new(*x1, *y1),
-                        Point::new(*x2, *y2),
-                        *width,
+                        Rect::new(*x, *y, *width, *height),
+                        *radius,
+                        Point::new(*offset_x, *offset_y),
+                        *blur,
                         *color,
                     ),
                     DrawCommand::LinearGradient {
@@ -643,7 +664,121 @@ impl Canvas {
         }
     }
 
-    fn draw_line(
+    /// Draws the blur a rounded rectangle casts, offset from it.
+    ///
+    /// The mask is rasterized and blurred in device space. A rotated or
+    /// skewed transform falls back to a solid rounded rectangle with the
+    /// blur spread into its radius, since a rotated blur would need its own
+    /// transformed mask.
+    #[allow(clippy::too_many_arguments)]
+    fn fill_shadow(
+        &mut self,
+        transform: TransformMatrix,
+        scissor: Option<Rect>,
+        rect: Rect,
+        radius: f32,
+        offset: Point,
+        blur: f32,
+        color: Color,
+    ) {
+        if rect.width <= 0.0 || rect.height <= 0.0 || color.a == 0 {
+            return;
+        }
+        let matrix = transform.to_array();
+        let axis_aligned = matrix[1].abs() < 0.0001 && matrix[2].abs() < 0.0001;
+        let shifted = Rect::new(
+            rect.x + offset.x,
+            rect.y + offset.y,
+            rect.width,
+            rect.height,
+        );
+        let blur = blur.max(0.0);
+        if !axis_aligned {
+            let spread = blur * 0.5;
+            self.fill_rounded_rect(
+                transform,
+                scissor,
+                Rect::new(
+                    shifted.x - spread,
+                    shifted.y - spread,
+                    shifted.width + spread * 2.0,
+                    shifted.height + spread * 2.0,
+                ),
+                Radius::all(radius + spread),
+                color,
+            );
+            return;
+        }
+        let scale = transform.scale_factor().max(0.0001);
+        let device = transform.transform_rect(shifted);
+        let blur_px = blur * scale;
+        let reach = blur_px * 2.5 + 2.0;
+        let mut left = (device.x - reach).floor().max(0.0);
+        let mut top = (device.y - reach).floor().max(0.0);
+        let mut right = (device.right() + reach).ceil().min(self.width as f32);
+        let mut bottom = (device.bottom() + reach).ceil().min(self.height as f32);
+        if let Some(clip) = scissor {
+            left = left.max(clip.x.max(0.0).floor());
+            top = top.max(clip.y.max(0.0).floor());
+            right = right.min(clip.right().ceil().clamp(0.0, self.width as f32));
+            bottom = bottom.min(clip.bottom().ceil().clamp(0.0, self.height as f32));
+        }
+        if left >= right || top >= bottom {
+            return;
+        }
+        let width = (right - left) as usize;
+        let height = (bottom - top) as usize;
+        let maximum = device.width.min(device.height) / 2.0;
+        let corner = (radius * scale).clamp(0.0, maximum);
+        let radii = [corner; 4];
+        let mut mask = vec![0.0_f32; width * height];
+        for y in 0..height {
+            for x in 0..width {
+                let mut covered = 0.0;
+                for sample_y in 0..2 {
+                    for sample_x in 0..2 {
+                        let px = left + x as f32 + (sample_x as f32 + 0.5) / 2.0;
+                        let py = top + y as f32 + (sample_y as f32 + 0.5) / 2.0;
+                        if inside_rounded_rect(device, radii, px, py) {
+                            covered += 0.25;
+                        }
+                    }
+                }
+                mask[y * width + x] = covered;
+            }
+        }
+        // Three box passes approximate the Gaussian the blur radius names.
+        let pass = (blur_px * 0.5).round() as usize;
+        if pass > 0 {
+            for _ in 0..3 {
+                box_blur(&mut mask, width, height, pass);
+            }
+        }
+        let color = color_to_array(color);
+        for y in 0..height {
+            for x in 0..width {
+                let coverage = mask[y * width + x];
+                if coverage <= 0.001 {
+                    continue;
+                }
+                self.blend(
+                    left as u32 + x as u32,
+                    top as u32 + y as u32,
+                    [
+                        color[0],
+                        color[1],
+                        color[2],
+                        color[3] * coverage.min(1.0),
+                    ],
+                );
+            }
+        }
+    }
+
+    /// Draws a line in local coordinates, transforming the quad once so
+    /// non-uniform scales stretch it the same way the GPU's local SVG mask
+    /// is stretched by the full transform.
+    fn draw_line_local(
         &mut self,
         transform: TransformMatrix,
         scissor: Option<Rect>,
@@ -652,42 +787,48 @@ impl Canvas {
         width: f32,
         color: Color,
     ) {
-        if width <= 0.0 {
+        let Some(points) = line_quad(start, end, width) else {
             return;
-        }
-        let dx = end.x - start.x;
-        let dy = end.y - start.y;
-        let length = (dx * dx + dy * dy).sqrt();
-        if length <= f32::EPSILON {
-            return;
-        }
-        let half = width / 2.0;
-        let normal = Point::new(-dy / length * half, dx / length * half);
+        };
         let points = [
-            Point::new(start.x + normal.x, start.y + normal.y),
-            Point::new(end.x + normal.x, end.y + normal.y),
-            Point::new(end.x - normal.x, end.y - normal.y),
-            Point::new(start.x - normal.x, start.y - normal.y),
-        ];
-        let transformed = [
             transform.apply(points[0]),
             transform.apply(points[1]),
             transform.apply(points[2]),
             transform.apply(points[3]),
         ];
-        let axis_aligned = ((transformed[0].x - transformed[1].x).abs() < 0.001
-            && (transformed[1].y - transformed[2].y).abs() < 0.001
-            && (transformed[2].x - transformed[3].x).abs() < 0.001
-            && (transformed[3].y - transformed[0].y).abs() < 0.001)
-            || ((transformed[0].y - transformed[1].y).abs() < 0.001
-                && (transformed[1].x - transformed[2].x).abs() < 0.001
-                && (transformed[2].y - transformed[3].y).abs() < 0.001
-                && (transformed[3].x - transformed[0].x).abs() < 0.001);
+        self.fill_line_quad(scissor, points, color);
+    }
+
+    /// Draws a line whose endpoints and thickness are already in device space,
+    /// as [`DrawCommand::Line`] is rendered on the GPU.
+    fn draw_line_device(
+        &mut self,
+        scissor: Option<Rect>,
+        start: Point,
+        end: Point,
+        width: f32,
+        color: Color,
+    ) {
+        let Some(points) = line_quad(start, end, width) else {
+            return;
+        };
+        self.fill_line_quad(scissor, points, color);
+    }
+
+    fn fill_line_quad(&mut self, scissor: Option<Rect>, points: [Point; 4], color: Color) {
+        let axis_aligned = ((points[0].x - points[1].x).abs() < 0.001
+            && (points[1].y - points[2].y).abs() < 0.001
+            && (points[2].x - points[3].x).abs() < 0.001
+            && (points[3].y - points[0].y).abs() < 0.001)
+            || ((points[0].y - points[1].y).abs() < 0.001
+                && (points[1].x - points[2].x).abs() < 0.001
+                && (points[2].y - points[3].y).abs() < 0.001
+                && (points[3].x - points[0].x).abs() < 0.001);
         if axis_aligned {
-            let left = transformed.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
-            let top = transformed.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
-            let right = transformed.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
-            let bottom = transformed.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
+            let left = points.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+            let top = points.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+            let right = points.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
+            let bottom = points.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
             self.fill_axis_aligned_rect(
                 scissor,
                 Rect::new(left, top, right - left, bottom - top),
@@ -697,10 +838,20 @@ impl Canvas {
         }
         let color = color_to_array(color);
         self.fill_triangle(
-            transform, scissor, transformed[0], transformed[1], transformed[2], [color; 3],
+            TransformMatrix::IDENTITY,
+            scissor,
+            points[0],
+            points[1],
+            points[2],
+            [color; 3],
         );
         self.fill_triangle(
-            transform, scissor, transformed[0], transformed[2], transformed[3], [color; 3],
+            TransformMatrix::IDENTITY,
+            scissor,
+            points[0],
+            points[2],
+            points[3],
+            [color; 3],
         );
     }
 
@@ -1228,8 +1379,7 @@ impl Canvas {
         stroke_width: f32,
         color: Color,
     ) {
-        let width = stroke_width * transform.scale_factor();
-        if width <= 0.0 {
+        if stroke_width <= 0.0 {
             return;
         }
         for contour in contours {
@@ -1237,12 +1387,12 @@ impl Canvas {
                 continue;
             }
             for pair in contour.points.windows(2) {
-                self.draw_line(transform, scissor, pair[0], pair[1], width, color);
+                self.draw_line_local(transform, scissor, pair[0], pair[1], stroke_width, color);
             }
             if contour.closed {
                 let first = contour.points[0];
                 let last = *contour.points.last().expect("contour has points");
-                self.draw_line(transform, scissor, last, first, width, color);
+                self.draw_line_local(transform, scissor, last, first, stroke_width, color);
             }
         }
     }
@@ -1267,6 +1417,69 @@ impl Canvas {
     }
 }
 
+/// The four corners of a line quad in whatever space its endpoints are in,
+/// or `None` when the line has no width or length.
+fn line_quad(start: Point, end: Point, width: f32) -> Option<[Point; 4]> {
+    if width <= 0.0 {
+        return None;
+    }
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    let length = (dx * dx + dy * dy).sqrt();
+    if length <= f32::EPSILON {
+        return None;
+    }
+    let half = width / 2.0;
+    let normal = Point::new(-dy / length * half, dx / length * half);
+    Some([
+        Point::new(start.x + normal.x, start.y + normal.y),
+        Point::new(end.x + normal.x, end.y + normal.y),
+        Point::new(end.x - normal.x, end.y - normal.y),
+        Point::new(start.x - normal.x, start.y - normal.y),
+    ])
+}
+
+/// Applies one box-blur pass horizontally and one vertically to a row-major
+/// coverage mask, with clamped edges.
+pub(crate) fn box_blur(mask: &mut [f32], width: usize, height: usize, radius: usize) {
+    if radius == 0 || width == 0 || height == 0 {
+        return;
+    }
+    let norm = 1.0 / (radius * 2 + 1) as f32;
+    let mut horizontal = vec![0.0_f32; mask.len()];
+    for y in 0..height {
+        let row = y * width;
+        let mut sum = 0.0;
+        for k in 0..=radius {
+            sum += mask[row + k.min(width - 1)];
+        }
+        for x in 0..width {
+            horizontal[row + x] = sum * norm;
+            if x + 1 < width {
+                let entering = (x + 1 + radius).min(width - 1);
+                let leaving = (x as isize - radius as isize).max(0) as usize;
+                sum += mask[row + entering] - mask[row + leaving];
+            }
+        }
+    }
+    let mut vertical = vec![0.0_f32; horizontal.len()];
+    for x in 0..width {
+        let mut sum = 0.0;
+        for k in 0..=radius {
+            sum += horizontal[k.min(height - 1) * width + x];
+        }
+        for y in 0..height {
+            vertical[y * width + x] = sum * norm;
+            if y + 1 < height {
+                let entering = (y + 1 + radius).min(height - 1);
+                let leaving = (y as isize - radius as isize).max(0) as usize;
+                sum += horizontal[entering * width + x] - horizontal[leaving * width + x];
+            }
+        }
+    }
+    mask.copy_from_slice(&vertical);
+}
+
 fn add_arc(points: &mut Vec<Point>, center: Point, radius: f32, start: f32, end: f32) {
     // Use enough segments that a large radius does not become a visible
     // polyline; small controls keep the original six-segment floor.
@@ -1282,7 +1495,7 @@ fn add_arc(points: &mut Vec<Point>, center: Point, radius: f32, start: f32, end:
 }
 
 
-fn inside_rounded_rect(rect: Rect, radii: [f32; 4], x: f32, y: f32) -> bool {
+pub(crate) fn inside_rounded_rect(rect: Rect, radii: [f32; 4], x: f32, y: f32) -> bool {
     if x < rect.x || x > rect.right() || y < rect.y || y > rect.bottom() {
         return false;
     }
@@ -1427,6 +1640,83 @@ mod tests {
     }
 
     #[test]
+    fn line_thickness_is_scaled_once_in_device_space() {
+        let display = DisplayList::from_commands(vec![
+            DrawCommand::TransformPush {
+                transform: Transform::scale(Point::new(2.0, 2.0)),
+            },
+            DrawCommand::Line {
+                x1: 10.0,
+                y1: 10.0,
+                x2: 40.0,
+                y2: 10.0,
+                width: 4.0,
+                color: Color::rgb(0, 255, 0),
+            },
+            DrawCommand::TransformPop,
+        ]);
+        // Endpoints become x=20..80 and the width becomes 4*2=8, so the line
+        // covers y=16..24. A second transform would double it to 16.
+        let frame =
+            CpuRasterizer::rasterize(&display, RenderSize::new(96, 48), Color::BLACK).unwrap();
+        assert_eq!(pixel(&frame, 50, 20), 0x0000ff00);
+        assert_eq!(pixel(&frame, 50, 12), 0x00000000);
+        assert_eq!(pixel(&frame, 50, 28), 0x00000000);
+
+        // Non-uniform scales use one average factor, as the GPU capsule does.
+        let display = DisplayList::from_commands(vec![
+            DrawCommand::TransformPush {
+                transform: Transform::scale(Point::new(4.0, 1.0)),
+            },
+            DrawCommand::Line {
+                x1: 10.0,
+                y1: 10.0,
+                x2: 40.0,
+                y2: 10.0,
+                width: 4.0,
+                color: Color::rgb(0, 255, 0),
+            },
+            DrawCommand::TransformPop,
+        ]);
+        // Device width 4*(4+1)/2=10 covers y=5..15.
+        let frame =
+            CpuRasterizer::rasterize(&display, RenderSize::new(200, 32), Color::BLACK).unwrap();
+        assert_eq!(pixel(&frame, 100, 10), 0x0000ff00);
+        assert_eq!(pixel(&frame, 100, 2), 0x00000000);
+        assert_eq!(pixel(&frame, 100, 18), 0x00000000);
+    }
+
+    #[test]
+    fn svg_stroke_keeps_local_geometry_under_non_uniform_scale() {
+        let display = DisplayList::from_commands(vec![
+            DrawCommand::TransformPush {
+                transform: Transform::scale(Point::new(4.0, 1.0)),
+            },
+            DrawCommand::SvgPath {
+                x: 0.0,
+                y: 0.0,
+                width: 16.0,
+                height: 8.0,
+                path: "M0 0L1 1".to_string(),
+                fill: None,
+                stroke: Some(Color::rgb(0, 255, 0)),
+                stroke_width: 4.0,
+            },
+            DrawCommand::TransformPop,
+        ]);
+        let frame =
+            CpuRasterizer::rasterize(&display, RenderSize::new(16, 8), Color::BLACK).unwrap();
+        // The stroke body covers device (2,0): local (0.625,0.125) lies on the
+        // segment, well within the local half width. The shared quad diagonal
+        // splits that pixel between two triangles, so assert ink, not a byte.
+        assert_ne!(pixel(&frame, 2, 0), 0x00000000);
+        // Device (0,4) maps back to local (0,4), 3 units away from the
+        // segment: outside the stretched local mask. A device-space capsule
+        // with an average-scale width of 10 would wrongly paint it.
+        assert_eq!(pixel(&frame, 0, 4), 0x00000000);
+    }
+
+    #[test]
     fn bitmap_fallback_still_renders() {
         let display = DisplayList::from_commands(vec![DrawCommand::Text {
             x: 2.0,
@@ -1527,6 +1817,26 @@ mod tests {
         assert_eq!(pixel(&frame, 30, 30), 0x00000000);
         assert_eq!(frame.unsupported_commands, 0);
         assert_eq!(frame.command_counts.svg_path, 1);
+    }
+
+    #[test]
+    fn shadow_draws_around_the_box_but_not_far_away() {
+        let display = DisplayList::from_commands(vec![DrawCommand::Shadow {
+            x: 20.0,
+            y: 20.0,
+            width: 40.0,
+            height: 40.0,
+            radius: 8.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur: 6.0,
+            color: Color::rgb(0, 0, 0),
+        }]);
+        let frame =
+            CpuRasterizer::rasterize(&display, RenderSize::new(100, 100), Color::WHITE).unwrap();
+        assert_ne!(pixel(&frame, 16, 40), 0x00ffffff, "blur reaches outside");
+        assert_ne!(pixel(&frame, 40, 40), 0x00ffffff, "the casting box is shaded too");
+        assert_eq!(pixel(&frame, 90, 90), 0x00ffffff, "far pixels stay clear");
     }
 
     #[test]

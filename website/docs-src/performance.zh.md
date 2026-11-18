@@ -10,7 +10,7 @@ frame_stats_panel(c, "stats", stats);
 
 `layout_ms` 覆盖 `compute_layout`；`paint_ms` 覆盖 display-list 构建、interaction/access 收集与统计；`total_ms` 覆盖两者及其开销。字段是 `f32` 毫秒，不做平均或平滑。
 
-不包含宿主呈现、softbuffer/GPU upload、compositor、启动时字体发现或输入翻译。适合比较视图/布局工作，不是端到端延迟。
+不包含宿主呈现、softbuffer/GPU upload 与 present、compositor、启动时字体发现或输入翻译。适合比较视图/布局工作，不是端到端延迟。
 
 ## Retained memory
 

@@ -92,17 +92,21 @@ live in [`examples/`](examples/README.md).
 
 ### Native UI renderer
 
-The default workspace build has no GPU dependency. `SoftwareRenderer` is
-always available and analyzes/validates display lists without producing
-pixels. Enable the real wgpu offscreen backend explicitly:
+Native UI windows present through wgpu when the `gpu` feature is enabled
+(default in `myrust-core`) and a compatible adapter exists: Vulkan on Linux,
+Metal on macOS, DX12 on Windows. The presenter draws shapes, gradients, text,
+SVG paths and shadows on the GPU, and redraws only the regions that changed
+since the previous display list.
+
+When no adapter or surface is available, or the surface is lost at runtime,
+the window falls back to `CpuRasterizer` plus `softbuffer`; set `NO_GPU=1` to
+force that path. `SoftwareRenderer` remains a non-rasterizing stats backend.
+
+The offscreen `WgpuRenderer` is also available for tests and tools:
 
 ```bash
-cargo build -p myrust-core --features gpu
+cargo build -p myrust-ui --features gpu
 ```
-
-HTTP, WebView, CLI, and Dashboard startup never initialize wgpu implicitly.
-Applications must call `create_renderer` explicitly and select
-`RendererKind::Wgpu` when a missing GPU must be treated as an error.
 
 Developer tools follow the upstream `wry` gate: `WebView::open_devtools` and
 `Page::open_devtools` exist in debug builds and when the `devtools` feature is
@@ -317,11 +321,11 @@ let _guard = SingleInstance::acquire("myrust-app")?;
 - Package generation writes metadata skeletons only; it does not invoke `hdiutil`, `dpkg-deb`, `makepkg`, MSI tooling, or code-signing tools.
 - Code signing and notarization always return explicit errors until Phase 4 platform tooling is wired.
 - Windows named-pipe activation forwarding is not implemented; Windows single-instance support remains detection-only.
-- The wgpu renderer requires a working GPU or graphics driver at runtime. This Linux container has no `/dev/dri`, so the GPU path is compile-validated but not device-validated here; no adapter returns an explicit error and `RendererKind::Auto` falls back to software.
+- The wgpu path is device-validated against Mesa lavapipe (Vulkan on CPU) under Xvfb: the GPU presenter opened a real window, presented it, redrew only chart-sized damage rectangles on later frames, and fell back to `CpuRasterizer`/`softbuffer` with `NO_GPU=1`. Real desktop GPUs and macOS/Windows surface behavior remain unverified here; no adapter produces an explicit fallback reason instead of a failure.
 - `NativeUiWindow` also falls back to `SoftwareRenderer` if an explicitly requested renderer cannot initialize, keeps the window/other windows alive, logs the failure, and exposes it through `AppContext::native_ui_last_error`.
 - `SoftwareRenderer` is not a pixel rasterizer. It validates and analyzes display-list commands, transforms, scissors, and bounds only.
 - Native UI has been run under an Xvfb virtual X11 display (`DISPLAY=:77`, 1280x900): the `myrust Native Dashboard` window opened at 1024x820 with the Software backend, rendered, and accepted real mouse clicks and keyboard input; click follow-up frames now settle synchronously. Real hardware desktop sessions and macOS/Windows behavior are still unverified. XTest buttons 4/5 are not interpreted as wheel events by GDK under Xvfb, so wheel behavior remains unit-tested rather than Xvfb-verified.
-- The wgpu renderer targets a single-sample offscreen texture. It does not expose a native wgpu surface or swapchain, and its offscreen texture is not copied to the window. The `--native-ui` window presents the same display list through `CpuRasterizer` and `softbuffer`.
+- Window presentation keeps a persistent front texture, diffs adjacent display lists into at most eight damage rectangles, and blits the texture to a wgpu surface; the separate offscreen `WgpuRenderer` still targets a single-sample texture for tests and tools.
 - `CpuRasterizer` is a basic CPU presenter. It prefers one discovered system TTF and falls back to fixed 8x8 bitmap glyphs if loading fails. It supports text alignment (start/center/end) with optional max-width wrapping, bold synthesis via coverage-bitmap offset, SVG path fill and stroke, and line/stroke overlay on filled outlines. It does not implement shaping, kerning, bidi layout, multi-font fallback, IME composition, image decoding, or optimized spatial hit testing.
 - `Renderer` reports Text, SVG path, and image commands as unsupported through `RenderStats`; the separate CPU presenter (`CpuRasterizer`) draws TTF text, SVG paths, and supported geometry independently from those statistics.
 - `Theme::system()` only detects light versus dark appearance. It does not read the system accent color or high-contrast preference.
@@ -336,7 +340,7 @@ let _guard = SingleInstance::acquire("myrust-app")?;
 |-------|-------|
 | **✓ Phase 1** | Multi-window WebView, typed IPC, desktop APIs, CLI |
 | **✓ Phase 2** | Menus, clipboard, drop/hot reload, window state, sessions, page APIs, deep links, downloads, protocols, system/media/login, updater, packaging descriptions, signing interfaces, single-instance forwarding |
-| **✓ Phase 3** | Immediate-mode `Context` + `NativeUi`, Theme/spacing/font tokens, hover animations and reduced-motion handling, semantic accessibility nodes, hover/focus/Tab and keyboard activation, TextField/Checkbox/Slider/ScrollView, pure-CPU layout, display lists, TTF/bitmap text, SVG icons, renderer abstraction, optional wgpu offscreen backend, CPU fallback/presenter, `WindowContent::NativeUi`, event/redraw wiring, `--native-ui` demo; Linux AT-SPI bridge, macOS/Windows AT bridges, native reduced-motion APIs, full text/SVG/image rendering, wgpu window presentation, inline IME preedit, and cross-platform desktop validation remain incomplete |
+| **✓ Phase 3** | Immediate-mode `Context` + `NativeUi`, Theme/spacing/font tokens, hover animations and reduced-motion handling, semantic accessibility nodes, hover/focus/Tab and keyboard activation, TextField/Checkbox/Slider/ScrollView, pure-CPU layout, display lists, TTF/bitmap text, SVG icons, renderer abstraction, optional wgpu offscreen backend, CPU fallback/presenter, `WindowContent::NativeUi`, event/redraw wiring, `--native-ui` demo, wgpu window presentation with damage-only redraw; Linux AT-SPI bridge, macOS/Windows AT bridges, native reduced-motion APIs, image rendering, inline IME preedit, and cross-platform desktop validation remain incomplete |
 | **Phase 4** | Packaging (.app, .dmg, .msi, .deb, PKGBUILD, code signing, delta updates) |
 
 ## License

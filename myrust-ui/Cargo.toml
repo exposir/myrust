@@ -8,7 +8,7 @@ description = "Platform-neutral immediate-mode UI for myrust"
 
 [features]
 default = []
-gpu = ["dep:wgpu"]
+gpu = ["dep:wgpu", "dep:tokio"]
 
 [dependencies]
 ab_glyph.workspace = true
@@ -17,6 +17,7 @@ font8x8.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tokio = { workspace = true, optional = true }
 wgpu = { workspace = true, optional = true }
 serde_json.workspace = true
 

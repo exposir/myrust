@@ -243,11 +243,11 @@ pub use present::{CpuFrame, CpuRasterizer, RasterError, TextRenderCommand};
 pub use range_slider::{range_slider, RangeKnob, RangeSliderResponse, RangeSliderState};
 pub use rating::{rating, RatingState};
 pub use render::{
-    create_renderer, CommandCounts, RenderError, RenderSize, RenderStats, Renderer,
+    create_renderer, diff, CommandCounts, Damage, RenderError, RenderSize, RenderStats, Renderer,
     RendererBackend, RendererKind, SoftwareRenderer,
 };
 #[cfg(feature = "gpu")]
-pub use render::{GpuInfo, WgpuRenderer};
+pub use render::{GpuInfo, GpuScene, WgpuRenderer};
 pub use rich_text::{rich_text, rich_text_spans, RichTextResponse, RichTextSpan};
 pub use router::{
     back_forward_buttons, router, BackForwardState, Page, RouterResponse, RouterState,

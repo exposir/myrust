@@ -10,7 +10,7 @@ frame_stats_panel(c, "stats", stats);
 
 `layout_ms` covers `compute_layout`; `paint_ms` covers display-list construction, interaction/access collection and stats; `total_ms` covers both plus their overhead. The fields are `f32` milliseconds and are not averaged or smoothed.
 
-The timings do not include host presentation, softbuffer/GPU upload, compositor work, font discovery at startup or input translation. They are useful for comparing view/layout work, not for end-to-end latency.
+The timings do not include host presentation, softbuffer/GPU upload or presentation, compositor work, font discovery at startup or input translation. They are useful for comparing view/layout work, not for end-to-end latency.
 
 ## Retained memory
 

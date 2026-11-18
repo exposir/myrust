@@ -7,9 +7,9 @@ license.workspace = true
 description = "Desktop application framework for myrust"
 
 [features]
-default = ["a11y"]
+default = ["a11y", "gpu"]
 a11y = ["dep:accesskit", "dep:accesskit_unix"]
-gpu = ["dep:wgpu"]
+gpu = ["dep:wgpu", "myrust-ui/gpu"]
 devtools = ["wry/devtools"]
 
 [dependencies]

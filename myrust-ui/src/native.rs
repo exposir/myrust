@@ -88,7 +88,7 @@ impl NativeUi {
                 last_size: Size::new(1.0, 1.0),
             })),
             input_queue: Rc::new(RefCell::new(Vec::new())),
-            renderer_kind: RendererKind::Software,
+            renderer_kind: RendererKind::Auto,
             theme: Theme::dark(),
             preview: false,
             pixel_scale: std::cell::Cell::new(1.0),
@@ -97,8 +97,10 @@ impl NativeUi {
 
     /// Selects the renderer preference used by the application window.
     ///
-    /// The default is software so creating a window never attempts GPU
-    /// initialization implicitly.
+    /// The default is [`RendererKind::Auto`]: windows use the GPU presenter
+    /// when the `gpu` feature is compiled and an adapter exists, and fall
+    /// back to the CPU presenter otherwise. Selecting
+    /// [`RendererKind::Software`] never touches GPU APIs.
     pub fn with_renderer_kind(mut self, kind: RendererKind) -> Self {
         self.renderer_kind = kind;
         self
