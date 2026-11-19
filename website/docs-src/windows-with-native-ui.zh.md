@@ -151,3 +151,17 @@ runtime 为窗口内容发出 `AccessNode` 元数据；native 标题栏/traffic 
 `myrust_core::desktop::system::AppearancePreferences::detect()` 读取原生外观设置。Windows 上 reduced motion 来自 `UISettings::AnimationsEnabled`，accent color 来自 `UISettings::GetColorValue(UIColorType::Accent)`，high contrast 来自 `SPI_GETHIGHCONTRAST`。每个字段都是 `Option`：API 失败或不可用时保留 `None`。
 
 `AppearancePreferences::theme()` 选择内置明/暗主题并应用检测到的 accent，同时生成 hover/pressed 色阶与对比色标签。`myrust_core::system_theme()` 组合检测与主题构建。`Theme::system()` 本身仍只处理明暗。reduced motion 与 high contrast 留在 `AppearancePreferences`，因为 `Theme` 没有对应字段。
+
+## Desktop platform services
+
+这些服务独立于 native UI 渲染，`WindowContent::NativeUi` 与 `WindowContent::WebView` 都可使用。
+
+`SingleInstance::acquire(name)` 会把第二次启动的参数与工作目录转发给第一个进程。Unix 使用每用户文件系统 socket，Windows 使用 namespaced named pipe。回调注册前到达的 activation 会排队。Unix 与 Windows 之外的平台保留 detection-only 行为，可用 `supports_activation_forwarding()` 判断差异。
+
+`WindowsJumpList::new(app_id)` 通过 Shell COM API 发布最近文档。`app_id` 必须与安装器和快捷方式使用的 AppUserModelID 一致，不能为空，也不能包含空白字符。当前实现会重新加入 `BeginList` 返回的路径，尚未尊重用户从 jump list 中移除的目标；也没有 macOS 或 Linux 等价实现。
+
+`PowerAssertion::prevent_sleep` 与 `PowerAssertion::prevent_display_sleep` 持有 RAII 睡眠断言。macOS 使用 `IOPMAssertion`，Windows 使用 `SetThreadExecutionState`，Linux 使用 `systemd-inhibit` 阻止系统睡眠。Linux 阻止显示休眠会返回显式错误。Windows 断言是线程本地的，应在同一线程创建和释放。
+
+`SecretStore` 把二进制 secret 保存到 Keychain、Credential Manager 或 Linux Secret Service。后端缺失、锁定或不可用会返回错误；不存在内存 fallback。同一个 store 内的操作会串行执行，因为 Secret Service 对并发请求敏感。
+
+`ClipboardWatcher` 轮询文本与 RGBA 图像，做去抖并抑制重复值。采用轮询是因为目标平台没有统一的原生剪贴板变更事件。打开剪贴板发生在 worker 线程启动之前，因此 headless 环境会在 `watch()` 处直接失败，不会静默回退。

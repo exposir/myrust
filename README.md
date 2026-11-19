@@ -18,7 +18,7 @@ Each MyRust window loads a **web page** in the system's native WebView — WKWeb
 - **System WebView** — uses the OS-native renderer instead of bundling a browser engine.
 - **Embedded WebView regions** — place WKWebView/WebView2/WebKitGTK children in NativeUi flex layout, with clipping, visibility, physical-pixel bounds and click focus.
 - **Dual mode** — the same source runs as a native desktop window or a standalone HTTP server.
-- **Desktop APIs** — windows, native menus, system tray, notifications, clipboard, file dialogs, global shortcuts, and a single-instance lock.
+- **Desktop APIs** — windows, native menus, system tray, notifications, clipboard and clipboard watching, secure credential storage, file dialogs, global shortcuts, power assertions, and single-instance activation forwarding.
 - **File drag & drop** — WebView drop events reach Rust through typed callbacks.
 - **Window state** — logical geometry, maximized/fullscreen state, and display scale persist to JSON.
 - **Sessions & pages** — logical session identities, session-state hooks, page-level navigation, zoom, find, and content-rule metadata.
@@ -132,14 +132,14 @@ cargo run -p myrust-cli -- build
 | Platform | Dependencies |
 |----------|-------------|
 | **macOS** | Xcode CLI tools (no additional setup) |
-| **Linux** | GTK3, WebKitGTK 4.1, AppIndicator |
+| **Linux** | GTK3, WebKitGTK 4.1, AppIndicator, libdbus/Secret Service |
 | **Windows** | WebView2 runtime (shipped with Windows 11) |
 
 Debian / Ubuntu:
 
 ```bash
 sudo apt-get install libwebkit2gtk-4.1-dev libgtk-3-dev \
-  libayatana-appindicator3-dev
+  libayatana-appindicator3-dev libdbus-1-dev
 ```
 
 ## Architecture
@@ -164,11 +164,13 @@ myrust/
 │       └── desktop/
 │           ├── menu.rs       # Native menu bar + context menu wrappers
 │           ├── clipboard.rs  # Text + RGBA image clipboard
+│           ├── clipboard_watch.rs # Polling text/image change watcher
 │           ├── tray.rs     # System tray icon + menu
 │           ├── notify.rs   # Desktop notifications
 │           ├── dialog.rs   # File open/save + message dialogs
 │           ├── shortcut.rs # Global keyboard shortcuts
-│           └── instance.rs # Single-instance lock
+│           ├── instance.rs # Single-instance lock + activation forwarding
+│           └── secrets.rs  # Keychain / Credential Manager / Secret Service
 ├── myrust-ui/              # Platform-agnostic native UI library (65+ widgets, WASM demos)
 │   ├── src/context.rs     # Immediate-mode Context + widget builders
 │   ├── src/native.rs      # NativeUi callback host, event routing
@@ -269,8 +271,9 @@ export const getStats: () => Promise<Stats>;
 
 ```rust
 use myrust_core::desktop::{
-    Clipboard, DesktopNotification, Dialog, FileDialogOptions,
-    GlobalShortcutManager, SingleInstance, SystemTray, SystemTrayConfig,
+    Clipboard, ClipboardContent, ClipboardWatchOptions, ClipboardWatcher,
+    DesktopNotification, Dialog, FileDialogOptions, GlobalShortcutManager,
+    PowerAssertion, SecretStore, SingleInstance, SystemTray, SystemTrayConfig,
 };
 use myrust_core::desktop::menu::MenuBuilder;
 
@@ -302,6 +305,22 @@ shortcuts.register("control+shift+KeyD")?;
 
 // Single instance
 let _guard = SingleInstance::acquire("myrust-app")?;
+
+// Keep the system awake for a scoped operation
+let assertion = PowerAssertion::prevent_sleep("exporting a video")?;
+drop(assertion);
+
+// Native secure storage; missing backends return an error
+let secrets = SecretStore::new("org.example.myapp")?;
+secrets.save("refresh-token", b"secret bytes")?;
+
+// Poll the clipboard with debouncing
+let watcher = ClipboardWatcher::new(ClipboardWatchOptions::default())?;
+let _watch = watcher.watch(|content| match content {
+    ClipboardContent::Text(text) => println!("copied text: {text}"),
+    ClipboardContent::Image(image) => println!("copied {}x{} image", image.width, image.height),
+    ClipboardContent::Empty => {}
+})?;
 ```
 
 ## Project status
@@ -319,8 +338,12 @@ let _guard = SingleInstance::acquire("myrust-app")?;
 - Download byte progress is not emitted by wry 0.57; only started/completed events are live.
 - WebKit content-rule structures are serialized metadata only; filtering execution is not implemented.
 - `untrusted` page mode is recorded configuration only; permission gating is not implemented.
-- Windows JumpList publication, Windows named-pipe activation forwarding, power assertions and native appearance reads are implemented at the API level; real taskbar/COM/pipe/ExecutionState behavior still needs platform validation. OS deep-link registration, native system-proxy readers and portable number/date formatting remain incomplete.
-- Update manifests without a configured verifier still fail closed through `UnimplementedSignatureVerifier`. Sparkle-style update UI, background scheduling, and platform credential storage are not implemented.
+- Windows JumpList publication, Windows named-pipe activation forwarding, power assertions, clipboard watching and native appearance reads are implemented at the API level; real taskbar/COM/pipe/ExecutionState behavior still needs platform validation. OS deep-link registration, native system-proxy readers and portable number/date formatting remain incomplete.
+- Unix and Windows single-instance activation forwarding are implemented. The Windows named-pipe path is type-constructed and cfg-isolated here but has not been exercised in a real Windows session.
+- Power assertions use IOPMAssertion on macOS, SetThreadExecutionState on Windows, and systemd-inhibit for Linux system sleep. Linux display-sleep inhibition remains explicitly unsupported. macOS/Windows assertions are not verified on real hardware here.
+- Secure secrets use Keychain, Credential Manager, and Linux Secret Service through `keyring`. There is no in-memory fallback; missing or locked backends return explicit errors. Real platform credential prompts and persistence were not exercised in this environment.
+- Clipboard watching is polling-based with debounce and duplicate suppression. It has no native change-event backend, and transient polling errors are logged rather than delivered to the callback.
+- Update manifests without a configured verifier still fail closed through `UnimplementedSignatureVerifier`. Sparkle-style update UI and background scheduling are not implemented.
 - Packaging produces Linux tar/deb/PKGBUILD, a macOS app/DMG, and a Windows NSIS installer. MSI, universal macOS binaries, and notarization against Apple's live service are not covered by CI.
 - Packaging and signing tests validate command construction, tool-missing errors, test Ed25519 keys, delta application, and archive path safety. Real `hdiutil`, `codesign`, `signtool`, `makensis`, and Apple notarization require their platform hosts and credentials.
 - The wgpu path is device-validated against Mesa lavapipe (Vulkan on CPU) under Xvfb: the GPU presenter opened a real window, presented it, redrew only chart-sized damage rectangles on later frames, and fell back to `CpuRasterizer`/`softbuffer` with `NO_GPU=1`. Real desktop GPUs and macOS/Windows surface behavior remain unverified here; no adapter produces an explicit fallback reason instead of a failure.

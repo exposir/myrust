@@ -81,6 +81,8 @@ There is no `aria-hidden`, accessibility-hidden or excluded subtree API. Not con
 
 No live region, alert, status or announcement API exists. Toasts and dialogs have visual roles but no announcement event.
 
+`ClipboardWatcher` callbacks, secure-store operations, power assertions and jump-list updates do not create accessibility announcements. Applications that need assistive-technology feedback must express it through a visible semantic node change; there is no live-region bridge.
+
 ## Landmarks, live regions and rules
 
 No landmark roles, live-region flags, atomic/relevant properties, error announcements or accessibility rules are implemented. `AccessNode` is a per-frame flat list, not a semantic tree with relationships.

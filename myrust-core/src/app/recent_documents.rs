@@ -1,8 +1,9 @@
 //! Recently opened documents and taskbar jump-list semantics.
 //!
 //! Recent documents are stored as JSON in the platform application data
-//! directory. Windows JumpList publication is an interface-only boundary in
-//! this batch: the installer and taskbar integration are deferred to Phase 4.
+//! directory. On Windows, [`WindowsJumpList`] publishes the recent-documents
+//! category through the Shell COM API. Other platforms retain an explicit
+//! unsupported backend instead of pretending publication succeeded.
 
 use std::{
     collections::HashSet,
@@ -14,6 +15,9 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::window_state::JsonFileStore;
+
+#[cfg(any(target_os = "windows", test))]
+const MAX_JUMP_LIST_ITEMS: usize = 10;
 
 /// A recently opened document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,8 +132,9 @@ impl RecentDocuments {
 
 /// Platform taskbar jump-list operations.
 ///
-/// This trait exists so Windows packaging can provide a real implementation in
-/// Phase 4. No platform implementation is registered in batch C.
+/// [`WindowsJumpList`] implements this trait on Windows. Callers on other
+/// platforms can use [`UnsupportedJumpList`] to receive an explicit capability
+/// error.
 pub trait JumpList {
     /// Replaces the recent-documents category in the platform jump list.
     fn set_recent_documents(&self, documents: &[RecentDocument]) -> Result<()>;
@@ -144,10 +149,217 @@ pub struct UnsupportedJumpList;
 
 impl JumpList for UnsupportedJumpList {
     fn set_recent_documents(&self, _documents: &[RecentDocument]) -> Result<()> {
-        bail!(
-            "JumpList publication is not implemented in Phase 2 batch C; it requires Windows installer/taskbar integration"
-        )
+        bail!("JumpList publication is unavailable on this platform")
     }
+}
+
+/// Windows taskbar jump-list publisher for an application-defined AppUserModelID.
+///
+/// The AppUserModelID must be the same identifier used by the application's
+/// installer and shortcut. The full API is available only on Windows.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone)]
+pub struct WindowsJumpList {
+    app_id: String,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsJumpList {
+    /// Creates a publisher for the given application-defined AppUserModelID.
+    pub fn new(app_id: impl Into<String>) -> Result<Self> {
+        let app_id = app_id.into();
+        validate_jump_list_app_id(&app_id)?;
+        Ok(Self { app_id })
+    }
+
+    /// Returns the AppUserModelID used for publication.
+    pub fn app_id(&self) -> &str {
+        &self.app_id
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl JumpList for WindowsJumpList {
+    fn set_recent_documents(&self, documents: &[RecentDocument]) -> Result<()> {
+        publish_windows_jump_list(&self.app_id, documents)
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JumpListEntry {
+    path: PathBuf,
+    title: String,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn jump_list_entries(
+    documents: &[RecentDocument],
+    removed_paths: &[PathBuf],
+) -> Vec<JumpListEntry> {
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+
+    for document in documents {
+        if entries.len() == MAX_JUMP_LIST_ITEMS {
+            break;
+        }
+        if !document.path.is_absolute()
+            || removed_paths.iter().any(|path| path == &document.path)
+            || !seen.insert(document.path.clone())
+        {
+            continue;
+        }
+
+        let title = if document.display_name.trim().is_empty() {
+            document
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map_or_else(
+                    || document.path.display().to_string(),
+                    |name| name.to_string(),
+                )
+        } else {
+            document.display_name.trim().to_string()
+        };
+        entries.push(JumpListEntry {
+            path: document.path.clone(),
+            title,
+        });
+    }
+
+    entries
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn validate_jump_list_app_id(app_id: &str) -> Result<()> {
+    if app_id.is_empty() {
+        bail!("Windows AppUserModelID must not be empty");
+    }
+    if app_id.len() > 128 {
+        bail!("Windows AppUserModelID must not exceed 128 bytes");
+    }
+    if app_id
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
+        bail!("Windows AppUserModelID must not contain whitespace or control characters");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+struct ComInitialization {
+    uninitialize: bool,
+}
+
+#[cfg(target_os = "windows")]
+impl ComInitialization {
+    #[allow(unsafe_code)]
+    fn apartment_threaded() -> Result<Self> {
+        use windows::Win32::{
+            Foundation::RPC_E_CHANGED_MODE,
+            System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED},
+        };
+
+        let result = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        if result.is_err() && result != RPC_E_CHANGED_MODE {
+            result
+                .ok()
+                .context("failed to initialize COM for jump-list publication")?;
+        }
+        Ok(Self {
+            uninitialize: result.is_ok(),
+        })
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for ComInitialization {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        if self.uninitialize {
+            unsafe {
+                windows::Win32::System::Com::CoUninitialize();
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+fn publish_windows_jump_list(app_id: &str, documents: &[RecentDocument]) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows::{
+        core::{IUnknown, Interface, PCWSTR},
+        Win32::{
+            System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER},
+            UI::Shell::{
+                Common::{IObjectArray, IObjectCollection},
+                DestinationList, EnumerableObjectCollection, ICustomDestinationList, IShellItem,
+                SHCreateItemFromParsingName,
+            },
+        },
+    };
+
+    let _com = ComInitialization::apartment_threaded()?;
+    let entries = jump_list_entries(documents, &[]);
+    let app_id_wide = wide_string(app_id);
+    let category_wide = wide_string("Recent");
+
+    unsafe {
+        let destinations: ICustomDestinationList =
+            CoCreateInstance(&DestinationList, None, CLSCTX_INPROC_SERVER)
+                .context("failed to create the Windows destination list")?;
+        destinations
+            .SetAppID(PCWSTR(app_id_wide.as_ptr()))
+            .context("failed to set the jump-list AppUserModelID")?;
+
+        let mut minimum_slots = 0u32;
+        let _removed: IObjectArray = destinations
+            .BeginList(&mut minimum_slots)
+            .context("failed to begin Windows jump-list update")?;
+
+        let collection: IObjectCollection =
+            CoCreateInstance(&EnumerableObjectCollection, None, CLSCTX_INPROC_SERVER)
+                .context("failed to create the Windows jump-list item collection")?;
+        for entry in &entries {
+            let path: Vec<u16> = entry
+                .path
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(path.as_ptr()), None)
+                .with_context(|| {
+                    format!(
+                        "failed to create a jump-list item for {}",
+                        entry.path.display()
+                    )
+                })?;
+            collection
+                .AddObject(&item.cast::<IUnknown>()?)
+                .with_context(|| {
+                    format!("failed to add {} to the jump list", entry.path.display())
+                })?;
+        }
+
+        destinations
+            .AppendCategory(PCWSTR(category_wide.as_ptr()), &*collection)
+            .context("failed to append the recent-documents jump-list category")?;
+        destinations
+            .CommitList()
+            .context("failed to commit the Windows jump list")?;
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn wide_string(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,5 +432,71 @@ mod tests {
         store.remove(&existing).expect("remove document");
         assert!(store.list().expect("list empty").is_empty());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn jump_list_entries_filter_deduplicate_and_fill_titles() {
+        let documents = vec![
+            RecentDocument {
+                path: PathBuf::from("/documents/one.txt"),
+                added_at: 3,
+                display_name: "One".to_string(),
+            },
+            RecentDocument {
+                path: PathBuf::from("relative.txt"),
+                added_at: 2,
+                display_name: "Relative".to_string(),
+            },
+            RecentDocument {
+                path: PathBuf::from("/documents/removed.txt"),
+                added_at: 1,
+                display_name: "Removed".to_string(),
+            },
+            RecentDocument {
+                path: PathBuf::from("/documents/one.txt"),
+                added_at: 0,
+                display_name: "Duplicate".to_string(),
+            },
+            RecentDocument {
+                path: PathBuf::from("/documents/two.txt"),
+                added_at: 0,
+                display_name: String::new(),
+            },
+        ];
+        let removed = vec![PathBuf::from("/documents/removed.txt")];
+        let entries = jump_list_entries(&documents, &removed);
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, PathBuf::from("/documents/one.txt"));
+        assert_eq!(entries[0].title, "One");
+        assert_eq!(entries[1].path, PathBuf::from("/documents/two.txt"));
+        assert_eq!(entries[1].title, "two.txt");
+    }
+
+    #[test]
+    fn jump_list_caps_entries_and_validates_app_id() {
+        let documents: Vec<_> = (0..12)
+            .map(|index| RecentDocument {
+                path: PathBuf::from(format!("/documents/{index}.txt")),
+                added_at: index,
+                display_name: format!("Document {index}"),
+            })
+            .collect();
+        let entries = jump_list_entries(&documents, &[]);
+        assert_eq!(entries.len(), MAX_JUMP_LIST_ITEMS);
+        assert_eq!(entries[0].path, PathBuf::from("/documents/0.txt"));
+
+        assert!(validate_jump_list_app_id("org.example.MyApp").is_ok());
+        assert!(validate_jump_list_app_id("").is_err());
+        assert!(validate_jump_list_app_id("org.example app").is_err());
+        assert!(validate_jump_list_app_id(&"x".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn unsupported_jump_list_reports_an_explicit_error() {
+        let error = UnsupportedJumpList
+            .set_recent_documents(&[])
+            .expect_err("unsupported backend must not silently succeed");
+        assert!(error.to_string().contains("unavailable"));
     }
 }

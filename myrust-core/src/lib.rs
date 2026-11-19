@@ -28,6 +28,8 @@ pub use app::file_watcher::{
     FileEvent, FileEventDetail, FileEventKind, FileWatcher, WatchHandle, WatchOptions,
 };
 pub use app::recent_documents::{JumpList, RecentDocument, RecentDocuments, UnsupportedJumpList};
+#[cfg(target_os = "windows")]
+pub use app::recent_documents::WindowsJumpList;
 pub use app::window_state::{JsonFileStore, WindowState, WindowStateStore};
 pub use app::{
     App, AppContext, Rect, TitleButtons, Vibrancy, WindowConfig, WindowContent, WindowId,

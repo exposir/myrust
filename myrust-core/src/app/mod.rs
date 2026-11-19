@@ -20,6 +20,8 @@ pub use file_watcher::{
     FileEvent, FileEventDetail, FileEventKind, FileWatcher, WatchHandle, WatchOptions,
 };
 pub use recent_documents::{JumpList, RecentDocument, RecentDocuments, UnsupportedJumpList};
+#[cfg(target_os = "windows")]
+pub use recent_documents::WindowsJumpList;
 pub use window_state::{JsonFileStore, WindowState, WindowStateStore};
 
 use std::{

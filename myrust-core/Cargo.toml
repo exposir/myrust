@@ -31,6 +31,7 @@ dirs.workspace = true
 flate2.workspace = true
 font8x8.workspace = true
 global-hotkey.workspace = true
+keyring.workspace = true
 muda.workspace = true
 notify.workspace = true
 notify-rust.workspace = true
@@ -63,6 +64,8 @@ accesskit_unix = { version = "0.24", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 accesskit_macos = { workspace = true, optional = true }
+objc2-core-foundation.workspace = true
+objc2-io-kit.workspace = true
 objc2-app-kit = { workspace = true, features = [
     "NSAccessibility",
     "NSColor",
@@ -72,6 +75,7 @@ objc2-app-kit = { workspace = true, features = [
 
 [target.'cfg(target_os = "windows")'.dependencies]
 accesskit_windows = { workspace = true, optional = true }
+interprocess.workspace = true
 windows = { workspace = true, features = [
     "UI_ViewManagement",
     "Win32_Foundation",

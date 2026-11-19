@@ -494,7 +494,7 @@ document.body.textContent = res.message;</pre>
       matching the README:
     </p>
     <ul>
-      <li data-i18n="bounds.l1">Native UI has no editable IME composition, mouse selection, clipboard or undo. Text rendering
+      <li data-i18n="bounds.l1">Native UI has no IME preedit with tao 0.37, which only exposes committed text; text selection, clipboard operations and undo/redo are supported. Text rendering
           uses shared OpenType shaping, bidi ordering and ordered font fallback across CPU and GPU.</li>
       <li data-i18n="bounds.l2">Accessibility emits semantic nodes only — no AT-SPI, UIA, or NSAccessibility bridge is connected.</li>
       <li data-i18n-html="bounds.l3">Animation redraw is best-effort through <code>request_redraw</code>; there is no timer-driven frame
@@ -582,7 +582,7 @@ document.body.textContent = res.message;</pre>
       'f6.d': 'A Cargo workspace with a core library, a CLI, and examples. Updater, packager and signing interfaces are wired; platform packaging tools are not invoked yet.',
       'bounds.t': 'What is not done yet',
       'bounds.p': 'This is an early framework. The list below is the honest boundary of what the current code does, matching the README:',
-      'bounds.l1': 'Native UI has no editable IME composition, mouse selection, clipboard or undo. Text rendering uses shared OpenType shaping, bidi ordering and ordered font fallback across CPU and GPU.',
+      'bounds.l1': 'Native UI has no IME preedit with tao 0.37, which only exposes committed text; text selection, clipboard operations and undo/redo are supported. Text rendering uses shared OpenType shaping, bidi ordering and ordered font fallback across CPU and GPU.',
       'bounds.l2': 'Accessibility emits semantic nodes only — no AT-SPI, UIA, or NSAccessibility bridge is connected.',
       'bounds.l3': 'Animation redraw is best-effort through <code>request_redraw</code>; there is no timer-driven frame scheduler.',
       'bounds.l4': 'The wgpu backend renders to an offscreen texture and is compile-validated only; the window presents through the CPU rasterizer and <code>softbuffer</code>.',
@@ -645,7 +645,7 @@ document.body.textContent = res.message;</pre>
       'f6.d': 'Cargo workspace：核心库、CLI 与示例。更新器、打包器与签名接口已接通，但尚未调用平台打包工具。',
       'bounds.t': '尚未完成的部分',
       'bounds.p': '这是一个早期框架。下面是当前代码能力的诚实边界，与 README 一致：',
-      'bounds.l1': '原生界面没有可编辑输入法组合、鼠标选区、剪贴板与撤销。文本渲染在 CPU/GPU 共用 OpenType shaping、bidi 排序与有序字体回退。',
+      'bounds.l1': '原生窗口在 tao 0.37 下仍没有 IME preedit，只能收到 commit；鼠标选区、剪贴板与撤销/重做已支持。文本渲染在 CPU/GPU 共用 OpenType shaping、bidi 排序与有序字体回退。',
       'bounds.l2': '无障碍只输出语义节点 —— 没有接入 AT-SPI、UIA 或 NSAccessibility 桥。',
       'bounds.l3': '动画重绘通过 <code>request_redraw</code> 尽力而为；没有定时器驱动的帧调度。',
       'bounds.l4': 'wgpu 后端渲染到离屏纹理，仅做过编译验证；窗口通过 CPU 光栅化器与 <code>softbuffer</code> 呈现。',

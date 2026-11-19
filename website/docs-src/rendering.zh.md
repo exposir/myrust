@@ -27,6 +27,6 @@ let pixels = myrust_core::ui::CpuRasterizer::rasterize(
 
 `FrameStats` 报告上一帧生产的 `layout_ms`、`paint_ms`、`total_ms`；不包含 softbuffer/GPU 呈现或宿主 compositor。`needs_animation_frame` 是 best-effort：native window loop 决定唤醒，隐藏窗口可能停止。
 
-CPU rasterizer 对固定命令列表与字体是确定性的，但没有 glyph cache、partial redraw 或 damage tracking；damage 由原生 GPU presenter 驱动。它画的是与 GPU 路径相同的 shaped glyph run；GPU atlas 以 face id、glyph id、设备字号与合成加粗档位作为 key。解码后的图像在 CPU 上用双线性采样与 alpha blending 绘制，在 GPU 上走内容版本化的纹理 cache；PNG/JPEG/WebP 解码通过 `image-decode` 按需启用。可选 wgpu 离屏 renderer 用于测试与工具，不是公开 render graph；GPU API/feature 取决于宿主。
+CPU rasterizer 对固定命令列表与字体是确定性的。它复用有上限的 glyph bitmap cache，可通过 `glyph_cache_stats` 与 `set_glyph_cache_enabled` 查询和开关；`CpuFrame::rasterize_damaged` 基于上一帧只重绘 damage 矩形，尺寸变化或整帧 damage 时回退到 `CpuRasterizer::rasterize`。它画的是与 GPU 路径相同的 shaped glyph run；GPU atlas 以 face id、glyph id、设备字号与合成加粗档位作为 key。解码后的图像在 CPU 上用双线性采样与 alpha blending 绘制，在 GPU 上走内容版本化的纹理 cache；PNG/JPEG/WebP 解码通过 `image-decode` 按需启用。可选 wgpu 离屏 renderer 用于测试与工具，不是公开 render graph；GPU API/feature 取决于宿主。
 
 没有公开 FPS counter、vsync 控制、triple buffering 策略或 frame-deadline API。使用 `FrameStats` 加宿主测量；动画时间不能假设固定刷新率。

@@ -6,6 +6,8 @@
 
 /// Native text and image clipboard access.
 pub mod clipboard;
+/// Polling clipboard change watcher.
+pub mod clipboard_watch;
 /// System file and message dialogs.
 pub mod dialog;
 /// WebView download policy and lifecycle events.
@@ -20,6 +22,8 @@ pub mod notify;
 pub mod power;
 /// Custom WebView protocol registration.
 pub mod protocol;
+/// Native secure credential storage.
+pub mod secrets;
 /// Global shortcuts.
 pub mod shortcut;
 /// Locale, appearance, accessibility, and proxy integration.
@@ -28,6 +32,9 @@ pub mod system;
 pub mod tray;
 
 pub use clipboard::{Clipboard, ClipboardImage};
+pub use clipboard_watch::{
+    ClipboardContent, ClipboardWatchHandle, ClipboardWatchOptions, ClipboardWatcher,
+};
 pub use dialog::{
     Dialog, DialogButton, DialogLevel, FileDialogOptions, FileFilter, MessageButtons,
     MessageDialogOptions,
@@ -38,8 +45,12 @@ pub use instance::{
 };
 pub use menu::{Menu, MenuBuilder, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 pub use notify::DesktopNotification;
-pub use power::{LoginItem, NowPlaying, NowPlayingEvent, NowPlayingMetadata, Power};
+pub use power::{
+    LoginItem, NowPlaying, NowPlayingEvent, NowPlayingMetadata, Power, PowerAssertion,
+    PowerAssertionKind,
+};
 pub use protocol::{CustomProtocol, ProtocolHandler, ProtocolResponse};
+pub use secrets::{secret_backend, SecretBackend, SecretError, SecretStore};
 pub use shortcut::{GlobalShortcutManager, ShortcutEvent};
 pub use system::{
     system_proxy, system_theme, AppLocale, AppearancePreferences, LocaleFormatter, ProxyConfig,

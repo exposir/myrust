@@ -151,3 +151,17 @@ The runtime emits `AccessNode` metadata for window content; native title bar/tra
 `myrust_core::desktop::system::AppearancePreferences::detect()` reads native appearance settings. On Windows, reduced motion comes from `UISettings::AnimationsEnabled`, the accent color from `UISettings::GetColorValue(UIColorType::Accent)`, and high contrast from `SPI_GETHIGHCONTRAST`. Each field is an `Option`: a failed or unavailable API leaves it `None`.
 
 `AppearancePreferences::theme()` chooses the light or dark built-in theme and applies the detected accent, including hover/pressed shades and a contrasting label color. `myrust_core::system_theme()` combines detection and theme construction. `Theme::system()` itself still only handles light/dark. Reduced motion and high contrast remain on `AppearancePreferences`, because `Theme` has no fields for them.
+
+## Desktop platform services
+
+These services are independent of native UI rendering and can be used with either `WindowContent::NativeUi` or `WindowContent::WebView`.
+
+`SingleInstance::acquire(name)` forwards a second launch's arguments and working directory to the first process. Unix uses a per-user filesystem socket; Windows uses a namespaced named pipe. `on_activate` queues events that arrive before a callback is installed. Platforms outside Unix and Windows retain detection-only behavior; `supports_activation_forwarding()` reports the difference.
+
+`WindowsJumpList::new(app_id)` publishes recent documents through the Shell COM API. `app_id` must match the AppUserModelID used by the installer and shortcut, must be non-empty, and cannot contain whitespace. The current publisher re-adds paths returned by `BeginList` instead of honoring destinations the user removed, and it does not provide a macOS or Linux equivalent.
+
+`PowerAssertion::prevent_sleep` and `PowerAssertion::prevent_display_sleep` hold an RAII sleep inhibitor. macOS uses `IOPMAssertion`, Windows uses `SetThreadExecutionState`, and Linux uses `systemd-inhibit` for system sleep. Linux display-sleep inhibition returns an explicit error. Windows assertions are thread-local and should be acquired and dropped on the same thread.
+
+`SecretStore` stores binary secrets in Keychain, Credential Manager, or Linux Secret Service. Missing, locked, or unavailable backends return an error; there is no in-memory fallback. Operations within one store are serialized because Secret Service is sensitive to concurrent requests.
+
+`ClipboardWatcher` polls text and RGBA images, debounces changes, and suppresses duplicates. Polling is used because supported platforms do not expose a uniform native clipboard-change event. Opening the clipboard happens before the worker thread starts, so headless environments fail at `watch()` instead of falling back silently.

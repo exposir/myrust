@@ -81,6 +81,8 @@ slider、scroll view、split view、tab list 都不发 orientation 字段。视�
 
 没有 live region、alert、status 或 announcement API。toast 与 dialog 有视觉 role，但没有宣告事件。
 
+`ClipboardWatcher` 回调、secure-store 操作、power assertion 与 jump-list 更新都不会创建 accessibility announcement。需要辅助技术反馈的应用必须通过可见的语义节点变化表达；当前没有 live-region bridge。
+
 ## Landmarks, live regions and rules
 
 没有 landmark role、live-region flag、atomic/relevant 属性、错误宣告或 accessibility rule。`AccessNode` 是逐帧扁平列表，不是带关系的语义树。
