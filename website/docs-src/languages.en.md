@@ -1,84 +1,83 @@
-Language support is deliberately minimal. `myrust-ui` ships formatting for `en-US` and `zh-CN`; it does not ship a catalog, message lookup, plural rules or a UI-language state.
+`myrust-ui::i18n` now provides locale matching, fallback lookup, ICU MessageFormat rendering, and CLDR number and date formats. CLDR data is compiled into the binary through ICU4X; the runtime never downloads locale packs.
 
 ```rust
-use myrust_core::ui::{format_date, format_number, DateStyle, Locale};
+use myrust_ui::{I18n, LocaleId, MessageArguments, MessageCatalog, MessageValue};
 
-let n = format_number(1234567.89, Locale::EnUs, 2)?;
-let d = format_date("2024-02-29", Locale::ZhCn, DateStyle::Short)?;
+let mut i18n = I18n::from_system([
+    LocaleId::try_new("en-US")?,
+    LocaleId::try_new("zh-CN")?,
+]);
+i18n.add_catalog(MessageCatalog::try_new(
+    LocaleId::try_new("en-US")?,
+    [
+        ("file-count", "{count, plural, =0 {No files} one {# file} other {# files}}"),
+        ("greeting", "Hello, {name}"),
+    ],
+)?)?;
+
+let text = i18n.translate(
+    "file-count",
+    &MessageArguments::new().with("count", MessageValue::Number(2.0)),
+)?;
+println!("{}", text.text); // "2 files"
 ```
 
-## Catalogs
+## Locale resolution
 
-There is no catalog type, loader, domain or fallback-chain API. Strings are ordinary Rust values chosen by the caller; application code can keep its own `HashMap<Locale, ...>` if it needs one.
+`system_locales()` reads the operating system's preferred locale list on native targets. `resolve_system_locales()` walks that list in order, matches exact locales first, then related language, script and region variants, and finally falls back to English. The default is `en-US`; if an application exposes another English catalog, that catalog becomes the fallback tail.
 
-## Messages
+`LocaleId` validates and normalizes BCP 47 identifiers. `I18n` always includes an English fallback in its supported set, even if the caller's array contains only non-English locales.
 
-No message formatter, placeholder interpolation, plural/select or number-skeleton API exists. `format!` and caller-owned strings are the alternative; placeholders and plural selection must be implemented by the application.
+`en-XA` is the layout test locale. Add it to the supported set, select it with `set_locale("en-XA")`, and message output is accent-expanded to at least 150% of its source length. The base text still comes from the English catalog.
 
-## In Go
+## Catalogs and fallback
 
-The reference page uses Go's catalog packages; MyRust has no Go catalog integration and no equivalent package. This section is retained for structure, but the functionality is absent rather than ported.
+`MessageCatalog::try_new(locale, [(key, message), ...])` parses every message before accepting the catalog. Syntax errors are reported with the key, source message and byte position. Duplicate keys are rejected.
 
-## The language the app shows
+`I18n::translate` tries each locale in the active fallback chain. A message found in a fallback catalog still renders successfully, but `Translation` records `used_locale`, `fallback_from` and `pseudo_localized`, so the caller can log or surface the fallback. If every catalog lacks the key, `I18nError::MissingKey` lists the locales that were tried.
 
-`Locale` affects number/date formatting only. It does not set the language of `Context`, built-in control labels, validation text or accessibility labels; there is no current-language field or locale setter on `Context`.
+Catalogs are authored data, not a replacement for programming-language strings. A missing translation is never invented silently: either a fallback catalog supplies it or translation returns an error.
 
-### When the language changes
+## Message syntax
 
-Changing `Locale` is just changing a caller value; the next view build uses it. There is no language-change event, no catalog reload and no automatic re-render beyond the next `NativeUi::render`.
+The implemented ICU MessageFormat subset supports:
 
-### Native UI
+- interpolation: `{name}`
+- plural selection: `{count, plural, =0 {...} one {...} other {...}}`, with `#`, `offset:N`, exact selectors and CLDR plural categories
+- select selection: `{kind, select, a {...} b {...} other {...}}`
+- number arguments: `{amount, number}` and `{amount, number, integer}`
+- date arguments: `{day, date}`, `{day, date, short}` and `{day, date, iso}`
+- quoted literal syntax with `''` and apostrophe-quoted runs
 
-Built-in controls use fixed English strings such as `"text field"`, `"checkbox"` and `"back"`. They are not localized and no per-control override exists. The caller can wrap controls with translated `text` labels, but the emitted AccessNode labels stay English for some roles.
+Plural categories are selected by `icu_plurals`, not by hard-coded `one`/`other` checks. This matters for languages such as Russian, Polish and Arabic. Both `select` and `plural` must include an `other` branch.
 
-### Regional formats
+Values are passed as `MessageValue::Text`, `MessageValue::Number` or `MessageValue::Date`. A missing argument returns `MissingArgument`; a number supplied to `select`, or text supplied to `plural`, returns `WrongArgumentType`. Invalid ISO dates and non-finite numbers are errors rather than empty output.
 
-`Locale::EnUs` and `Locale::ZhCn` are the only values. Both use comma grouping and a dot decimal separator in `format_number`; date short forms differ (`MM/DD/YYYY` versus `YYYY年M月D日`). ISO output is locale-independent.
+## Language changes
+
+`I18n::set_locale`, `set_system_locales` and `refresh_system_locale` return a `LanguageChange`. `changed` says whether the selected locale changed, and `generation` is a monotonic per-instance counter. A view can retain the generation it rendered and rebuild its translated labels when it changes.
+
+This is the API-level integration point. `Context` and the built-in controls do not yet read an ambient `I18n` value, so framework-owned English strings such as `"text field"` and `"checkbox"` remain fixed until controls accept translated labels.
 
 ## Formatting numbers and dates
 
-`format_number(value, locale, decimals)` returns `Result<String, FormatError>`; it rejects non-finite values and more than 18 decimals. `format_date` accepts only `YYYY-MM-DD`, validates leap years and returns ISO or the short form for the selected locale.
-
-### Relative times
-
-No relative-time formatter exists (“2 hours ago”, “next week”), and no timezone/calendar conversion API is exposed. Dates are calendar fields only; times are handled separately by `time_input`.
-
-### Formatting data
-
-There is no locale-aware list, currency, percent, measurement or unit formatting. `format_number` is the only number formatter; dates use `format_date`. Everything else is caller-owned.
-
-## MyGo's own strings
-
-MyGo has framework-owned translated strings; MyRust does not. Built-in UI labels are English literals, and the website’s own bilingual content is generated separately in `website/docs-src`.
-
-There is no runtime string table for framework chrome, so applications that need translated control labels must draw their own labels or wrap controls in labeled groups.
-
-## Which message
-
-No plural category, message selection, gender or context-aware lookup exists. A caller chooses a complete string for the current locale and value.
-
-## Checking the catalogs
-
-`build.py` checks the two documentation languages; the UI crate has no catalog completeness check. A missing translation is a caller-side concern, and `format_number`/`format_date` return errors only for invalid values/dates.
-
-## Trying a language
-
-The Languages demo toggles between `Locale::EnUs` and `Locale::ZhCn` and formats the same number/date. The UI language does not change; only the formatted strings do.
+The compatibility functions `format_number(value, locale, decimals)` and `format_date(date, locale, style)` now delegate to ICU4X. The existing `en-US` and `zh-CN` output is preserved, including the US `M/D/YYYY` short date and the Chinese short date with localized year, month and day markers, while other locales use their CLDR patterns through messages.
 
 ```rust
-let locale = if app.zh { Locale::ZhCn } else { Locale::EnUs };
-text(c, &format_number(1234567.89, locale, 2)?);
-text(c, &format_date("2024-02-29", locale, DateStyle::Short)?);
+let n = format_number(1234567.89, Locale::EnUs, 2)?; // "1,234,567.89"
+let d = format_date("2024-02-29", Locale::ZhCn, DateStyle::Short)?;
 ```
 
-## In pages
+Decimal grouping, decimal separators, minus signs and date ordering come from CLDR. Formats outside the implemented decimal/date subset still need dedicated APIs.
 
-The documentation site has en/zh pages generated by `website/docs-src/build.py`; this is separate from `myrust-ui`. Web pages can use their own i18n assets, while native UI has only `Locale` formatting.
+## Limits
+
+There is no currency, percent, measurement, unit, relative-time or time-zone formatter. Message parsing implements the subset above, not the full MessageFormat 2 grammar. Built-in UI chrome is not automatically translated, and changing `I18n` does not by itself repaint a view; the generation counter tells the application when to rebuild it.
+
+## In Go
+
+The reference implementation gets its catalog and formatting data from Go's i18n packages. MyRust uses the equivalent ICU4X components directly, with compiled CLDR data and no runtime data service.
 
 ## Package i18n
 
-### Adding a language to MyGo
-
-There is no locale-data package to extend. Adding a language means adding a `Locale` variant and explicit formatting rules in `languages.rs`; catalog-based MyGo extension has no equivalent.
-
-There is no package-level i18n module beyond `languages.rs` and its `Locale`, `DateStyle`, `FormatError`, `format_number` and `format_date`. Adding a language means adding a variant and explicit formatting rules in code, not installing a locale data pack.
+The package-level API is `myrust-ui::i18n`: `LocaleId`, `I18n`, `MessageCatalog`, `MessageArguments`, `MessageValue`, `Translation`, `I18nError`, locale resolvers, `system_locales` and `pseudo_localize`. `myrust-ui::languages` remains as the stable compatibility facade for `Locale`, `DateStyle`, `format_number` and `format_date`.

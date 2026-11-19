@@ -7,9 +7,9 @@
 //! when its own fields did not.
 
 use super::{intersect_rects, RenderSize, TransformMatrix};
-use crate::font::default_font;
 use crate::layout::Point;
 use crate::paint::{DisplayList, DrawCommand, Rect, TextAlignment};
+use crate::text::{layout_text, layout_text_shaped, ApproximateMeasurer};
 
 /// Rectangles of a frame that changed since the previous one.
 ///
@@ -160,8 +160,6 @@ fn collect_ops(display: &DisplayList) -> Vec<Op<'_>> {
                     clip = previous;
                 }
             }
-            // Images carry no pixels in this batch and are not drawn.
-            DrawCommand::Image { .. } => {}
             _ => {
                 let Some(bounds) = device_bounds(command, transform) else {
                     continue;
@@ -199,6 +197,13 @@ pub(crate) fn op_bounds(command: &DrawCommand) -> Option<Rect> {
             ..
         }
         | DrawCommand::LinearGradient {
+            x,
+            y,
+            width,
+            height,
+            ..
+        }
+        | DrawCommand::Image {
             x,
             y,
             width,
@@ -254,6 +259,7 @@ pub(crate) fn op_bounds(command: &DrawCommand) -> Option<Rect> {
             text,
             font_size,
             italic,
+            mono,
             max_width,
             alignment,
             ..
@@ -263,6 +269,7 @@ pub(crate) fn op_bounds(command: &DrawCommand) -> Option<Rect> {
             text,
             *font_size,
             *italic,
+            *mono,
             *max_width,
             *alignment,
         )),
@@ -282,12 +289,19 @@ pub(crate) fn op_bounds(command: &DrawCommand) -> Option<Rect> {
                 height + reach * 2.0,
             ))
         }
-        DrawCommand::Image { .. }
-        | DrawCommand::ScissorPush { .. }
+        DrawCommand::ScissorPush { .. }
         | DrawCommand::ScissorPop
         | DrawCommand::TransformPush { .. }
         | DrawCommand::TransformPop => None,
     }
+}
+
+/// Returns the device-space bounds of one draw command under `transform`.
+pub(crate) fn command_device_bounds(
+    command: &DrawCommand,
+    transform: TransformMatrix,
+) -> Option<Rect> {
+    device_bounds(command, transform)
 }
 
 /// Device-space bounds of an operation under `transform`.
@@ -319,12 +333,14 @@ pub(crate) fn device_bounds(command: &DrawCommand, transform: TransformMatrix) -
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn text_bounds(
     x: f32,
     y: f32,
     text: &str,
     font_size: f32,
     italic: bool,
+    mono: bool,
     max_width: Option<f32>,
     alignment: TextAlignment,
 ) -> Rect {
@@ -336,47 +352,22 @@ fn text_bounds(
     let maximum = max_width
         .filter(|width| width.is_finite() && *width > 0.0)
         .map(|width| width.max(0.0));
-    let lines: Vec<&str> = text.split('\n').collect();
-    let (widest, height, start_x) = match default_font() {
-        Some(font) => {
-            let widest = lines
-                .iter()
-                .map(|line| {
-                    line.chars()
-                        .map(|character| {
-                            if font.has_glyph(character) {
-                                font.glyph_advance(character, font_size)
-                            } else {
-                                // The presenters keep a half-em advance for
-                                // characters the face has no glyph for.
-                                font_size * 0.5
-                            }
-                        })
-                        .sum::<f32>()
-                })
-                .fold(0.0_f32, f32::max);
-            let height = lines.len() as f32 * font.line_height(font_size);
-            let mut start_x = x;
-            if let Some(maximum) = maximum {
-                if widest <= maximum {
-                    start_x += match alignment {
-                        TextAlignment::Center => (maximum - widest) / 2.0,
-                        TextAlignment::End => maximum - widest,
-                        TextAlignment::Start => 0.0,
-                    };
-                }
-            }
-            (widest, height, start_x)
-        }
-        None => {
-            // The CPU presenter draws scaled 8x8 bitmap glyphs, one em wide
-            // per character, and ignores alignment and max_width.
-            let widest = lines
-                .iter()
-                .map(|line| line.chars().count() as f32 * font_size)
-                .fold(0.0_f32, f32::max);
-            (widest, lines.len() as f32 * font_size * 1.25, x)
-        }
+    let (widest, height, start_x) = if let Some(layout) =
+        layout_text_shaped(text, font_size, maximum, alignment, mono)
+    {
+        (
+            layout.content_width,
+            layout.height,
+            x + layout.content_x,
+        )
+    } else {
+        let lines = layout_text(text, font_size, maximum, &ApproximateMeasurer);
+        let widest = lines
+            .iter()
+            .map(|line| line.width)
+            .fold(0.0_f32, f32::max);
+        let height = lines.iter().map(|line| line.line_height).sum();
+        (widest, height, x)
     };
     // Real advances bound the glyph origins; antialiasing and the italic
     // shear can paint a little past them.
@@ -467,6 +458,7 @@ fn merge_cheapest(rects: &mut Vec<Rect>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::image::{ImageData, ImageHandle};
     use crate::paint::Color;
 
     fn rect(x: f32, y: f32, width: f32, height: f32) -> DrawCommand {
@@ -481,6 +473,19 @@ mod tests {
 
     fn list(commands: Vec<DrawCommand>) -> DisplayList {
         DisplayList::from_commands(commands)
+    }
+
+    fn image(x: f32, y: f32, pixels: &[u8]) -> DrawCommand {
+        DrawCommand::Image {
+            x,
+            y,
+            width: 10.0,
+            height: 10.0,
+            source: ImageHandle::from_data("damage-image", ImageData::new(pixels, 1, 1)).unwrap(),
+            source_rect: crate::paint::ImageSourceRect::default(),
+            radius: crate::paint::Radius::default(),
+            grayscale: false,
+        }
     }
 
     #[test]
@@ -518,6 +523,37 @@ mod tests {
         assert!(!damage.is_full());
         assert_eq!(damage.rects().len(), 1);
         assert_eq!(damage.rects()[0], Rect::new(40.0, 40.0, 10.0, 10.0));
+    }
+
+    #[test]
+    fn moved_and_recolored_images_damage_the_image_bounds() {
+        let red = [255_u8, 0, 0, 255];
+        let green = [0_u8, 255, 0, 255];
+        let moved = diff(
+            &list(vec![image(1.0, 2.0, &red)]),
+            &list(vec![image(20.0, 2.0, &red)]),
+            RenderSize::new(100, 100),
+        );
+        assert!(!moved.is_full());
+        assert!(moved
+            .rects()
+            .iter()
+            .any(|rect| rect.x <= 1.0 && rect.right() >= 11.0));
+        assert!(moved
+            .rects()
+            .iter()
+            .any(|rect| rect.x <= 20.0 && rect.right() >= 30.0));
+
+        let recolored = diff(
+            &list(vec![image(20.0, 2.0, &red)]),
+            &list(vec![image(20.0, 2.0, &green)]),
+            RenderSize::new(100, 100),
+        );
+        assert!(!recolored.is_full());
+        assert!(recolored
+            .rects()
+            .iter()
+            .any(|rect| rect.x <= 20.0 && rect.right() >= 30.0));
     }
 
     #[test]
@@ -599,19 +635,30 @@ mod tests {
 
     #[test]
     fn text_bounds_cover_wide_glyphs_and_ignore_a_tight_max_width() {
-        let Some(font) = crate::font::default_font() else {
+        let Some(layout) = layout_text_shaped(
+            "WWWWWWWWWW",
+            14.0,
+            Some(40.0),
+            TextAlignment::Start,
+            false,
+        ) else {
             return;
         };
         let text = "WWWWWWWWWW";
         let font_size = 14.0;
-        let ink: f32 = text
-            .chars()
-            .map(|character| font.glyph_advance(character, font_size))
-            .sum();
+        let ink = layout.content_width;
         // The presenters draw the whole line even when it exceeds max_width;
         // bounds must reach the same ink so a damage replay does not clip it.
-        let bounds =
-            text_bounds(10.0, 10.0, text, font_size, false, Some(40.0), TextAlignment::Start);
+        let bounds = text_bounds(
+            10.0,
+            10.0,
+            text,
+            font_size,
+            false,
+            false,
+            Some(40.0),
+            TextAlignment::Start,
+        );
         assert!(
             bounds.right() >= 10.0 + ink,
             "bounds {bounds:?} must reach the drawn width {}",

@@ -54,9 +54,13 @@ tabs 与 segmented 内部的方向键切换由控件实现，不是通用 focus-
 
 ## Input methods
 
-`UiEvent::TextInput { text }` 把完成字符串插入聚焦文本字段。没有 preedit、组合范围、候选窗或 IME commit/cancel 事件。
+`UiEvent::TextInput { text }` 把完成字符串插入聚焦文本字段。`CompositionStart`、`CompositionUpdate`、`CompositionCommit`、`CompositionCancel` 携带 preedit 文本与按 cluster 对齐的 caret；运行时绘制 preedit 并执行 commit/cancel，不改变宿主输入事件模型。
 
-文本字段支持光标与选区，但 IME composition 明确不在范围内；宿主 IME 只能投递已提交文本。Bidi 输入与复杂文字 shaping 未实现。
+文本字段支持光标、鼠标选区、clipboard 与 undo。native `tao` 层仍只暴露已提交 IME 文本，所以 Linux 使用 `CompositionCommit`；wasm hidden textarea 提供 start/update/end 事件。Bidi 解析与复杂文字 shaping 由共享文本布局处理。
+
+native IME preedit 是已知平台限制，不是待办功能：tao 0.37 的 Linux 路径使用 `IMContextSimple`，只发提交文本；macOS marked text 不作为 preedit 事件导出；Windows 没有 preedit 事件。宿主可以自行驱动 `UiEvent::CompositionStart/Update/Commit/Cancel`。真正的 native preedit 需要补丁 tao 或更换事件循环。
+
+浏览器 copy/cut/paste 路径异步调用 `navigator.clipboard`，再通过同步 wasm clipboard provider 转发文本。剪贴板拒绝时仍保留之前的内存文本，不会产生未处理的 promise rejection。
 
 ## Dropped files
 
@@ -80,7 +84,7 @@ native 窗口 translator 只映射一部分：Tab、Enter、Space、Backspace、
 
 没有原始 scancode、物理键、修饰键 bitmask 或带修饰键的文本模型。字符键在平台布局后作为文本送达；命名导航键使用有限的 `Key` 枚举。
 
-功能键、小键盘区分、dead key 与 composition 数据未表达。自定义宿主可直接构造 `UiEvent`，但内置 native adapter 不暴露完整键盘。
+功能键、小键盘区分与 dead key 未表达。自定义宿主可直接构造 `UiEvent`；内置 native adapter 暴露已提交 IME 文本，但不暴露平台 preedit 流。
 
 ## Input inside a region
 
@@ -93,4 +97,4 @@ native 窗口 translator 只映射一部分：Tab、Enter、Space、Backspace、
 - Layout：流与裁剪。
 - Text：文本测量与行内限制。
 - Styling and themes：焦点环与颜色。
-- Accessibility：发出的节点；未连接平台 AT 桥。
+- Accessibility：发出的节点已通过平台 AccessKit 桥发布。

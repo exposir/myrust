@@ -7,13 +7,118 @@
 //! decoder.
 
 use font8x8::{UnicodeFonts, BASIC_FONTS};
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        Arc, Mutex, OnceLock,
+    },
+};
 
-use super::font::{default_font, FontFace, GlyphBitmap};
+use super::font::{default_font_stack, FontFace, FontStack, GlyphBitmap};
+use super::image::ImageHandle;
 use super::layout::Point;
-use super::paint::{Color, DisplayList, DrawCommand, GradientStop, Radius, Rect, TextAlignment};
-use super::render::{color_to_array, intersect_rects, CommandCounts, RenderSize, TransformMatrix};
+use super::paint::{
+    Color, DisplayList, DrawCommand, GradientStop, ImageSourceRect, Radius, Rect, TextAlignment,
+};
+use super::render::{
+    color_to_array, command_device_bounds, intersect_rects, CommandCounts, Damage, RenderSize,
+    TransformMatrix,
+};
 use super::svg::{parse_svg_path, SvgContour};
+use super::text::{layout_text_with_stack, TextLayout};
+
+const DEFAULT_GLYPH_CACHE_CAPACITY: usize = 4096;
+
+/// CPU glyph bitmap cache counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GlyphCacheStats {
+    /// Bitmap reuse count.
+    pub hits: u64,
+    /// Bitmap rasterization count.
+    pub misses: u64,
+    /// Current entry count.
+    pub entries: usize,
+}
+
+#[derive(Hash, PartialEq, Eq)]
+struct GlyphCacheKey {
+    stack_id: u64,
+    face_id: u64,
+    glyph_id: u16,
+    size: u32,
+    bold: bool,
+    italic: bool,
+}
+
+static GLYPH_CACHE: OnceLock<Mutex<HashMap<GlyphCacheKey, GlyphBitmap>>> = OnceLock::new();
+static GLYPH_HITS: AtomicU64 = AtomicU64::new(0);
+static GLYPH_MISSES: AtomicU64 = AtomicU64::new(0);
+static GLYPH_CACHE_ENABLED: AtomicBool = AtomicBool::new(true);
+static GLYPH_CACHE_CAPACITY: AtomicUsize = AtomicUsize::new(DEFAULT_GLYPH_CACHE_CAPACITY);
+
+/// Returns CPU glyph bitmap cache counters.
+pub fn glyph_cache_stats() -> GlyphCacheStats {
+    let entries = GLYPH_CACHE
+        .get()
+        .and_then(|cache| cache.lock().ok().map(|cache| cache.len()))
+        .unwrap_or(0);
+    GlyphCacheStats {
+        hits: GLYPH_HITS.load(Ordering::Relaxed),
+        misses: GLYPH_MISSES.load(Ordering::Relaxed),
+        entries,
+    }
+}
+
+/// Enables or disables the CPU glyph bitmap cache for comparison tests.
+pub fn set_glyph_cache_enabled(enabled: bool) {
+    GLYPH_CACHE_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+fn set_glyph_cache_capacity(capacity: usize) {
+    GLYPH_CACHE_CAPACITY.store(capacity.max(1), Ordering::Relaxed);
+}
+
+fn cached_glyph(
+    stack_id: u64,
+    font: &FontFace,
+    glyph_id: u16,
+    size: f32,
+    bold: bool,
+    italic: bool,
+) -> GlyphBitmap {
+    let key = GlyphCacheKey {
+        stack_id,
+        face_id: font.id(),
+        glyph_id,
+        size: size.max(1.0).to_bits(),
+        bold,
+        italic,
+    };
+    let enabled = GLYPH_CACHE_ENABLED.load(Ordering::Relaxed);
+    let cache = GLYPH_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if enabled {
+        if let Ok(cache) = cache.lock() {
+            if let Some(bitmap) = cache.get(&key) {
+                GLYPH_HITS.fetch_add(1, Ordering::Relaxed);
+                return bitmap.clone();
+            }
+        }
+    }
+    let bitmap = font.rasterize_glyph_id(glyph_id, size);
+    if enabled {
+        GLYPH_MISSES.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut cache) = cache.lock() {
+            let capacity = GLYPH_CACHE_CAPACITY.load(Ordering::Relaxed).max(1);
+            if cache.len() >= capacity {
+                cache.clear();
+            }
+            cache.insert(key, bitmap.clone());
+        }
+    }
+    bitmap
+}
 
 /// A collected text command for browser-native canvas2D rendering.
 #[derive(Debug, Clone)]
@@ -72,10 +177,16 @@ pub struct CpuFrame {
     pub pixels: Vec<u32>,
     /// Command counts consumed while drawing.
     pub command_counts: CommandCounts,
-    /// Image commands that were not drawn by the presenter.
+    /// Image commands whose source carried no decoded pixels.
     pub unsupported_commands: usize,
     /// Glyphs missing from the active real font or bitmap fallback.
     pub unsupported_glyphs: usize,
+    /// Pixels touched by the last rasterization pass.
+    pub rasterized_pixels: u64,
+    /// Glyph bitmap cache hits in this pass.
+    pub glyph_cache_hits: u64,
+    /// Glyph bitmap cache misses in this pass.
+    pub glyph_cache_misses: u64,
 }
 
 impl CpuFrame {
@@ -93,17 +204,28 @@ impl CpuRasterizer {
     /// Rasterizes a display list into a packed RGB pixel buffer.
     ///
     /// Supported: rectangles, rounded rectangles, circles, lines, linear
-    /// gradients, SVG path fills/strokes, transforms, and scissors. Text uses
-    /// the process-wide TTF font when available and falls back to the built-in
-    /// 8x8 bitmap font. Images are still counted as unsupported because the
-    /// display list carries only a source handle, not decoded pixels. There is
-    /// no shaping, kerning, bidi, font fallback, alignment, or wrapping here.
+    /// gradients, SVG path fills/strokes, decoded images, transforms, and
+    /// scissors. Text uses the process-wide TTF font when available and falls
+    /// back to the built-in 8x8 bitmap font. Text layout, shaping, bidi
+    /// ordering and fallback come from the shared
+    /// [`TextLayout`](crate::text::TextLayout). Decoded images use bilinear
+    /// sampling and alpha blending; handles without pixels are counted as
+    /// unsupported.
     pub fn rasterize(
         display_list: &DisplayList,
         size: RenderSize,
         background: Color,
     ) -> Result<CpuFrame, RasterError> {
-        Self::rasterize_with_font(display_list, size, background, default_font())
+        Self::rasterize_inner(
+            display_list,
+            size,
+            background,
+            default_font_stack(),
+            false,
+            None,
+            None,
+        )
+        .map(|(frame, _)| frame)
     }
 
     /// Rasterizes with an explicit font choice.
@@ -116,7 +238,9 @@ impl CpuRasterizer {
         background: Color,
         font: Option<Arc<FontFace>>,
     ) -> Result<CpuFrame, RasterError> {
-        Self::rasterize_inner(display_list, size, background, font, false).map(|(frame, _)| frame)
+        let stack = font.map(|font| Arc::new(FontStack::new(font, None, Vec::new())));
+        Self::rasterize_inner(display_list, size, background, stack, false, None, None)
+            .map(|(frame, _)| frame)
     }
 
     /// Like [`rasterize_with_font`] but skips text drawing and returns collected
@@ -127,15 +251,108 @@ impl CpuRasterizer {
         background: Color,
         font: Option<Arc<FontFace>>,
     ) -> Result<(CpuFrame, Vec<TextRenderCommand>), RasterError> {
-        Self::rasterize_inner(display_list, size, background, font, true)
+        let stack = font.map(|font| Arc::new(FontStack::new(font, None, Vec::new())));
+        Self::rasterize_inner(display_list, size, background, stack, true, None, None)
+    }
+
+    /// Reuses `previous` pixels and redraws only `damage` rectangles.
+    ///
+    /// A size change, background/font-stack change represented by `damage.full`,
+    /// or an empty damage set is handled before this method; callers should
+    /// compare backgrounds and font generations and request `Damage::full()`.
+    pub fn rasterize_damaged(
+        previous: &CpuFrame,
+        display_list: &DisplayList,
+        size: RenderSize,
+        background: Color,
+        damage: &Damage,
+    ) -> Result<CpuFrame, RasterError> {
+        Self::rasterize_damaged_inner(
+            previous,
+            display_list,
+            size,
+            background,
+            damage,
+            true,
+        )
+    }
+
+    fn rasterize_damaged_inner(
+        previous: &CpuFrame,
+        display_list: &DisplayList,
+        size: RenderSize,
+        background: Color,
+        damage: &Damage,
+        prefilter: bool,
+    ) -> Result<CpuFrame, RasterError> {
+        if previous.width != size.width
+            || previous.height != size.height
+            || damage.is_full()
+        {
+            return Self::rasterize(display_list, size, background);
+        }
+        if damage.is_empty() {
+            let mut frame = previous.clone();
+            frame.command_counts = CommandCounts::default();
+            frame.rasterized_pixels = 0;
+            frame.glyph_cache_hits = 0;
+            frame.glyph_cache_misses = 0;
+            return Ok(frame);
+        }
+        let mut pixels = previous.pixels.clone();
+        let mut total_counts = CommandCounts::default();
+        let mut rasterized_pixels = 0_u64;
+        let mut unsupported_commands = 0_usize;
+        let mut unsupported_glyphs = 0_usize;
+        let mut glyph_cache_hits = 0_u64;
+        let mut glyph_cache_misses = 0_u64;
+        for rect in damage.rects() {
+            clear_pixels(&mut pixels, size.width, *rect, background);
+            let filtered;
+            let display = if prefilter {
+                filtered = prefilter_display(display_list, *rect);
+                &filtered
+            } else {
+                display_list
+            };
+            let (frame, _) = Self::rasterize_inner(
+                display,
+                size,
+                background,
+                default_font_stack(),
+                false,
+                Some(pixels),
+                Some(*rect),
+            )?;
+            pixels = frame.pixels;
+            add_counts(&mut total_counts, frame.command_counts);
+            rasterized_pixels += frame.rasterized_pixels;
+            unsupported_commands += frame.unsupported_commands;
+            unsupported_glyphs += frame.unsupported_glyphs;
+            glyph_cache_hits += frame.glyph_cache_hits;
+            glyph_cache_misses += frame.glyph_cache_misses;
+        }
+        Ok(CpuFrame {
+            width: size.width,
+            height: size.height,
+            pixels,
+            command_counts: total_counts,
+            unsupported_commands,
+            unsupported_glyphs,
+            rasterized_pixels,
+            glyph_cache_hits,
+            glyph_cache_misses,
+        })
     }
 
     fn rasterize_inner(
         display_list: &DisplayList,
         size: RenderSize,
         background: Color,
-        font: Option<Arc<FontFace>>,
+        stack: Option<Arc<FontStack>>,
         collect_text: bool,
+        pixels: Option<Vec<u32>>,
+        base_scissor: Option<Rect>,
     ) -> Result<(CpuFrame, Vec<TextRenderCommand>), RasterError> {
         if size.is_empty() {
             return Err(RasterError::InvalidSize {
@@ -143,11 +360,15 @@ impl CpuRasterizer {
                 height: size.height,
             });
         }
-        let mut canvas = Canvas::new(size, background, font);
+        let glyph_stats_before = glyph_cache_stats();
+        let mut canvas = Canvas::new(size, background, stack);
+        if let Some(pixels) = pixels {
+            canvas.pixels = pixels;
+        }
         canvas.collect_text_only = collect_text;
         let mut transform = TransformMatrix::IDENTITY;
         let mut transform_stack = Vec::new();
-        let mut scissor = None;
+        let mut scissor = base_scissor;
         let mut scissor_stack = Vec::new();
 
         for command in &display_list.commands {
@@ -190,53 +411,76 @@ impl CpuRasterizer {
                     max_width,
                     alignment,
                 } => {
-                    let mut draw_x = *x;
-                    // The rasterizer has no shaping or wrapping; still honor
-                    // single-line alignment inside a finite max width so nodes
-                    // that center labels draw them centered.
-                    if let Some(max_width) = *max_width {
-                        if max_width.is_finite() && max_width > 0.0 {
-                            let widest = text
-                                .split('\n')
-                                .map(|line| canvas.measure_text(line, *font_size))
-                                .fold(0.0_f32, f32::max);
-                            if widest <= max_width {
-                                draw_x += match alignment {
-                                    super::paint::TextAlignment::Center => {
-                                        (max_width - widest) / 2.0
-                                    }
-                                    super::paint::TextAlignment::End => max_width - widest,
-                                    super::paint::TextAlignment::Start => 0.0,
-                                };
+                    let layout = canvas.stack.as_ref().and_then(|stack| {
+                        layout_text_with_stack(
+                            stack,
+                            text,
+                            *font_size,
+                            *max_width,
+                            *alignment,
+                            *mono,
+                        )
+                    });
+                    if collect_text {
+                        if let Some(layout) = layout.as_deref() {
+                            canvas.unsupported_glyphs += layout.unsupported_glyphs;
+                            for (index, line) in layout.lines.iter().enumerate() {
+                                canvas.text_commands.push(TextRenderCommand {
+                                    x: *x + line.x_offset,
+                                    y: *y + index as f32 * layout.line_height,
+                                    text: line.text.clone(),
+                                    font_size: *font_size,
+                                    weight: *weight,
+                                    italic: *italic,
+                                    mono: *mono,
+                                    family: family.clone(),
+                                    color: *color,
+                                    max_width: None,
+                                    alignment: TextAlignment::Start,
+                                    transform: transform.to_array(),
+                                    clip: scissor.map(|rect| {
+                                        [rect.x, rect.y, rect.width, rect.height]
+                                    }),
+                                });
+                            }
+                        } else {
+                            let line_height = canvas.line_height(*font_size);
+                            for (index, line) in text.split('\n').enumerate() {
+                                canvas.text_commands.push(TextRenderCommand {
+                                    x: *x,
+                                    y: *y + index as f32 * line_height,
+                                    text: line.to_string(),
+                                    font_size: *font_size,
+                                    weight: *weight,
+                                    italic: *italic,
+                                    mono: *mono,
+                                    family: family.clone(),
+                                    color: *color,
+                                    max_width: None,
+                                    alignment: TextAlignment::Start,
+                                    transform: transform.to_array(),
+                                    clip: scissor.map(|rect| {
+                                        [rect.x, rect.y, rect.width, rect.height]
+                                    }),
+                                });
                             }
                         }
-                    }
-                    if collect_text {
-                        let line_height = canvas.line_height(*font_size);
-                        for (index, line) in text.split('\n').enumerate() {
-                            canvas.text_commands.push(TextRenderCommand {
-                                x: draw_x,
-                                y: *y + index as f32 * line_height,
-                                text: line.to_string(),
-                                font_size: *font_size,
-                                weight: *weight,
-                                italic: *italic,
-                                mono: *mono,
-                                family: family.clone(),
-                                color: *color,
-                                max_width: *max_width,
-                                alignment: *alignment,
-                                transform: transform.to_array(),
-                                clip: scissor.map(|rect| {
-                                    [rect.x, rect.y, rect.width, rect.height]
-                                }),
-                            });
-                        }
+                    } else if let Some(layout) = layout.as_deref() {
+                        canvas.unsupported_glyphs += layout.unsupported_glyphs;
+                        canvas.draw_text_layout(
+                            transform,
+                            scissor,
+                            Point::new(*x, *y),
+                            layout,
+                            *weight,
+                            *italic,
+                            *color,
+                        );
                     } else {
                         canvas.draw_text(
                             transform,
                             scissor,
-                            Point::new(draw_x, *y),
+                            Point::new(*x, *y),
                             text,
                             *font_size,
                             *weight,
@@ -268,7 +512,26 @@ impl CpuRasterizer {
                         );
                     }
                 }
-                DrawCommand::Image { .. } => {}
+                DrawCommand::Image {
+                    x,
+                    y,
+                    width,
+                    height,
+                    source,
+                    source_rect,
+                    radius,
+                    grayscale,
+                } => {
+                    canvas.draw_image(
+                        transform,
+                        scissor,
+                        Rect::new(*x, *y, *width, *height),
+                        source,
+                        *source_rect,
+                        *radius,
+                        *grayscale,
+                    );
+                }
                 _ => match command {
                     DrawCommand::Rect {
                         x,
@@ -364,7 +627,8 @@ impl CpuRasterizer {
         }
 
         let text_commands = std::mem::take(&mut canvas.text_commands);
-        let unsupported_commands = canvas.command_counts.image;
+        let unsupported_commands = canvas.unsupported_images;
+        let glyph_stats_after = glyph_cache_stats();
         Ok((
             CpuFrame {
                 width: size.width,
@@ -373,6 +637,20 @@ impl CpuRasterizer {
                 command_counts: canvas.command_counts,
                 unsupported_commands,
                 unsupported_glyphs: canvas.unsupported_glyphs,
+                rasterized_pixels: base_scissor.map_or(
+                    u64::from(size.width) * u64::from(size.height),
+                    |rect| {
+                        let width = rect.width.max(0.0).min(size.width as f32) as u64;
+                        let height = rect.height.max(0.0).min(size.height as f32) as u64;
+                        width * height
+                    },
+                ),
+                glyph_cache_hits: glyph_stats_after
+                    .hits
+                    .saturating_sub(glyph_stats_before.hits),
+                glyph_cache_misses: glyph_stats_after
+                    .misses
+                    .saturating_sub(glyph_stats_before.misses),
             },
             text_commands,
         ))
@@ -385,21 +663,26 @@ struct Canvas {
     pixels: Vec<u32>,
     command_counts: CommandCounts,
     unsupported_glyphs: usize,
+    unsupported_images: usize,
     font: Option<Arc<FontFace>>,
+    stack: Option<Arc<FontStack>>,
     text_commands: Vec<TextRenderCommand>,
     collect_text_only: bool,
 }
 
 impl Canvas {
-    fn new(size: RenderSize, background: Color, font: Option<Arc<FontFace>>) -> Self {
+    fn new(size: RenderSize, background: Color, stack: Option<Arc<FontStack>>) -> Self {
         let packed = pack_color(background);
+        let font = stack.as_ref().map(|stack| stack.sans().clone());
         Self {
             width: size.width,
             height: size.height,
             pixels: vec![packed; size.width as usize * size.height as usize],
             command_counts: CommandCounts::default(),
             unsupported_glyphs: 0,
+            unsupported_images: 0,
             font,
+            stack,
             text_commands: Vec::new(),
             collect_text_only: false,
         }
@@ -980,6 +1263,120 @@ impl Canvas {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn draw_image(
+        &mut self,
+        transform: TransformMatrix,
+        scissor: Option<Rect>,
+        rect: Rect,
+        source: &ImageHandle,
+        source_rect: ImageSourceRect,
+        radius: Radius,
+        grayscale: bool,
+    ) {
+        let Some(data) = source.data() else {
+            self.unsupported_images += 1;
+            return;
+        };
+        if rect.width <= 0.0
+            || rect.height <= 0.0
+            || source_rect.width <= 0.0
+            || source_rect.height <= 0.0
+        {
+            return;
+        }
+        let Some(inverse) = transform.inverse() else {
+            return;
+        };
+        let corners = [
+            transform.apply(Point::new(rect.x, rect.y)),
+            transform.apply(Point::new(rect.right(), rect.y)),
+            transform.apply(Point::new(rect.right(), rect.bottom())),
+            transform.apply(Point::new(rect.x, rect.bottom())),
+        ];
+        let left = corners
+            .iter()
+            .map(|point| point.x)
+            .fold(f32::INFINITY, f32::min);
+        let top = corners
+            .iter()
+            .map(|point| point.y)
+            .fold(f32::INFINITY, f32::min);
+        let right = corners
+            .iter()
+            .map(|point| point.x)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let bottom = corners
+            .iter()
+            .map(|point| point.y)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let mut min_x = left.floor().max(0.0) as u32;
+        let mut min_y = top.floor().max(0.0) as u32;
+        let mut max_x = right.ceil().min(self.width as f32).max(0.0) as u32;
+        let mut max_y = bottom.ceil().min(self.height as f32).max(0.0) as u32;
+        if let Some(clip) = scissor {
+            min_x = min_x.max(clip.x.max(0.0).floor() as u32);
+            min_y = min_y.max(clip.y.max(0.0).floor() as u32);
+            max_x = max_x.min(clip.right().ceil().clamp(0.0, self.width as f32) as u32);
+            max_y = max_y.min(clip.bottom().ceil().clamp(0.0, self.height as f32) as u32);
+        }
+        if min_x >= max_x || min_y >= max_y {
+            return;
+        }
+        let maximum = rect.width.min(rect.height) / 2.0;
+        let radii = [
+            radius.top_left.clamp(0.0, maximum),
+            radius.top_right.clamp(0.0, maximum),
+            radius.bottom_right.clamp(0.0, maximum),
+            radius.bottom_left.clamp(0.0, maximum),
+        ];
+        const SAMPLE: u32 = 4;
+        const SAMPLE_COUNT: u32 = SAMPLE * SAMPLE;
+        for y in min_y..max_y {
+            for x in min_x..max_x {
+                let mut covered = 0_u32;
+                for sy in 0..SAMPLE {
+                    for sx in 0..SAMPLE {
+                        let device = Point::new(
+                            x as f32 + (sx as f32 + 0.5) / SAMPLE as f32,
+                            y as f32 + (sy as f32 + 0.5) / SAMPLE as f32,
+                        );
+                        let local = inverse.apply(device);
+                        if inside_rounded_rect(rect, radii, local.x, local.y) {
+                            covered += 1;
+                        }
+                    }
+                }
+                if covered == 0 {
+                    continue;
+                }
+                let local = inverse.apply(Point::new(x as f32 + 0.5, y as f32 + 0.5));
+                let u = source_rect.x
+                    + (local.x - rect.x) / rect.width * source_rect.width;
+                let v = source_rect.y
+                    + (local.y - rect.y) / rect.height * source_rect.height;
+                let mut color = sample_rgba_bilinear(
+                    data.pixels(),
+                    data.width(),
+                    data.height(),
+                    u,
+                    v,
+                );
+                if grayscale {
+                    let luma = (0.2126 * color[0]
+                        + 0.7152 * color[1]
+                        + 0.0722 * color[2])
+                        .round();
+                    color[0] = luma;
+                    color[1] = luma;
+                    color[2] = luma;
+                }
+                color[3] *= covered as f32 / SAMPLE_COUNT as f32;
+                self.blend(x, y, color);
+            }
+        }
+    }
+
     fn measure_text(&self, text: &str, font_size: f32) -> f32 {
         let font_size = font_size.max(1.0);
         match self.font.as_ref() {
@@ -995,6 +1392,70 @@ impl Canvas {
         match self.font.as_ref() {
             Some(font) => font.line_height(font_size),
             None => font_size * 1.25,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_text_layout(
+        &mut self,
+        transform: TransformMatrix,
+        scissor: Option<Rect>,
+        origin: Point,
+        layout: &TextLayout,
+        weight: u16,
+        italic: bool,
+        color: Color,
+    ) {
+        let color = color_to_array(color);
+        let bold_offset = if weight >= 600 {
+            (layout.font_size * 0.035).clamp(0.35, 1.0)
+        } else {
+            0.0
+        };
+        for (line_index, line) in layout.lines.iter().enumerate() {
+            let baseline_y = origin.y + layout.baseline(line_index);
+            let line_transform = if italic {
+                transform.then(TransformMatrix::italic_shear(baseline_y, 0.2))
+            } else {
+                transform
+            };
+            let mut pen_x = origin.x + line.x_offset;
+            for run in &line.runs {
+                for glyph in &run.glyphs {
+                    let stack_id = self.stack.as_ref().map_or(0, |stack| stack.id());
+                    let bitmap = cached_glyph(
+                        stack_id,
+                        &run.font,
+                        glyph.glyph_id,
+                        layout.font_size,
+                        weight >= 600,
+                        italic,
+                    );
+                    let x = pen_x + glyph.offset_x;
+                    let y = baseline_y - glyph.offset_y;
+                    self.fill_glyph_bitmap(
+                        line_transform,
+                        scissor,
+                        &bitmap,
+                        x,
+                        y,
+                        0.0,
+                        color,
+                    );
+                    if bold_offset > 0.0 {
+                        self.fill_glyph_bitmap(
+                            line_transform,
+                            scissor,
+                            &bitmap,
+                            x,
+                            y,
+                            bold_offset,
+                            color,
+                        );
+                    }
+                    pen_x += glyph.advance;
+                }
+            }
         }
     }
 
@@ -1039,7 +1500,16 @@ impl Canvas {
                     cursor_x += font_size * 0.5;
                     continue;
                 }
-                let bitmap = font.rasterize(character, font_size);
+                let stack_id = self.stack.as_ref().map_or(0, |stack| stack.id());
+                let glyph_id = font.glyph_id(character);
+                let bitmap = cached_glyph(
+                    stack_id,
+                    &font,
+                    glyph_id,
+                    font_size,
+                    weight >= 600,
+                    italic,
+                );
                 self.fill_glyph_bitmap(
                     line_transform,
                     scissor,
@@ -1566,8 +2036,119 @@ fn gradient_offset(start: Point, end: Point, point: Point) -> f32 {
     ((point.x - start.x) * direction.x + (point.y - start.y) * direction.y) / length_squared
 }
 
+fn sample_rgba_bilinear(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    u: f32,
+    v: f32,
+) -> [f32; 4] {
+    if width == 0 || height == 0 {
+        return [0.0; 4];
+    }
+    let sample_x = (u.clamp(0.0, 1.0) * width as f32 - 0.5).clamp(0.0, width as f32 - 1.0);
+    let sample_y = (v.clamp(0.0, 1.0) * height as f32 - 0.5).clamp(0.0, height as f32 - 1.0);
+    let x0 = sample_x.floor() as usize;
+    let y0 = sample_y.floor() as usize;
+    let x1 = (x0 + 1).min(width as usize - 1);
+    let y1 = (y0 + 1).min(height as usize - 1);
+    let fx = sample_x - x0 as f32;
+    let fy = sample_y - y0 as f32;
+    let texel = |x: usize, y: usize, channel: usize| {
+        f32::from(pixels[(y * width as usize + x) * 4 + channel]) / 255.0
+    };
+    let mut color = [0.0; 4];
+    for (channel, value) in color.iter_mut().enumerate() {
+        let top = texel(x0, y0, channel) * (1.0 - fx) + texel(x1, y0, channel) * fx;
+        let bottom =
+            texel(x0, y1, channel) * (1.0 - fx) + texel(x1, y1, channel) * fx;
+        *value = top * (1.0 - fy) + bottom * fy;
+    }
+    color
+}
+
 fn pack_color(color: Color) -> u32 {
     (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)
+}
+
+fn clear_pixels(pixels: &mut [u32], width: u32, rect: Rect, background: Color) {
+    let packed = pack_color(background);
+    let min_x = rect.x.max(0.0).floor() as u32;
+    let min_y = rect.y.max(0.0).floor() as u32;
+    let max_x = rect.right().ceil().clamp(0.0, width as f32) as u32;
+    let height = pixels.len() as u32 / width.max(1);
+    let max_y = rect.bottom().ceil().clamp(0.0, height as f32) as u32;
+    for y in min_y..max_y {
+        let row = y as usize * width as usize;
+        for pixel in &mut pixels[row + min_x as usize..row + max_x as usize] {
+            *pixel = packed;
+        }
+    }
+}
+
+fn prefilter_display(display: &DisplayList, damage: Rect) -> DisplayList {
+    let mut commands = Vec::new();
+    let mut transform = TransformMatrix::IDENTITY;
+    let mut transform_stack = Vec::new();
+    let mut clip: Option<Rect> = None;
+    let mut clip_stack = Vec::new();
+    for command in &display.commands {
+        match command {
+            DrawCommand::TransformPush { transform: local, .. } => {
+                transform_stack.push(transform);
+                transform = transform.then(TransformMatrix::from_transform(*local));
+                commands.push(command.clone());
+            }
+            DrawCommand::TransformPop => {
+                if let Some(previous) = transform_stack.pop() {
+                    transform = previous;
+                }
+                commands.push(command.clone());
+            }
+            DrawCommand::ScissorPush { rect } => {
+                clip_stack.push(clip);
+                let transformed = transform.transform_rect(*rect);
+                clip = Some(match clip {
+                    Some(current) => intersect_rects(current, transformed),
+                    None => transformed,
+                });
+                commands.push(command.clone());
+            }
+            DrawCommand::ScissorPop => {
+                if let Some(previous) = clip_stack.pop() {
+                    clip = previous;
+                }
+                commands.push(command.clone());
+            }
+            _ => {
+                let visible = command_device_bounds(command, transform)
+                    .is_none_or(|bounds| {
+                        let bounds = clip.map_or(bounds, |clip| intersect_rects(bounds, clip));
+                        let hit = intersect_rects(bounds, damage);
+                        hit.width > 0.0 && hit.height > 0.0
+                    });
+                if visible {
+                    commands.push(command.clone());
+                }
+            }
+        }
+    }
+    DisplayList::from_commands(commands)
+}
+
+fn add_counts(total: &mut CommandCounts, counts: CommandCounts) {
+    total.rect += counts.rect;
+    total.rounded_rect += counts.rounded_rect;
+    total.circle += counts.circle;
+    total.line += counts.line;
+    total.text += counts.text;
+    total.svg_path += counts.svg_path;
+    total.linear_gradient += counts.linear_gradient;
+    total.image += counts.image;
+    total.scissor_push += counts.scissor_push;
+    total.scissor_pop += counts.scissor_pop;
+    total.transform_push += counts.transform_push;
+    total.transform_pop += counts.transform_pop;
 }
 
 #[cfg(test)]
@@ -1575,7 +2156,11 @@ mod tests {
     use super::*;
     use crate::font::FontRegistry;
     use crate::icon::Icon;
+    use crate::image::ImageData;
     use crate::paint::Transform;
+    use std::sync::Mutex;
+
+    static CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn pixel(frame: &CpuFrame, x: u32, y: u32) -> u32 {
         frame.pixels[y as usize * frame.width as usize + x as usize]
@@ -1637,6 +2222,97 @@ mod tests {
             CpuRasterizer::rasterize(&display, RenderSize::new(32, 32), Color::BLACK).unwrap();
         assert_eq!(pixel(&frame, 12, 4), 0x000000ff);
         assert_eq!(pixel(&frame, 2, 4), 0x00000000);
+    }
+
+    #[test]
+    fn image_samples_quadrants_and_alpha() {
+        let pixels = [
+            255_u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        let source =
+            ImageHandle::from_data("quadrants", ImageData::new(&pixels, 2, 2)).unwrap();
+        let display = DisplayList::from_commands(vec![DrawCommand::Image {
+            x: 0.0,
+            y: 0.0,
+            width: 64.0,
+            height: 64.0,
+            source,
+            source_rect: ImageSourceRect::default(),
+            radius: Radius::default(),
+            grayscale: false,
+        }]);
+        let frame = CpuRasterizer::rasterize_with_font(
+            &display,
+            RenderSize::new(64, 64),
+            Color::TRANSPARENT,
+            None,
+        )
+        .unwrap();
+        assert_eq!(pixel(&frame, 8, 8), 0x00ff0000);
+        assert_eq!(pixel(&frame, 56, 8), 0x0000ff00);
+        assert_eq!(pixel(&frame, 8, 56), 0x000000ff);
+        assert_eq!(pixel(&frame, 56, 56), 0x00ffffff);
+        assert_eq!(frame.unsupported_commands, 0);
+
+        let translucent = [255_u8, 0, 0, 128];
+        let source =
+            ImageHandle::from_data("alpha", ImageData::new(&translucent, 1, 1)).unwrap();
+        let display = DisplayList::from_commands(vec![DrawCommand::Image {
+            x: 0.0,
+            y: 0.0,
+            width: 8.0,
+            height: 8.0,
+            source,
+            source_rect: ImageSourceRect::default(),
+            radius: Radius::default(),
+            grayscale: false,
+        }]);
+        let frame = CpuRasterizer::rasterize_with_font(
+            &display,
+            RenderSize::new(8, 8),
+            Color::BLACK,
+            None,
+        )
+        .unwrap();
+        let red = (pixel(&frame, 4, 4) >> 16) & 0xff;
+        assert!((125..=130).contains(&red), "alpha blend produced red={red}");
+    }
+
+    #[test]
+    fn image_respects_scissor_and_transform() {
+        let pixels = [255_u8, 0, 0, 255];
+        let source = ImageHandle::from_data("scissored", ImageData::new(&pixels, 1, 1)).unwrap();
+        let display = DisplayList::from_commands(vec![
+            DrawCommand::ScissorPush {
+                rect: Rect::new(10.0, 10.0, 12.0, 12.0),
+            },
+            DrawCommand::TransformPush {
+                transform: Transform::translate(Point::new(10.0, 10.0)),
+            },
+            DrawCommand::Image {
+                x: 0.0,
+                y: 0.0,
+                width: 16.0,
+                height: 16.0,
+                source,
+                source_rect: ImageSourceRect::default(),
+                radius: Radius::default(),
+                grayscale: false,
+            },
+            DrawCommand::TransformPop,
+            DrawCommand::ScissorPop,
+        ]);
+        let frame = CpuRasterizer::rasterize_with_font(
+            &display,
+            RenderSize::new(32, 32),
+            Color::BLACK,
+            None,
+        )
+        .unwrap();
+        assert_eq!(pixel(&frame, 12, 12), 0x00ff0000);
+        assert_eq!(pixel(&frame, 21, 21), 0x00ff0000);
+        assert_eq!(pixel(&frame, 22, 22), 0x00000000);
+        assert_eq!(pixel(&frame, 5, 5), 0x00000000);
     }
 
     #[test]
@@ -1772,6 +2448,33 @@ mod tests {
     }
 
     #[test]
+    fn fallback_glyphs_draw_through_the_shared_layout() {
+        let Some(stack) = crate::font::default_font_stack() else {
+            return;
+        };
+        if stack.face_for('\u{4f60}', false).is_none() {
+            return;
+        }
+        let display = DisplayList::from_commands(vec![DrawCommand::Text {
+            x: 2.0,
+            y: 2.0,
+            text: "\u{4f60}\u{597d}".to_string(),
+            font_size: 24.0,
+            weight: 400,
+            italic: false,
+            mono: false,
+            family: None,
+            color: Color::WHITE,
+            max_width: None,
+            alignment: crate::paint::TextAlignment::Start,
+        }]);
+        let frame =
+            CpuRasterizer::rasterize(&display, RenderSize::new(64, 48), Color::BLACK).unwrap();
+        assert_eq!(frame.unsupported_glyphs, 0);
+        assert!(frame.pixels.iter().any(|pixel| *pixel != 0));
+    }
+
+    #[test]
     fn real_font_counts_missing_glyphs() {
         let Some(font) = FontRegistry::load_system_default() else {
             return;
@@ -1853,5 +2556,291 @@ mod tests {
             .filter(|pixel| **pixel == 0x00ffffff)
             .count();
         assert!(white > 0, "check icon must produce visible pixels");
+    }
+
+    #[test]
+    fn damaged_rasterization_matches_a_full_repaint() {
+        let previous_display = DisplayList::from_commands(vec![DrawCommand::Rect {
+            x: 4.0,
+            y: 4.0,
+            width: 20.0,
+            height: 20.0,
+            color: Color::rgb(255, 0, 0),
+        }]);
+        let next_display = DisplayList::from_commands(vec![
+            DrawCommand::Rect {
+                x: 4.0,
+                y: 4.0,
+                width: 20.0,
+                height: 20.0,
+                color: Color::rgb(255, 0, 0),
+            },
+            DrawCommand::Rect {
+                x: 70.0,
+                y: 30.0,
+                width: 10.0,
+                height: 10.0,
+                color: Color::rgb(0, 0, 255),
+            },
+        ]);
+        let size = RenderSize::new(100, 80);
+        let previous =
+            CpuRasterizer::rasterize(&previous_display, size, Color::BLACK).unwrap();
+        let damage = crate::render::diff(&previous_display, &next_display, size);
+        let partial =
+            CpuRasterizer::rasterize_damaged(&previous, &next_display, size, Color::BLACK, &damage)
+                .unwrap();
+        let full = CpuRasterizer::rasterize(&next_display, size, Color::BLACK).unwrap();
+        assert_eq!(partial.pixels, full.pixels);
+        assert!(partial.rasterized_pixels < full.rasterized_pixels);
+    }
+
+    #[test]
+    fn empty_damage_skips_rasterization_and_resize_forces_full() {
+        let display = DisplayList::from_commands(vec![DrawCommand::Rect {
+            x: 1.0,
+            y: 1.0,
+            width: 4.0,
+            height: 4.0,
+            color: Color::WHITE,
+        }]);
+        let size = RenderSize::new(32, 32);
+        let previous = CpuRasterizer::rasterize(&display, size, Color::BLACK).unwrap();
+        let empty = CpuRasterizer::rasterize_damaged(
+            &previous,
+            &display,
+            size,
+            Color::BLACK,
+            &crate::render::diff(&display, &display, size),
+        )
+        .unwrap();
+        assert_eq!(empty.pixels, previous.pixels);
+        assert_eq!(empty.rasterized_pixels, 0);
+        assert_eq!(empty.command_counts.total(), 0);
+
+        let resized = CpuRasterizer::rasterize_damaged(
+            &previous,
+            &display,
+            RenderSize::new(40, 40),
+            Color::BLACK,
+            &crate::render::diff(&display, &display, size),
+        )
+        .unwrap();
+        assert_eq!(resized.width, 40);
+        assert_eq!(resized.rasterized_pixels, 1600);
+    }
+
+    #[test]
+    fn damaged_rasterization_counts_only_unsupported_work_inside_damage() {
+        let unresolved_outside = DrawCommand::Image {
+            x: 70.0,
+            y: 8.0,
+            width: 8.0,
+            height: 8.0,
+            source: ImageHandle::new("outside"),
+            source_rect: ImageSourceRect::default(),
+            radius: Radius::all(0.0),
+            grayscale: false,
+        };
+        let unresolved_inside = DrawCommand::Image {
+            x: 8.0,
+            y: 8.0,
+            width: 8.0,
+            height: 8.0,
+            source: ImageHandle::new("inside"),
+            source_rect: ImageSourceRect::default(),
+            radius: Radius::all(0.0),
+            grayscale: false,
+        };
+        let previous_display = DisplayList::from_commands(vec![unresolved_outside.clone()]);
+        let next_display =
+            DisplayList::from_commands(vec![unresolved_outside, unresolved_inside]);
+        let size = RenderSize::new(96, 48);
+        let previous =
+            CpuRasterizer::rasterize(&previous_display, size, Color::BLACK).unwrap();
+        let damage = crate::render::diff(&previous_display, &next_display, size);
+        let partial =
+            CpuRasterizer::rasterize_damaged(&previous, &next_display, size, Color::BLACK, &damage)
+                .unwrap();
+        assert_eq!(partial.unsupported_commands, 1);
+    }
+
+    #[test]
+    fn glyph_cache_hits_misses_invalidates_and_evicts() {
+        let _guard = CACHE_TEST_LOCK.lock().unwrap();
+        let font = std::fs::read("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+            .ok()
+            .and_then(|bytes| FontRegistry::load_bytes(bytes).ok());
+        let Some(font) = font else {
+            return;
+        };
+        let font = Arc::new(font);
+        let glyph = font.glyph_id('A');
+        set_glyph_cache_capacity(DEFAULT_GLYPH_CACHE_CAPACITY);
+        let before = glyph_cache_stats();
+        let first = cached_glyph(10, &font, glyph, 18.0, false, false);
+        let second = cached_glyph(10, &font, glyph, 18.0, false, false);
+        assert_eq!(first.coverage, second.coverage);
+        let hit = glyph_cache_stats();
+        assert!(hit.hits > before.hits);
+        assert!(hit.misses > before.misses);
+
+        let before_stack = glyph_cache_stats();
+        let _other = cached_glyph(11, &font, glyph, 18.0, false, false);
+        assert!(glyph_cache_stats().misses > before_stack.misses);
+
+        set_glyph_cache_capacity(1);
+        let _second = cached_glyph(11, &font, font.glyph_id('B'), 20.0, true, false);
+        assert!(glyph_cache_stats().entries <= 1);
+        set_glyph_cache_capacity(DEFAULT_GLYPH_CACHE_CAPACITY);
+    }
+
+    #[test]
+    fn disabling_glyph_cache_preserves_pixels() {
+        let _guard = CACHE_TEST_LOCK.lock().unwrap();
+        let Some(font) = std::fs::read("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+            .ok()
+            .and_then(|bytes| FontRegistry::load_bytes(bytes).ok())
+        else {
+            return;
+        };
+        let font = Arc::new(font);
+        let display = DisplayList::from_commands(vec![DrawCommand::Text {
+            x: 2.0,
+            y: 2.0,
+            text: "cache parity".to_string(),
+            font_size: 18.0,
+            weight: 700,
+            italic: true,
+            mono: false,
+            family: None,
+            color: Color::WHITE,
+            max_width: None,
+            alignment: TextAlignment::Start,
+        }]);
+        set_glyph_cache_enabled(true);
+        let cached = CpuRasterizer::rasterize_with_font(
+            &display,
+            RenderSize::new(180, 40),
+            Color::BLACK,
+            Some(font.clone()),
+        )
+        .unwrap();
+        set_glyph_cache_enabled(false);
+        let uncached = CpuRasterizer::rasterize_with_font(
+            &display,
+            RenderSize::new(180, 40),
+            Color::BLACK,
+            Some(font),
+        )
+        .unwrap();
+        set_glyph_cache_enabled(true);
+        assert_eq!(cached.pixels, uncached.pixels);
+    }
+
+    #[test]
+    fn damage_prefilter_matches_unfiltered_rasterization() {
+        let previous_display = DisplayList::from_commands(vec![
+            DrawCommand::Rect {
+                x: 4.0,
+                y: 4.0,
+                width: 12.0,
+                height: 12.0,
+                color: Color::rgb(255, 0, 0),
+            },
+            DrawCommand::TransformPush {
+                transform: Transform::translate(Point::new(30.0, 0.0)),
+            },
+            DrawCommand::Rect {
+                x: 40.0,
+                y: 40.0,
+                width: 8.0,
+                height: 8.0,
+                color: Color::rgb(0, 255, 0),
+            },
+            DrawCommand::TransformPop,
+        ]);
+        let next_display = DisplayList::from_commands(vec![
+            DrawCommand::Rect {
+                x: 4.0,
+                y: 4.0,
+                width: 12.0,
+                height: 12.0,
+                color: Color::rgb(255, 0, 0),
+            },
+            DrawCommand::TransformPush {
+                transform: Transform::translate(Point::new(30.0, 0.0)),
+            },
+            DrawCommand::Rect {
+                x: 40.0,
+                y: 40.0,
+                width: 8.0,
+                height: 8.0,
+                color: Color::rgb(0, 255, 0),
+            },
+            DrawCommand::TransformPop,
+            DrawCommand::Rect {
+                x: 60.0,
+                y: 60.0,
+                width: 6.0,
+                height: 6.0,
+                color: Color::rgb(0, 0, 255),
+            },
+        ]);
+        let size = RenderSize::new(96, 80);
+        let previous =
+            CpuRasterizer::rasterize(&previous_display, size, Color::BLACK).unwrap();
+        let damage = crate::render::diff(&previous_display, &next_display, size);
+        let filtered =
+            CpuRasterizer::rasterize_damaged(&previous, &next_display, size, Color::BLACK, &damage)
+                .unwrap();
+        let unfiltered = CpuRasterizer::rasterize_damaged_inner(
+            &previous,
+            &next_display,
+            size,
+            Color::BLACK,
+            &damage,
+            false,
+        )
+        .unwrap();
+        let full = CpuRasterizer::rasterize(&next_display, size, Color::BLACK).unwrap();
+        assert_eq!(filtered.pixels, unfiltered.pixels);
+        assert_eq!(filtered.pixels, full.pixels);
+        assert!(filtered.command_counts.total() < unfiltered.command_counts.total());
+    }
+
+    #[test]
+    fn prefilter_skips_outside_and_scissored_commands() {
+        let display = DisplayList::from_commands(vec![
+            DrawCommand::Rect {
+                x: 2.0,
+                y: 2.0,
+                width: 4.0,
+                height: 4.0,
+                color: Color::WHITE,
+            },
+            DrawCommand::Rect {
+                x: 70.0,
+                y: 2.0,
+                width: 4.0,
+                height: 4.0,
+                color: Color::WHITE,
+            },
+            DrawCommand::ScissorPush {
+                rect: Rect::new(0.0, 0.0, 10.0, 10.0),
+            },
+            DrawCommand::Rect {
+                x: 60.0,
+                y: 2.0,
+                width: 4.0,
+                height: 4.0,
+                color: Color::WHITE,
+            },
+            DrawCommand::ScissorPop,
+        ]);
+        let filtered = prefilter_display(&display, Rect::new(0.0, 0.0, 20.0, 20.0));
+        assert_eq!(filtered.commands.iter().filter(|command| matches!(command, DrawCommand::Rect { .. })).count(), 1);
+        assert!(filtered.commands.iter().any(|command| matches!(command, DrawCommand::ScissorPush { .. })));
+        assert!(filtered.commands.iter().any(|command| matches!(command, DrawCommand::ScissorPop)));
     }
 }

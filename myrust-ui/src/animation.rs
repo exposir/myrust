@@ -43,12 +43,22 @@ impl Animation {
 
     /// Converts elapsed fraction to eased progress in `0.0..=1.0`.
     pub fn value(&self, elapsed_fraction: f32) -> f32 {
+        self.easing.value(elapsed_fraction)
+    }
+}
+
+impl Easing {
+    /// Converts an elapsed fraction to eased progress in `0.0..=1.0`.
+    ///
+    /// Non-finite fractions are treated as zero. Values outside the unit
+    /// interval are clamped, so an easing curve never overshoots its endpoint.
+    pub fn value(self, elapsed_fraction: f32) -> f32 {
         let fraction = if elapsed_fraction.is_finite() {
             elapsed_fraction.clamp(0.0, 1.0)
         } else {
             0.0
         };
-        match self.easing {
+        match self {
             Easing::Linear => fraction,
             Easing::EaseOutCubic => 1.0 - (1.0 - fraction).powi(3),
             Easing::EaseInOutCubic => {

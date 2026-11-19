@@ -29,8 +29,8 @@ window.__DOC_ENTRIES__ = [
 "sectionZh": "指南",
 "sectionId": "guides",
 "status": "done",
-"text": "Text with font size, weight, color, wrap width and alignment, measured and wrapped without shaping or kerning.",
-"textZh": "带字号、字重、颜色、换行宽度与对齐的文本，测量与换行，不做字形整形或字距调整。",
+"text": "Text with font size, weight, color, wrap width and alignment, shaped, bidi-ordered and wrapped with ordered font fallback.",
+"textZh": "带字号、字重、颜色、换行宽度与对齐的文本，完成字形整形、bidi 排序、换行与有序字体回退。",
 "url": "/docs/ui/text/"
 },
 {
@@ -95,8 +95,8 @@ window.__DOC_ENTRIES__ = [
 "sectionZh": "指南",
 "sectionId": "guides",
 "status": "partial",
-"text": "Semantic nodes are emitted for labels, buttons, fields, choices, sliders, scroll views and groups; no AT-SPI, UIA or NSAccessibility bridge is connected yet.",
-"textZh": "为标签、按钮、输入框、选项、滑块、滚动视图与分组发出语义节点；尚未连接 AT-SPI、UIA 或 NSAccessibility 桥。",
+"text": "Semantic nodes reach AT-SPI on Linux, NSAccessibility on macOS and UI Automation on Windows, with focus and click actions.",
+"textZh": "语义节点发布到 Linux 的 AT-SPI、macOS 的 NSAccessibility 与 Windows 的 UI Automation，并支持焦点与点击操作。",
 "url": "/docs/ui/accessibility/"
 },
 {
@@ -117,8 +117,8 @@ window.__DOC_ENTRIES__ = [
 "sectionZh": "指南",
 "sectionId": "guides",
 "status": "partial",
-"text": "The window's language and regional formats, numbers and dates written in them, and the controls' own strings.",
-"textZh": "窗口语言与地区格式、按其书写的数字与日期，以及控件自身的文案。",
+"text": "Locale matching and English fallback, ICU message catalogs with plural and select, CLDR numbers and dates, and the en-XA layout test locale.",
+"textZh": "Locale 匹配与英语 fallback、带 plural/select 的 ICU 消息 catalog、CLDR 数字与日期，以及 en-XA 布局测试 locale。",
 "url": "/docs/ui/languages/"
 },
 {
@@ -263,6 +263,28 @@ window.__DOC_ENTRIES__ = [
 "text": "Measured frame costs and retained memory.",
 "textZh": "测量的帧开销与保留内存。",
 "url": "/docs/ui/performance/"
+},
+{
+"title": "Distribution",
+"titleZh": "发行打包",
+"section": "Guides",
+"sectionZh": "指南",
+"sectionId": "guides",
+"status": "done",
+"text": "Native package generation, signing, notarization, and explicit tool failures.",
+"textZh": "原生打包、签名、公证，以及工具缺失时的显式错误。",
+"url": "/docs/ui/distribution/"
+},
+{
+"title": "Updates",
+"titleZh": "应用更新",
+"section": "Guides",
+"sectionZh": "指南",
+"sectionId": "guides",
+"status": "done",
+"text": "Ed25519 and minisign verification, delta patches, path safety, and rollback.",
+"textZh": "Ed25519 与 minisign 校验、delta patch、路径安全与回滚。",
+"url": "/docs/ui/updates/"
 },
 {
 "title": "Button",
@@ -919,9 +941,9 @@ window.__DOC_ENTRIES__ = [
 "section": "Images",
 "sectionZh": "图像",
 "sectionId": "images",
-"status": "partial",
-"text": "Bitmaps and SVGs in their own colors.",
-"textZh": "以自身颜色显示的位图与 SVG。",
+"status": "done",
+"text": "Shared RGBA images with Fit, rounding, grayscale, CPU sampling, GPU textures and optional PNG/JPEG/WebP decoding.",
+"textZh": "可共享的 RGBA 图像，支持 Fit、圆角、灰度、CPU 采样、GPU 纹理与可选 PNG/JPEG/WebP 解码。",
 "url": "/docs/ui/image/"
 },
 {
@@ -930,9 +952,9 @@ window.__DOC_ENTRIES__ = [
 "section": "Images",
 "sectionZh": "图像",
 "sectionId": "images",
-"status": "none",
-"text": "Video files and streams with sound, played by the system's media engine.",
-"textZh": "带声音的视频文件与流，由系统媒体引擎播放。",
+"status": "partial",
+"text": "Host-decoded RGBA frames, deterministic play/pause/seek/loop state, and a video widget reusing the image and damage pipeline; no decoder or audio.",
+"textZh": "宿主解码的 RGBA 帧、确定性的 play/pause/seek/loop 状态，以及复用 image 与 damage 管线的 video widget；不含解码器或音频。",
 "url": "/docs/ui/video/"
 },
 {

@@ -16,7 +16,7 @@ c.with_direction(Direction::Rtl, |c| {
 
 `Direction::Ltr` and `Direction::Rtl` are public values. `Context::direction()` reads it, `set_direction` changes it for subsequent nodes, and `with_direction(direction, closure)` scopes the change and restores the previous value.
 
-`Direction` is not a locale and not a CSS property. It does not change text shaping, paragraph base direction or number formatting; it drives layout order and a few presentation defaults.
+`Direction` is not a locale and not a CSS property. It drives layout order and a few presentation defaults; shaping features and Unicode bidi resolution are determined by the text and font stack, not by this layout enum. It does not set the paragraph base direction or number formatting.
 
 ## What mirrors
 
@@ -28,7 +28,7 @@ Overlays and ordinary columns keep their physical placement; only row child orde
 
 Padding, margin and border sides are physical and do not swap. Scrollbar placement, split-view divider order, grid column order, `left`/`top` offsets and absolute positioning do not flip.
 
-Arbitrary `SvgPath`, images, bidi text runs, punctuation, URLs and numbers are not mirrored or reordered. Mixed-direction text has no shaping/bidi algorithm; the renderer lays out a single left-to-right string unless the caller splits it.
+Arbitrary `SvgPath` and images are not mirrored. Text runs are reordered by the shared Unicode bidi layout; punctuation, URLs and numbers follow that algorithm but are not independently mirrored by `Direction`.
 
 ## Trying it
 

@@ -24,7 +24,7 @@ MyRust 没有 shader language、GLSL/WGSL 编写、函数库、include resolver 
 
 ## Images
 
-`ImageData`/`image` 把解码 RGBA8 放进 draw command，但 CPU presenter 目前报告 image unsupported；没有 image shader 或 sampler。GPU image sampling、texture atlas 与 render target 缺失。
+`ImageData`/`image` 把解码 RGBA8 放进单条 image command。CPU presenter 做双线性采样；可选 GPU presenter 上传按内容版本索引的 `RGBA8` 或不透明灰度 `R8` 纹理，并通过内部 image shader 采样。该 sampler 是固定实现，不是公开自定义 shader surface。
 
 ## Errors and cost
 

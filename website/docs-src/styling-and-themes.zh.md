@@ -35,4 +35,6 @@ text(c, "Save").color(theme.accent);
 
 native 目标上 `Theme::system()` 通过 `dark-light` 查询明暗偏好；wasm 构建因为没有平台外观探测，始终使用 `Theme::dark()`。没有公开的 OS 主题变化回调。
 
-Reduce-motion 在创建 Context 时从 `MYRUST_REDUCE_MOTION` 读取；高对比度、透明度与强调色偏好未暴露。桌面可在启动时选择主题，但运行时偏好更新需要重建 UI。
+`myrust_core::desktop::system::AppearancePreferences::detect()` 在 macOS 与 Windows 上额外读取 accent color、reduced motion 与 high contrast；平台 API 不可用时字段保持 `None`，Linux 不伪造值。`myrust_core::system_theme()` 组合明暗与 accent 生成 `Theme`；reduced motion 与 high contrast 留在 preferences 上，因为 `Theme` 没有对应字段。
+
+`Context::reduce_motion()` 仍在创建 Context 时读取 `MYRUST_REDUCE_MOTION`。native 宿主可以读取 `AppearancePreferences` 并按该策略决定自己的动画；尚无实时偏好变化回调，运行时更新需要重建 UI。

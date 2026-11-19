@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Build the Native UI index links and the pilot detail pages.
+"""Build the Native UI index links and the detail pages.
 
-The 87-entry metadata lives in entries.json. Detail pages are emitted only for
-entries that have en/zh markdown sources; prev/next are computed across the
-full list regardless.
+Entry metadata lives in entries.json. New detail entries are inserted into the
+index shell and i18n table when they are not already present. Detail pages are
+emitted for entries marked `detail`; prev/next span the full list.
 """
 
 import html
@@ -17,7 +17,7 @@ PLACEHOLDER = "place" + "holder"
 DOCS = ROOT / "website" / "docs" / "ui"
 SRC = ROOT / "website" / "docs-src"
 INDEX = DOCS / "index.html"
-DETAILS = {"tabs", "markdown", "views", "layout", "text", "styling-and-themes", "input", "drag-and-drop", "pages-and-navigation", "overlays", "accessibility", "right-to-left", "languages", "drawing-and-animation", "shaders", "transitions", "motion", "transforms", "custom-widgets", "windows-with-native-ui", "testing", "inspector", "rendering", "browsers", "migration", "performance", "button", "link", "menu-button", "context-menu", "toggle", "segmented-control", "toolbar", "checkbox", "switch", "radio", "select", "slider", "range-slider", "stepper", "rating", "text-input", "text-input-primitives", "number-input", "decimal-input", "search-field", "combobox", "autocomplete", "token-field", "editable-text", "find-bar", "rich-text-editor", "code-editor", "diff-viewer", "calendar", "date-input", "time-input", "color-picker", "list", "table", "tree", "outline", "grid-view", "scroll-view", "grid", "split-view", "collapsible", "accordion", "form", "web-view", "sidebar", "breadcrumbs", "back-and-forward-buttons", "dialog", "alert-dialog", "popover", "tooltip", "toast", "progress-bar", "spinner", "meter", "badge", "charts", "image", "video", "icon", "avatar"}
+LEGACY_DETAILS = {"tabs", "markdown", "views", "layout", "text", "styling-and-themes", "input", "drag-and-drop", "pages-and-navigation", "overlays", "accessibility", "right-to-left", "languages", "drawing-and-animation", "shaders", "transitions", "motion", "transforms", "custom-widgets", "windows-with-native-ui", "testing", "inspector", "rendering", "browsers", "migration", "performance", "button", "link", "menu-button", "context-menu", "toggle", "segmented-control", "toolbar", "checkbox", "switch", "radio", "select", "slider", "range-slider", "stepper", "rating", "text-input", "text-input-primitives", "number-input", "decimal-input", "search-field", "combobox", "autocomplete", "token-field", "editable-text", "find-bar", "rich-text-editor", "code-editor", "diff-viewer", "calendar", "date-input", "time-input", "color-picker", "list", "table", "tree", "outline", "grid-view", "scroll-view", "grid", "split-view", "collapsible", "accordion", "form", "web-view", "sidebar", "breadcrumbs", "back-and-forward-buttons", "dialog", "alert-dialog", "popover", "tooltip", "toast", "progress-bar", "spinner", "meter", "badge", "charts", "image", "video", "icon", "avatar"}
 COLORS = {
     "comment": ("#6E7781", "#8B949E"),
     "string": ("#0A3069", "#A5D6FF"),
@@ -197,6 +197,111 @@ def patch_index(index, by_key):
     # Repair older generated attribute placeholders if present.
     index = index.replace("placeholder", PLACEHOLDER)
     return index
+
+
+def ensure_index_entries(index, entries):
+    """Adds metadata that is not yet present in the hand-authored index shell."""
+    status_label = {
+        "done": "Implemented",
+        "partial": "Partial",
+        "none": "Not implemented",
+    }
+    new_entries = [
+        entry
+        for entry in entries
+        if entry["detail"] and entry["slug"] not in LEGACY_DETAILS
+    ]
+    new_side_links = []
+    for entry in new_entries:
+        href = '/docs/ui/%s/' % entry["slug"]
+        side_link = (
+            '<li><a class="%s" href="%s"><span data-i18n="t.%s.%d">%s</span>'
+            '<span class="side-dot" data-status="%s"></span></a></li>'
+            % (
+                ITEM_CLASS,
+                href,
+                entry["section"],
+                entry["index"],
+                esc(entry["title"]),
+                entry["status"],
+            )
+        )
+        new_side_links.append(side_link)
+        if href not in index:
+            card = (
+                '<a href="%s" class="doc-card"><span class="doc-card-title" '
+                'data-i18n="t.%s.%d">%s</span><span class="doc-card-description" '
+                'data-i18n-html="d.%s.%d">%s</span><span class="doc-status" '
+                'data-status="%s" data-i18n="status.%s">%s</span></a>'
+                % (
+                    href,
+                    entry["section"],
+                    entry["index"],
+                    esc(entry["title"]),
+                    entry["section"],
+                    entry["index"],
+                    inline(entry["description"]),
+                    entry["status"],
+                    entry["status"],
+                    status_label[entry["status"]],
+                )
+            )
+            heading = '<h2 id="%s"' % entry["anchor"]
+            section = index.find(heading)
+            if section < 0:
+                raise ValueError("missing docs section %s" % entry["anchor"])
+            cards = index.find('<div class="doc-cards">', section)
+            if cards < 0:
+                raise ValueError("missing doc cards for %s" % entry["anchor"])
+            end = index.find("</div>", cards)
+            if end < 0:
+                raise ValueError("unterminated doc cards for %s" % entry["anchor"])
+            index = index[:end] + card + index[end:]
+
+            nav_heading = '<h4 class="label mb-2 px-2.5" data-i18n="section.%s">' % entry["anchor"]
+            nav = index.find(nav_heading)
+            if nav < 0:
+                raise ValueError("missing docs navigation for %s" % entry["anchor"])
+            nav_list = index.find("<ul", nav)
+            nav_end = index.find("</ul>", nav_list)
+            if nav_list < 0 or nav_end < 0:
+                raise ValueError("unterminated docs navigation for %s" % entry["anchor"])
+            index = index[:nav_end] + side_link + index[nav_end:]
+
+    match = re.search(r"window\.__DOC_I18N__ = (.*?);\s*</script>", index, re.S)
+    if not match:
+        raise ValueError("missing docs i18n data")
+    i18n = json.loads(match.group(1))
+    for entry in entries:
+        if not entry["detail"]:
+            continue
+        for lang, title, description in (
+            ("en", entry["title"], entry["description"]),
+            ("zh", entry["titleZh"], entry["descriptionZh"]),
+        ):
+            i18n[lang]["t.%s.%d" % (entry["section"], entry["index"])] = title
+            i18n[lang]["d.%s.%d" % (entry["section"], entry["index"])] = inline(description)
+    replacement = json.dumps(i18n, ensure_ascii=False, separators=(",", ":"))
+    index = index[:match.start(1)] + replacement + index[match.end(1):]
+    new_keys = [
+        ("t.%s.%d" % (entry["section"], entry["index"]),
+         "d.%s.%d" % (entry["section"], entry["index"]))
+        for entry in new_entries
+    ]
+    return index, new_entries, new_side_links, new_keys
+
+
+def legacy_shell(full_shell, new_side_links, new_i18n_keys):
+    """Restores the shared shell for pages that predate newly added docs."""
+    header, aside, footer, drawer, mobile, style, i18n, js, search = full_shell
+    for link in new_side_links:
+        aside = aside.replace(link, "")
+    legacy_i18n = json.loads(json.dumps(i18n))
+    for lang in ("en", "zh"):
+        for title_key, description_key in new_i18n_keys:
+            legacy_i18n[lang].pop(title_key, None)
+            legacy_i18n[lang].pop(description_key, None)
+    return header, aside, footer, drawer, mobile, style, legacy_i18n, js, search
 
 
 def extract(pattern, text, default=""):
@@ -383,9 +488,15 @@ def detail_page(entry, prev, next, meta, shell_parts):
 def main():
     entries = json.loads((SRC / "entries.json").read_text())
     by_key = {(e["section"], e["index"]): e for e in entries}
-    index = patch_index(INDEX.read_text(), by_key)
+    index, new_entries, new_side_links, new_i18n_keys = ensure_index_entries(
+        INDEX.read_text(), entries
+    )
+    index = patch_index(index, by_key)
     INDEX.write_text(index)
     shell_parts = shell(index)
+    legacy_shell_parts = legacy_shell(shell_parts, new_side_links, new_i18n_keys)
+    new_slugs = {entry["slug"] for entry in new_entries}
+    legacy_entries = [entry for entry in entries if entry["slug"] not in new_slugs]
     search_data = []
     for entry in entries:
         item = {
@@ -408,13 +519,26 @@ def main():
         + ";\n"
     )
     for i, entry in enumerate(entries):
-        if entry["slug"] not in DETAILS:
+        if not entry["detail"]:
             continue
-        prev = entries[i - 1] if i > 0 else None
-        nxt = entries[i + 1] if i + 1 < len(entries) else None
         out = DOCS / entry["slug"] / "index.html"
+        if entry["slug"] in new_slugs:
+            prev = entries[i - 1] if i > 0 else None
+            nxt = entries[i + 1] if i + 1 < len(entries) else None
+            page_shell = shell_parts
+        else:
+            legacy_position = legacy_entries.index(entry)
+            prev = legacy_entries[legacy_position - 1] if legacy_position > 0 else None
+            nxt = (
+                legacy_entries[legacy_position + 1]
+                if legacy_position + 1 < len(legacy_entries)
+                else None
+            )
+            # Keep each pre-existing page's shared shell/i18n so a metadata
+            # change elsewhere does not rewrite the whole legacy corpus.
+            page_shell = shell(out.read_text()) if out.exists() else legacy_shell_parts
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(detail_page(entry, prev, nxt, None, shell_parts))
+        out.write_text(detail_page(entry, prev, nxt, None, page_shell))
         print(out.relative_to(ROOT))
 
 

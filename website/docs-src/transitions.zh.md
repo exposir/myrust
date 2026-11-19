@@ -1,4 +1,4 @@
-transition 把一个 `Rect` 插值到目标。`TransitionState` 由调用方持有；第一次调用直接初始化到目标，目标变化时从当前插值矩形开始新动画。
+transition 把一个值插值到目标。`TransitionState` 处理 bounds；`ColorTransition`、`OpacityTransition`、`SizeTransition` 与 `PositionTransition` 覆盖其余常见的绘制和布局值。它们都由调用方持有：第一次调用直接初始化到目标，目标变化时从当前插值值开始新动画。
 
 ```rust
 use myrust_core::ui::{transition, Rect, TransitionState};
@@ -12,9 +12,23 @@ container(c).size(frame.bounds.width, frame.bounds.height);
 
 ## What moves
 
-只有 bounds 动画。颜色、透明度、圆角、边框、阴影、文本内容与 z-order 没有 transition primitive。需要时读取 `frame.progress` 每帧重建 `Color`/命令。
+bounds、颜色、透明度、尺寸与位置有 transition primitive。圆角、边框、阴影、文本内容与 z-order 没有；需要时由调用方持有值并每帧重建命令。
 
-`TransitionState.animation` 设置后续重定向的时长/缓动。`instant_state()` 创建零时长线性状态，用于不要动画的调用方。
+```rust
+use myrust_core::ui::{color_transition, Animation, Color, ColorTransition};
+
+let mut fade = ColorTransition::new(Animation::default());
+let frame = color_transition(c, &mut fade, Color::rgb(34, 211, 238));
+let color = frame.value;
+```
+
+`OpacityTransition` 是标量，`opacity_transition` 会把目标限制在 `0.0..=1.0`。`SizeTransition` 与 `PositionTransition` 分别插值 `Size` 和 `Point`。它们共用 `Animation` 的时长/缓动，并通过 `TransitionValueFrame` 暴露 `progress`、`done`、`retargeted`。
+
+`TransitionState.animation` 与 `ValueTransition.animation` 设置后续重定向的时长/缓动。`instant_state()` 创建零时长线性 bounds 状态，用于不要动画的调用方。
+
+Transition 目标变化从当前值重定向，但不保留速度。被打断的运动需要惯性时使用 `Spring`。`ValueTransition::step(dt)` 不依赖时钟推进，便于确定性测试。
+
+由 `Context` 管理的标量可用 `animate_spring` / `animate_spring_with`：retarget 保留 velocity，并纳入 `next_animation_frame()`。bounds/color/size/position 记录用 transitions，需要动量时用 springs。
 
 ## Coming and going
 
@@ -26,11 +40,11 @@ UI 不跟踪退出状态。移除依赖布局或滚动时，调用方需在应�
 
 ### One at a time
 
-没有队列或“同一时间一个 transition”协调器。一个 `TransitionState` 只插值一个矩形；多个元素需要多个状态。
+没有队列或“同一时间一个 transition”协调器。一个状态只插值一个值；多个元素需要多个状态。
 
 ### Timing the exit
 
-没有独立于主动画的退出时长、延迟或取消回调。设置 `TransitionState.animation` 或使用 `instant_state`；时间全部来自该 `Animation`。
+没有独立于主动画的退出时长、延迟或取消回调。设置状态的 `animation` 或使用 `instant_state`；时间全部来自该 `Animation`。
 
 ## Shared elements
 
@@ -42,7 +56,7 @@ UI 不跟踪退出状态。移除依赖布局或滚动时，调用方需在应�
 
 ### Everything else
 
-只插值几何。跨容器的调用方必须在插值矩形处自绘内容；source/target 控件不会自动克隆。
+只插值选定的值。跨容器的调用方必须在插值矩形处自绘内容；source/target 控件不会自动克隆。
 
 ### Scaled content
 
@@ -54,6 +68,6 @@ UI 不跟踪退出状态。移除依赖布局或滚动时，调用方需在应�
 
 ## When nothing moves
 
-`transition` 第一次直接初始化到目标，新建状态不会动画进入。目标等于 `state.to` 时不重启。Reduce-motion 只有在调用方检查 `Context::reduce_motion` 时才让自定义动画跳过；`transition` 本身仍按其 animation 时长运行。
+`transition` 与 `value_transition` 第一次直接初始化到目标，新建状态不会动画进入。目标等于当前目标时不重启。Reduce-motion 只有在调用方检查 `Context::reduce_motion` 时才让自定义动画跳过；transition 本身仍按其 animation 时长运行。
 
-完全不动画可使用 `instant_state()` 或零时长 `Animation`；没有全局“禁用 transition”开关。
+`complete()` 把 bounds 或值 transition 吸附到目标，`cancel()` 冻结在当前值。完全不动画可使用 `instant_state()` 或零时长 `Animation`；没有全局“禁用 transition”开关。

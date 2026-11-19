@@ -31,9 +31,9 @@ container(c).size(80.0, 80.0).draw([
 
 ## Parts of bitmaps
 
-`image(c, id, data)` 通过 `ImageState` 句柄接受调用方 RGBA8 `ImageData`。它绘制整图；没有 source rectangle、atlas/atlas index、nine-slice 或 lazy provider。
+`image(c, id, data)` 接受调用方 RGBA8 `ImageData`，并发出单条共享 `DrawCommand::Image`。命令携带归一化 `ImageSourceRect`、Fit 放置、圆角与灰度；`ImageState.width`/`height` 描述目标盒。CPU 与可选 GPU presenter 都直接采样解码像素，不再生成逐输出像素 Rect 流。
 
-CPU presenter 目前把 `DrawCommand::Image` 计为 unsupported，因为 display list 只有 source handle；native UI 需要调用方/平台图像桥。可选 GPU renderer 也不增加图像解码。
+没有 atlas index、nine-slice 或 lazy provider API。启用可选 `image-decode` feature 时，PNG/JPEG/WebP 字节可解码为共享 `ImagePixels`；否则由调用方解码。
 
 ## Canvases
 
@@ -49,12 +49,14 @@ CPU presenter 目前把 `DrawCommand::Image` 计为 unsupported，因为 display
 
 ## Shaping text
 
-文字测量与光栅化不做 shaping、kerning、ligature、bidi 重排或字体回退。`FontRegistry` 加载单个 TTF/OpenType；`CpuRasterizer::rasterize_with_font` 可接收。缺字会计数。
+文字由 OpenType kerning/ligature shaping、Unicode bidi 重排、UAX #14 换行以及有序 sans/mono/回退字体栈完成布局。生成的 `TextLayout` 驱动 CPU 光栅、GPU glyph atlas 与 damage bounds。`FontRegistry` 仍负责加载单个 TTF/OpenType，`CpuRasterizer::rasterize_with_font` 仍供显式字体测试使用；缺字会计数。
 
-text command 只有一个字号/字重；没有 rich shaping run、OpenType feature、variable-font axis 或 per-glyph positioning。
+text command 仍只有一个字号/字重；调用方不能选择逐 run 的 OpenType feature、variable-font axis 或命名字体。
 
 ## Animation
 
-`Animation` 与 `Easing` 通过 `Context::animate` / `animate_with` 驱动调用方标量。帧时钟（`Context::frame_time`）提供时间；`needs_animation_frame` 请求宿主再画一帧。`spinner` 与 `transition` 基于此路径。
+`Animation` 与 `Easing` 通过 `Context::animate` / `animate_with` 驱动调用方标量。帧时钟（`Context::frame_time`）提供时间；`FrameScheduler` 把活动动画的 deadline 转成 `next_wake`，`needs_animation_frame` 仍报告是否还有工作。`spinner` 与 `transition` 基于此路径。
 
-没有 keyframes、spring physics、timeline、declarative transition 或 animation event。Reduce-motion（`MYRUST_REDUCE_MOTION`）直接把动画跳到目标；没有 OS motion preference 回调。
+`Spring`、`Keyframes`、`Timeline` 增加确定性物理、多停靠点与多轨运动；它们都用显式 `dt` 步进，绘制代码只需采样并像以前一样重建 display list。`ColorTransition`、`OpacityTransition`、`SizeTransition`、`PositionTransition` 把 transition 扩展到 bounds 之外。Reduce-motion（`MYRUST_REDUCE_MOTION`）把内置动画跳到目标；没有 OS motion preference 回调。
+
+`Context::animate_spring`、stiffness/damping、timeline 推进以及活跃动效如何驱动 `next_animation_frame()` 见 [动效](motion)。

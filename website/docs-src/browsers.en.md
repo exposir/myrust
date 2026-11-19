@@ -8,6 +8,8 @@ The UI crate's layout, widgets and `DisplayList` compile to wasm. The docs host 
 
 This proves the immediate-mode UI core can run in a browser via a custom host. It does not provide a MyRust window, router/native app lifecycle, WebView IPC, filesystem, menu/tray, accessibility bridge or OS integrations.
 
+The wasm host does supply IME composition through the hidden textarea. Native windows do not: tao 0.37 exposes no preedit stream on Linux, macOS or Windows. `UiEvent::CompositionStart/Update/Commit` remains the portable host boundary.
+
 ## What does not
 
 There is no browser renderer inside `myrust-core`, no canvas integration, browser event loop, JS interop package or WebAssembly app target; the docs demo page's WebGL 2 presenter is not part of `myrust-core`. The optional wgpu backend is not wired to a browser surface.

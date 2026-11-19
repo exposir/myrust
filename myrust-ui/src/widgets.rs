@@ -42,6 +42,11 @@ pub use super::floating::{
 };
 pub use super::form::{form_field, FormFieldState};
 pub use super::grid_view::{grid_view, GridViewResponse, GridViewState};
+pub use super::i18n::{
+    pseudo_localize, resolve_locale, resolve_system_locales, system_locales, I18n, I18nError,
+    LanguageChange, LocaleId, LocaleResolution, MessageArguments, MessageCatalog, MessageValue,
+    Translation, DEFAULT_LOCALE,
+};
 pub use super::languages::{format_date, format_number, DateStyle, FormatError, Locale};
 pub use super::link::{link, LinkState};
 pub use super::list::{list, ListResponse, ListRow, ListState};
@@ -56,7 +61,9 @@ pub use super::numeric::{
     DecimalInputState, NumberInputOptions, NumberInputState,
 };
 pub use super::overlay::{overlay, popup, OverlayResponse, OverlayState};
-pub use super::performance::{frame_stats_panel, FrameStats, FrameStatsResponse};
+pub use super::performance::{
+    frame_stats_panel, FrameStats, FrameStatsFilter, FrameStatsResponse,
+};
 pub use super::range_slider::{range_slider, RangeKnob, RangeSliderResponse, RangeSliderState};
 pub use super::rating::{rating, RatingState};
 pub use super::rich_text::{rich_text, rich_text_spans, RichTextResponse, RichTextSpan};
@@ -74,7 +81,7 @@ pub use super::stepper::{stepper, StepperState};
 pub use super::table::{
     table, SortDirection, TableColumn, TableResponse, TableRow, TableSort, TableState,
 };
-pub use super::text_input::TextInputState;
+pub use super::text_input::{ClipboardProvider, CompositionState, MemoryClipboard, TextInputState};
 pub use super::time_input::{time_input, TimeInputState};
 pub use super::toast::{
     toasts, Toast, ToastDismissal, ToastEvent, ToastQueue, ToastResponse, TOAST_DURATION,
@@ -84,3 +91,4 @@ pub use super::token_field::{token_field, TokenFieldState};
 pub use super::toolbar::{overflow_split, ToolbarItem, ToolbarResponse, ToolbarState};
 pub use super::transitions::{instant_state, transition, TransitionFrame, TransitionState};
 pub use super::tree::{outline, tree, TreeNode, TreeResponse, TreeState};
+pub use super::video::{video, VideoFrame, VideoPlayer, VideoState, VideoStyle};

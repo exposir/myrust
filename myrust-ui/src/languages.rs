@@ -1,4 +1,6 @@
-//! Minimal locale-aware formatting for en-US and zh-CN.
+//! Stable en-US/zh-CN formatting backed by the ICU4X catalog module.
+
+use crate::i18n::{self as messages, DateFormat, FormatFailure, LocaleId};
 
 /// Supported locales.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -67,7 +69,18 @@ pub fn format_number(value: f64, locale: Locale, decimals: usize) -> Result<Stri
     if decimals > 18 {
         return Err(FormatError::InvalidDecimals);
     }
-    let _ = locale;
+    match messages::format_number(value, &LocaleId::from(locale), Some(decimals)) {
+        Ok(formatted) => Ok(formatted),
+        Err(FormatFailure::NonFinite) => Err(FormatError::NonFinite),
+        Err(FormatFailure::InvalidDecimals) => Err(FormatError::InvalidDecimals),
+        Err(FormatFailure::Data(_)) => Ok(legacy_format_number(value, decimals)),
+        Err(FormatFailure::InvalidDate | FormatFailure::InvalidDateFields) => {
+            Err(FormatError::InvalidDate)
+        }
+    }
+}
+
+fn legacy_format_number(value: f64, decimals: usize) -> String {
     let negative = value.is_sign_negative() && value != 0.0;
     let absolute = value.abs();
     let formatted = format!("{absolute:.decimals$}");
@@ -88,7 +101,7 @@ pub fn format_number(value: f64, locale: Locale, decimals: usize) -> Result<Stri
         grouped.push('.');
         grouped.push_str(fraction);
     }
-    Ok(grouped)
+    grouped
 }
 
 /// Formats an ISO `YYYY-MM-DD` date.
@@ -97,13 +110,30 @@ pub fn format_date(date: &str, locale: Locale, style: DateStyle) -> Result<Strin
     if !valid_date(year, month, day) {
         return Err(FormatError::InvalidDateFields);
     }
+    if year == 0 {
+        return Ok(legacy_format_date(year, month, day, locale, style));
+    }
+    let format = match style {
+        DateStyle::Iso => return Ok(format!("{year:04}-{month:02}-{day:02}")),
+        DateStyle::Short => DateFormat::LocaleShort,
+    };
+    match messages::format_date(date, &LocaleId::from(locale), format) {
+        Ok(formatted) => Ok(formatted),
+        Err(FormatFailure::InvalidDate) => Err(FormatError::InvalidDate),
+        Err(FormatFailure::InvalidDateFields) => Err(FormatError::InvalidDateFields),
+        Err(FormatFailure::Data(_)) => Ok(legacy_format_date(year, month, day, locale, style)),
+        Err(FormatFailure::NonFinite | FormatFailure::InvalidDecimals) => {
+            Err(FormatError::InvalidDate)
+        }
+    }
+}
+
+fn legacy_format_date(year: i32, month: u32, day: u32, locale: Locale, style: DateStyle) -> String {
     match style {
-        DateStyle::Iso => Ok(format!("{year:04}-{month:02}-{day:02}")),
+        DateStyle::Iso => format!("{year:04}-{month:02}-{day:02}"),
         DateStyle::Short => match locale {
-            // ICU's yMd skeleton writes a US date without leading zeros,
-            // as MyGo's `i18n.FormatDate` does: 4/12/1990.
-            Locale::EnUs => Ok(format!("{month}/{day}/{year:04}")),
-            Locale::ZhCn => Ok(format!("{year}年{month}月{day}日")),
+            Locale::EnUs => format!("{month}/{day}/{year:04}"),
+            Locale::ZhCn => format!("{year}\u{5e74}{month}\u{6708}{day}\u{65e5}"),
         },
     }
 }

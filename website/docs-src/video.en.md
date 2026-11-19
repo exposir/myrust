@@ -1,23 +1,21 @@
-Video is not implemented. MyRust has no media backend, decoder, audio output or video surface; NativeUi cannot play a video file or stream.
+MyRust provides host-driven frame playback. It does not decode files, play audio, synchronize A/V clocks or manage a media surface.
 
-## Players
+## Player
 
-No video player widget, controls, playlist, subtitles or fullscreen player exists. A custom clock and frame swapping would be application code.
+`VideoPlayer` stores timestamped RGBA frames as shared `ImageHandle` values. A host decodes each frame and pushes it with a presentation timestamp, then calls `advance(dt)` from its own clock. The player is deterministic: `current_frame()` chooses the last frame whose `pts` is at or before the current position.
 
-## Playing
+`play`, `pause`, `seek`, looping and end state are available without a system clock. `set_duration` is optional; without it the last frame timestamp is used. When looping wraps, frame selection still follows timestamps.
 
-No play/pause/seek/rate/volume API, buffering state, A/V sync or hardware surface. System media playback is outside `myrust-ui`.
+## Widget
 
-## Decoders
+`video(context, id, &player, width, height, VideoStyle)` participates in layout and emits the existing `DrawCommand::Image`. Fit, corner radius and grayscale reuse the image pipeline. Frame changes alter the image content version, so CPU/GPU damage repaints the video box.
 
-No H.264/HEVC/VP9/AV1/GIF decoder is linked, and no audio callback/device is managed. Callers can decode externally and pass RGBA8 frames to `image` (CPU presenter still doesn't render Image commands).
+An empty player draws a one-pixel background placeholder. Missing or malformed frames never panic the widget.
 
-## System video
+## Host responsibilities
 
-For real playback, use a platform WebView with HTML `<video>` in a separate WebView window. NativeUi and a live WebView cannot be composited in the same window.
+The host owns demuxing, decoding, frame pacing, audio, subtitles and platform hardware surfaces. MyRust links no ffmpeg, gstreamer or codec dependency. Native and wasm builds use the same primitive.
 
 ## Accessibility
 
-There is no Video/Media role, playback value, captions track or AT bridge. If using WebView `<video>`, accessibility comes from the platform browser, not `myrust-ui`.
-
-No demo is registered for video; `/docs-demo` has no media surface.
+There is no Video/Media role, playback value, caption track or AT bridge. Applications that need platform media accessibility should use a WebView `<video>` surface.

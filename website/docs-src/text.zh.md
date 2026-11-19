@@ -1,4 +1,4 @@
-文本在 CPU 上测量与换行，不做字形整形、字距调整或字体回退。`text(c, "...")` 创建 `TextBuilder`；`max_width` 在该宽度内启用换行。
+文本在 CPU 上完成 OpenType shaping、UAX #14 换行、Unicode bidi 排序与有序字体回退。`text(c, "...")` 创建 `TextBuilder`；`max_width` 在该宽度内启用换行。
 
 ```rust
 use myrust_core::ui::text;
@@ -30,6 +30,8 @@ Markdown 内部 span 作为相邻文本节点布局。自定义行内行为需�
 
 ## Fonts
 
-`FontRegistry::load_bytes` 加载 TTF/OpenType 字体；`default_font` 探测常见系统路径，CPU presenter 可通过 `CpuRasterizer::rasterize_with_font` 接收显式字体。wasm demo 内嵌 DejaVu Sans，不读系统路径。
+`FontRegistry::load_bytes` 加载 TTF/OpenType 字体。`default_font_stack` 探测一个 sans 主字体、一个 monospace 字体，以及数量受限的 CJK/emoji/符号回退组；`install_default_font_stack` 供没有系统字体访问能力的宿主注入显式栈。`default_font` 仍返回主字体，满足度量与兼容调用。wasm demo 内嵌 Geist 字体，不读系统路径。
 
-UI 文本 API 没有逐控件 font-family 选择、字体回退或 shaping/kerning/bidi 重排。字体在 presenter/测试层选择，不由 `TextBuilder` 选择；缺字由 CPU presenter 计数。
+`layout_text_shaped` 返回共享的 `TextLayout`，包含视觉行、bidi/字体 run 与已定位 glyph；CPU 光栅、GPU glyph atlas 与 damage bounds 都消费同一份结果，字距调整与回退不会让实际绘制宽度和 damage 记录分家。显式 `family` 选择仍未实现；宿主按有序栈回退，栈内也没有字形的码点会被计数而不是静默隐藏。
+
+本批不含竖排、两端对齐、任意 OpenType feature 控制或完整 fontconfig/CTFont 发现；回退表是固定的平台候选，彩色 emoji 位图字体能否工作取决于 ab_glyph 能否从所选 outline 字体解析它。

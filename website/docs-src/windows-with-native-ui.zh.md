@@ -68,10 +68,86 @@ native 窗口没有内容自适应 flyout/panel API。`panel` 被记录但当前
 
 没有逐窗口 close-request veto、关闭动画或“隐藏而非关闭”API。native UI 窗口不向视图暴露 window handle。
 
-## No webview
+## 嵌入 WebView
 
-`WindowContent::NativeUi(NativeUi)` 不启动 WebView；内容事件驱动，由 runtime CPU 光栅化/呈现。`WindowContent::WebView` 仍是 Web 内容替代。
+`Context::web_view(id, width, height)` 为系统 WebView 预留一个 flex 布局盒。区域占用布局空间、参与滚动与裁剪，并可逐帧显隐。它不是网页快照，也不是 wgpu 纹理：宿主会在 GPU/CPU native UI 像素之上创建一个真实的 wry 子视图。
 
-同时设置 legacy `webview` 与统一 `content` 会报错。native UI 窗口是普通平台窗口，但没有 HTML/JS 层，也没有 WebView 文件投放/context menu 服务。
+```rust
+use myrust_core::ui::{
+    NativeUi, WebViewNavigationPolicy, WebViewPermissionPolicy,
+};
 
-runtime 为窗口内容发出 `AccessNode` 元数据；native 标题栏/traffic lights 是平台 chrome，不在该列表。未连接平台 AT 桥。
+let view = NativeUi::new(|c| {
+    c.column().padding(16.0).gap(12.0).children(|c| {
+        c.text("Native controls");
+        c.web_view("docs", 420.0, 260.0)
+            .url("about:blank")
+            .initialization_script("document.title = 'embedded';")
+            .transparent(true)
+            .navigation(WebViewNavigationPolicy::AllowHosts(vec![
+                "example.com".to_string(),
+            ]))
+            .permissions(WebViewPermissionPolicy::DenyAll);
+        c.text("Native controls below the page");
+    });
+});
+```
+
+builder 还支持 `.html(...)`、`.size(width, height)`、`.width(...)`、`.height(...)`、`.flex_grow(...)` 与 `.visible(false)`。id 跨帧稳定；宿主按 id 保持一个 native view。
+
+### 每帧区域表
+
+UI crate 从不创建平台视图。每帧返回 `ViewFrame::web_views`：
+
+- `id` 是应用稳定 view id。
+- `bounds` 是叠加祖先滚动偏移后的逻辑布局矩形。
+- `clip` 是窗口/滚动/裁剪容器求交后的逻辑矩形。
+- `physical_bounds` 与 `physical_clip` 是同一矩形按宿主提供的窗口 scale factor 换算出的设备像素。
+- `visible` 在隐藏或完全滚出视口时为 false。
+- `z_order` 是帧内区域顺序；native 子视图始终位于 GPU/CPU 画面之上。
+- 区域不产生 `DrawCommand`，不会重复绘制。
+
+`Context::web_view` 是纯布局/记录操作。它可在测试与 WASM target 使用；那边只记录几何，不创建 native view。
+
+### 宿主同步
+
+`WindowContent::NativeUi` 在 `NativeUiWindow` 中把区域表同步到 wry 子视图：
+
+- 新 id 创建 WKWebView（macOS）、WebView2（Windows）或 WebKitGTK view（Linux）。
+- bounds 变化按物理像素移动/缩放 native view；窗口 resize 与 scale factor 变化走同一条路径。
+- 零尺寸或完全滚出视口的区域只隐藏、不销毁，滚回来不会重新加载页面。
+- 点击区域会把焦点交给它的 WebView；点击 native UI 内容会把焦点还给父窗口。
+- 区域消失或 `WebViewOptions` 改变时，销毁并重建 native view。
+- Linux 上视图放在 Tao 窗口 default box 里的 `gtk::Fixed` 中，X11 与 Wayland 都能精确摆放子视图。
+
+创建失败与不支持 target 都是显式错误：native UI 继续渲染，`App::native_ui_last_error(window)` 返回平台错误，失败配置不会每帧重试。
+
+### 安全与页面配置
+
+区域选项会转换成 `myrust_core::webview::WebViewConfig` 加一份区域策略。`WebViewNavigationPolicy::DenyAll`、`AllowHosts`（匹配 host 与子域名）以及 `WebViewPermissionPolicy::DenyAll`/`AllowAll` 使用 wry 的 navigation/permission handler。平台会把初始文档加载也送进 navigation handler，因此策略必须放行起始 URL。
+
+旧的 `WebViewConfig::untrusted` 仍只是元数据，不是 trusted/untrusted 分区。
+
+区域视图同样安装 IPC bridge：请求到达应用的 `IpcRouter`，回复会 resolve 页面 promise。没有公开的逐区域 `PageHandle`；`App::emit`、`App::evaluate_script`、`App::reload` 与 `App::page` 仍只面向整窗 `WindowContent::WebView`，不是区域视图。
+
+### 合成限制
+
+wry 没有逐视图 scissor。区域被滚动视口或裁剪容器部分裁掉时，宿主用 bounds 与 clip 求交，native view 会变小，而不是对网页做像素裁剪；完全裁掉时隐藏。
+
+Native UI overlay/popover 画在 native 子视图下方的 GPU/CPU 画面里，不能覆盖 WebView。必须盖在页面上方的 chrome 用独立窗口。DisplayList transform 与旋转不会作用于 WebView surface。
+
+多个区域按 `z_order` 创建；wry 没有运行时 restack API，已有视图的相对顺序变化不会改变平台堆叠。native 视图仍在 GPU 画面之上。
+
+### 文件与无障碍
+
+区域视图不继承 `WindowContent::WebView` 的文件投放与窗口 context menu。`WindowConfig::file_drop` 只启用整窗 WebView 路径。
+
+区域无障碍由平台 WebView 引擎负责，不会合并进 native UI 的 `AccessNode` 树。
+
+runtime 为窗口内容发出 `AccessNode` 元数据；native 标题栏/traffic lights 是平台 chrome，不在该列表。默认开启 `a11y` feature 时，桌面运行时通过 AccessKit 的 UIA 适配器在 Windows 发布这些节点。
+
+## System appearance
+
+`myrust_core::desktop::system::AppearancePreferences::detect()` 读取原生外观设置。Windows 上 reduced motion 来自 `UISettings::AnimationsEnabled`，accent color 来自 `UISettings::GetColorValue(UIColorType::Accent)`，high contrast 来自 `SPI_GETHIGHCONTRAST`。每个字段都是 `Option`：API 失败或不可用时保留 `None`。
+
+`AppearancePreferences::theme()` 选择内置明/暗主题并应用检测到的 accent，同时生成 hover/pressed 色阶与对比色标签。`myrust_core::system_theme()` 组合检测与主题构建。`Theme::system()` 本身仍只处理明暗。reduced motion 与 high contrast 留在 `AppearancePreferences`，因为 `Theme` 没有对应字段。

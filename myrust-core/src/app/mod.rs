@@ -9,6 +9,7 @@ pub mod deep_link;
 pub mod file_watcher;
 #[cfg(feature = "gpu")]
 mod gpu_present;
+mod native_webview;
 /// Recently opened documents and jump-list interfaces.
 pub mod recent_documents;
 /// Window geometry persistence.
@@ -22,16 +23,16 @@ pub use recent_documents::{JumpList, RecentDocument, RecentDocuments, Unsupporte
 pub use window_state::{JsonFileStore, WindowState, WindowStateStore};
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     env,
     num::NonZeroU32,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -39,22 +40,33 @@ use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use tao::{
     dpi::{LogicalPosition, LogicalSize},
-    event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent},
+    event::{ElementState, Event, MouseButton, MouseScrollDelta, StartCause, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget},
     keyboard::{Key as TaoKey, ModifiersState},
     window::{Fullscreen, Window, WindowBuilder, WindowId as TaoWindowId},
 };
 
 use crate::{
-    desktop::menu::{self, Menu, MenuEvent},
-    ipc::{self, IpcReply, IpcRouter},
     a11y::{AccessRequest, AccessRequestKind, AccessSender, Bridge as AccessBridge},
+    desktop::{
+        menu::{self, Menu, MenuEvent},
+        Clipboard,
+    },
+    ipc::{self, IpcReply, IpcRouter},
     ui::{
-        create_renderer, CpuFrame, CpuRasterizer, DisplayList, DrawCommand, InputState,
-        InputTranslator, Key, NativeInput, NativeUi, PointerButton, RenderSize, RenderStats,
-        Renderer, RendererBackend, RendererKind, Size, TextInputState, Transform, UiEvent,
+        create_renderer, default_font_stack, ClipboardProvider, Color, CpuFrame, CpuRasterizer,
+        DisplayList, DrawCommand, FrameStats, FrameStatsFilter, InputState, InputTranslator, Key,
+        MemoryClipboard,
+        NativeInput, NativeUi, PointerButton, RenderSize, RenderStats, Renderer, RendererBackend,
+        RendererKind, Size, TextInputState, Transform, UiEvent,
+        WebViewOptions, WebViewRegion,
     },
     webview::{FileDropEvent, IpcMessageHandler, PageHandle, WebViewConfig, WebViewHandle},
+};
+use crate::ui::render::diff;
+use native_webview::{
+    desired_web_views, plan_web_views, web_view_config, DesiredWebView, ExistingWebView,
+    PhysicalRect, WebViewAction,
 };
 
 static APP_CREATED: AtomicBool = AtomicBool::new(false);
@@ -78,6 +90,37 @@ const FIT_CONTENT_SCRIPT: &str = r#"
   }));
 })();
 "#;
+
+struct NativeClipboard {
+    system: Option<Clipboard>,
+    memory: MemoryClipboard,
+}
+
+impl NativeClipboard {
+    fn new() -> Self {
+        Self {
+            system: Clipboard::new().ok(),
+            memory: MemoryClipboard::new(),
+        }
+    }
+}
+
+impl ClipboardProvider for NativeClipboard {
+    fn read_text(&mut self) -> Option<String> {
+        self.system
+            .as_mut()
+            .and_then(|clipboard| clipboard.read_text().ok())
+            .or_else(|| self.memory.read_text())
+    }
+
+    fn write_text(&mut self, text: &str) -> bool {
+        self.memory.write_text(text);
+        self.system
+            .as_mut()
+            .map(|clipboard| clipboard.write_text(text).is_ok())
+            .unwrap_or(false)
+    }
+}
 
 /// Stable application-managed window identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -479,6 +522,9 @@ impl App {
             *control_flow = ControlFlow::Wait;
 
             match event {
+                Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
+                    windows.request_due_animation_frames(Instant::now());
+                }
                 Event::WindowEvent {
                     event: WindowEvent::CloseRequested,
                     window_id,
@@ -625,6 +671,13 @@ impl App {
                 }
                 _ => {}
             }
+            if matches!(*control_flow, ControlFlow::Wait | ControlFlow::WaitUntil(_)) {
+                // Hidden windows are excluded, so they stop animating until
+                // they become visible and receive another redraw.
+                if let Some(deadline) = windows.next_animation_wake() {
+                    *control_flow = ControlFlow::WaitUntil(deadline);
+                }
+            }
         })
     }
 }
@@ -677,6 +730,10 @@ impl<'a> AppContext<'a> {
             .ok_or_else(|| anyhow!("window {:?} is not open", id))?;
         window.title = title.into();
         window.window.set_title(&window.title);
+        if let Some(native) = window.native_ui.as_mut() {
+            native.set_title(&window.title);
+            window.window.request_redraw();
+        }
         Ok(())
     }
 
@@ -811,6 +868,8 @@ struct ManagedWindow {
 
 struct NativeUiWindow {
     ui: NativeUi,
+    /// Window handle used to create child WebViews and as the platform parent.
+    window: Option<Arc<Window>>,
     renderer: Box<dyn Renderer>,
     /// GPU surface presenter; when present it produces and presents the pixels
     /// and `renderer` only reports statistics.
@@ -822,6 +881,8 @@ struct NativeUiWindow {
     logical_size: Size,
     scale_factor: f64,
     cpu_frame: Option<CpuFrame>,
+    last_cpu_background: Option<Color>,
+    last_cpu_font_stack: Option<u64>,
     /// Caret of the focused text field, for the window's input method.
     text_input: Option<TextInputState>,
     /// Whether the window has keyboard focus, as the accessibility tree
@@ -835,11 +896,35 @@ struct NativeUiWindow {
     /// How many frames this window has actually rasterized.
     rasterized_frames: u64,
     last_stats: RenderStats,
+    last_frame_stats: FrameStats,
+    frame_stats_filter: FrameStatsFilter,
     last_input_consumed: bool,
-    needs_animation_frame: bool,
+    next_animation_frame: Option<Instant>,
     access_nodes_logged: bool,
     fallback_reason: Option<String>,
     last_error: Option<String>,
+    /// System WebViews covering frame regions, keyed by stable view id.
+    web_views: BTreeMap<String, NativeChildWebView>,
+    /// Views whose creation failed, with the options that failed, so a
+    /// persistent platform failure does not retry every frame.
+    web_view_failures: BTreeMap<String, (WebViewOptions, String)>,
+    /// Most recent platform error from creating or syncing a region WebView.
+    web_view_error: Option<String>,
+    /// IPC replies produced by region WebViews, delivered after sync.
+    web_view_replies: Arc<Mutex<Vec<(String, IpcReply)>>>,
+    /// Regions from the most recent frame, used for click-to-focus.
+    last_web_views: Vec<WebViewRegion>,
+    focused_web_view: Option<String>,
+    ipc_router: Arc<IpcRouter>,
+    #[cfg(target_os = "linux")]
+    web_view_host: Option<gtk::Fixed>,
+}
+
+struct NativeChildWebView {
+    handle: WebViewHandle,
+    options: WebViewOptions,
+    bounds: PhysicalRect,
+    visible: bool,
 }
 
 impl NativeUiWindow {
@@ -850,19 +935,16 @@ impl NativeUiWindow {
         title: &str,
         a11y_send: AccessSender,
         window: Option<Arc<Window>>,
+        ipc_router: Arc<IpcRouter>,
     ) -> Result<Self> {
         let physical_size = normalize_render_size(physical_size);
         let scale_factor = normalize_scale_factor(scale_factor);
         let requested_renderer = ui.renderer_kind();
+        let host_window = window.clone();
 
         #[cfg(feature = "gpu")]
         let (gpu, fallback_reason) =
-            create_gpu_presenter(requested_renderer, window, physical_size);
-        #[cfg(not(feature = "gpu"))]
-        let fallback_reason: Option<String> = {
-            let _ = window;
-            None
-        };
+            create_gpu_presenter(requested_renderer, window.clone(), physical_size);
 
         let mut renderer_fallback: Option<String> = None;
         let renderer: Box<dyn Renderer> = {
@@ -896,8 +978,12 @@ impl NativeUiWindow {
         #[cfg(not(feature = "gpu"))]
         let fallback_reason = renderer_fallback;
         let logical_size = physical_to_logical(physical_size, scale_factor);
+        let a11y = AccessBridge::new_for_window(title, window.as_deref(), a11y_send);
+        ui.set_clipboard_provider(NativeClipboard::new())
+            .context("failed to install the native clipboard provider")?;
         let mut native = Self {
             ui,
+            window: host_window,
             renderer,
             #[cfg(feature = "gpu")]
             gpu,
@@ -907,23 +993,41 @@ impl NativeUiWindow {
             logical_size,
             scale_factor,
             cpu_frame: None,
+            last_cpu_background: None,
+            last_cpu_font_stack: None,
             text_input: None,
             window_focused: false,
-            a11y: AccessBridge::new(title, a11y_send),
+            a11y,
             last_display: None,
             rasterized_frames: 0,
             last_stats: RenderStats::default(),
+            last_frame_stats: FrameStats::default(),
+            frame_stats_filter: FrameStatsFilter::from_env(),
             last_input_consumed: false,
-            needs_animation_frame: false,
+            next_animation_frame: None,
             access_nodes_logged: false,
             fallback_reason,
             last_error: None,
+            web_views: BTreeMap::new(),
+            web_view_failures: BTreeMap::new(),
+            web_view_error: None,
+            web_view_replies: Arc::new(Mutex::new(Vec::new())),
+            last_web_views: Vec::new(),
+            focused_web_view: None,
+            ipc_router,
+            #[cfg(target_os = "linux")]
+            web_view_host: None,
         };
+        native.ui.set_pixel_scale(scale_factor as f32);
         if let Err(error) = native.render() {
             tracing::warn!(%error, "initial native UI render failed");
             native.last_error = Some(error);
         }
         Ok(native)
+    }
+
+    fn set_title(&mut self, title: &str) {
+        self.a11y.set_title(title);
     }
 
     fn render(&mut self) -> std::result::Result<(), String> {
@@ -932,13 +1036,16 @@ impl NativeUiWindow {
             .render(self.logical_size)
             .map_err(|error| error.to_string())?;
         self.last_input_consumed = frame.input_consumed;
-        self.needs_animation_frame = frame.needs_animation_frame;
+        self.next_animation_frame = self.ui.next_animation_frame();
         self.text_input = frame.text_input;
+        self.last_frame_stats = frame.frame_stats;
+        self.last_web_views = frame.web_views.clone();
+        self.sync_web_views(&frame.web_views);
         self.a11y.update(&frame.access_nodes, self.window_focused);
         if !self.access_nodes_logged && !frame.access_nodes.is_empty() {
             tracing::info!(
                 count = frame.access_nodes.len(),
-                "native UI accessibility metadata produced (platform AT bridge not implemented)"
+                "native UI accessibility metadata produced"
             );
             self.access_nodes_logged = true;
         }
@@ -946,8 +1053,11 @@ impl NativeUiWindow {
         #[cfg(feature = "gpu")]
         if let Some(mut gpu) = self.gpu.take() {
             let background = self.ui.theme().background;
+            let present_start = Instant::now();
             match gpu.render(&display, self.physical_size, background) {
                 Ok(stats) => {
+                    self.last_frame_stats
+                        .record_present(present_start.elapsed());
                     self.gpu = Some(gpu);
                     self.last_stats = stats;
                     self.cpu_frame = None;
@@ -976,15 +1086,45 @@ impl NativeUiWindow {
                     frame.width == self.physical_size.width
                         && frame.height == self.physical_size.height
                 });
+        let present_start = Instant::now();
         if !unchanged {
-            let cpu_frame = CpuRasterizer::rasterize(&display, self.physical_size, background)
-                .map_err(|error| error.to_string())?;
+            let font_stack = default_font_stack();
+            let font_stack_id = font_stack.as_ref().map(|stack| stack.id());
+            let cpu_frame = if self.last_cpu_background == Some(background)
+                && self.last_cpu_font_stack == font_stack_id
+            {
+                if let (Some(previous), Some(previous_display)) =
+                    (self.cpu_frame.as_ref(), self.last_display.as_ref())
+                {
+                    let damage = diff(previous_display, &display, self.physical_size);
+                    CpuRasterizer::rasterize_damaged(
+                        previous,
+                        &display,
+                        self.physical_size,
+                        background,
+                        &damage,
+                    )
+                } else {
+                    CpuRasterizer::rasterize(&display, self.physical_size, background)
+                }
+            } else {
+                CpuRasterizer::rasterize(&display, self.physical_size, background)
+            }
+            .map_err(|error| error.to_string())?;
             self.cpu_frame = Some(cpu_frame);
             self.last_display = Some(display.clone());
+            self.last_cpu_background = Some(background);
+            self.last_cpu_font_stack = font_stack_id;
             self.rasterized_frames += 1;
             match self.renderer.render(&display) {
                 Ok(stats) => {
                     self.last_stats = stats;
+                    if let Some(frame) = self.cpu_frame.as_ref() {
+                        self.last_stats.rasterized_pixels = frame.rasterized_pixels;
+                        self.last_stats.rasterized_commands = frame.command_counts.total();
+                        self.last_stats.glyph_cache_hits = frame.glyph_cache_hits;
+                        self.last_stats.glyph_cache_misses = frame.glyph_cache_misses;
+                    }
                     self.last_error = None;
                 }
                 Err(error) => {
@@ -994,6 +1134,14 @@ impl NativeUiWindow {
                 }
             }
         }
+        if unchanged {
+            self.last_stats.rasterized_pixels = 0;
+            self.last_stats.rasterized_commands = 0;
+            self.last_stats.glyph_cache_hits = 0;
+            self.last_stats.glyph_cache_misses = 0;
+        }
+        self.last_frame_stats
+            .record_present(present_start.elapsed());
         Ok(())
     }
 
@@ -1007,6 +1155,7 @@ impl NativeUiWindow {
         self.logical_size = physical_to_logical(physical_size, scale_factor);
         self.scale_factor = scale_factor;
         self.translator.set_scale_factor(scale_factor);
+        self.ui.set_pixel_scale(scale_factor as f32);
         #[cfg(feature = "gpu")]
         if let Some(mut gpu) = self.gpu.take() {
             match gpu.resize(physical_size) {
@@ -1032,6 +1181,251 @@ impl NativeUiWindow {
         self.last_error
             .clone()
             .or_else(|| self.fallback_reason.clone())
+            .or_else(|| self.web_view_error.clone())
+    }
+
+    fn physical_viewport(&self) -> PhysicalRect {
+        PhysicalRect::new(0, 0, self.physical_size.width, self.physical_size.height)
+    }
+
+    /// Creates, moves, shows/hides and destroys the native views requested by
+    /// the frame. A failure becomes an explicit window error while native UI
+    /// rendering continues.
+    fn sync_web_views(&mut self, regions: &[WebViewRegion]) {
+        let Some(window) = self.window.clone() else {
+            if !regions.is_empty() {
+                self.web_view_error =
+                    Some("native UI window has no platform handle for WebView regions".to_string());
+            }
+            return;
+        };
+
+        #[cfg(target_os = "linux")]
+        if !regions.is_empty() {
+            if let Err(error) = self.ensure_gtk_view_host(&window) {
+                self.web_view_error = Some(error.to_string());
+                tracing::warn!(%error, "failed to create the GTK container for WebView regions");
+                return;
+            }
+        }
+
+        let desired = desired_web_views(regions, self.physical_viewport());
+        let existing = self
+            .web_views
+            .iter()
+            .map(|(id, view)| {
+                (
+                    id.clone(),
+                    ExistingWebView {
+                        options: view.options.clone(),
+                        bounds: view.bounds,
+                        visible: view.visible,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let actions = plan_web_views(&existing, &desired);
+        let mut error = None;
+
+        for action in actions {
+            match action {
+                WebViewAction::Destroy { id } => {
+                    if self.focused_web_view.as_deref() == Some(id.as_str()) {
+                        self.focused_web_view = None;
+                    }
+                    self.web_views.remove(&id);
+                    self.web_view_failures.remove(&id);
+                }
+                WebViewAction::Update(view) => {
+                    let Some(child) = self.web_views.get_mut(&view.id) else {
+                        continue;
+                    };
+                    if child.bounds != view.bounds {
+                        if let Err(failure) = child.handle.set_bounds(native_view_rect(view.bounds))
+                        {
+                            error = Some(failure.to_string());
+                        }
+                        #[cfg(target_os = "linux")]
+                        if let Some(host) = self.web_view_host.as_ref() {
+                            use gtk::prelude::*;
+
+                            let widget = child.handle.gtk_widget();
+                            let scale = if self.scale_factor.is_finite()
+                                && self.scale_factor > 0.0
+                            {
+                                self.scale_factor
+                            } else {
+                                1.0
+                            };
+                            // GTK positions widgets in logical units; wry's
+                            // own `set_bounds` applies the same conversion.
+                            host.move_(
+                                &widget,
+                                (f64::from(view.bounds.x) / scale).round() as i32,
+                                (f64::from(view.bounds.y) / scale).round() as i32,
+                            );
+                        }
+                    }
+                    if child.visible != view.visible {
+                        if let Err(failure) = child.handle.set_visible(view.visible) {
+                            error = Some(failure.to_string());
+                        }
+                    }
+                    if !view.visible && self.focused_web_view.as_deref() == Some(view.id.as_str()) {
+                        let _ = child.handle.focus_parent();
+                        self.focused_web_view = None;
+                    }
+                    child.bounds = view.bounds;
+                    child.visible = view.visible;
+                }
+                WebViewAction::Create(view) => {
+                    if let Some((options, message)) = self.web_view_failures.get(&view.id) {
+                        if options == &view.options {
+                            error = Some(message.clone());
+                            continue;
+                        }
+                    }
+                    match self.create_web_view(&window, &view) {
+                        Ok(handle) => {
+                            if let Err(failure) = handle.set_visible(view.visible) {
+                                error = Some(failure.to_string());
+                            }
+                            self.web_views.insert(
+                                view.id.clone(),
+                                NativeChildWebView {
+                                    handle,
+                                    options: view.options.clone(),
+                                    bounds: view.bounds,
+                                    visible: view.visible,
+                                },
+                            );
+                            self.web_view_failures.remove(&view.id);
+                        }
+                        Err(failure) => {
+                            tracing::warn!(
+                                view = %view.id,
+                                %failure,
+                                "failed to create a region WebView"
+                            );
+                            error = Some(failure.to_string());
+                            self.web_view_failures.insert(
+                                view.id.clone(),
+                                (view.options.clone(), failure.to_string()),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        self.web_view_error = error;
+        self.web_view_failures
+            .retain(|id, _| desired.iter().any(|view| view.id == *id));
+        self.deliver_web_view_replies();
+    }
+
+    fn create_web_view(
+        &self,
+        window: &Arc<Window>,
+        view: &DesiredWebView,
+    ) -> Result<WebViewHandle> {
+        let id = view.id.clone();
+        let router = Arc::clone(&self.ipc_router);
+        let replies = Arc::clone(&self.web_view_replies);
+        let redraw_window = Arc::clone(window);
+        let ipc_handler: IpcMessageHandler = Arc::new(move |body| {
+            let reply = router.dispatch_json(&body);
+            match replies.lock() {
+                Ok(mut queue) => queue.push((id.clone(), reply)),
+                Err(poisoned) => poisoned.into_inner().push((id.clone(), reply)),
+            }
+            redraw_window.request_redraw();
+        });
+        let bounds = native_view_rect(view.bounds);
+        let (config, policy) = web_view_config(&view.options);
+
+        #[cfg(target_os = "linux")]
+        {
+            let fixed = self
+                .web_view_host
+                .as_ref()
+                .context("GTK WebView container was not created")?;
+            WebViewHandle::new_gtk_child(fixed, config, policy, ipc_handler, false, bounds)
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            WebViewHandle::new_child(window, config, policy, ipc_handler, false, bounds)
+        }
+    }
+
+    fn deliver_web_view_replies(&mut self) {
+        let replies = match self.web_view_replies.lock() {
+            Ok(mut queue) => std::mem::take(&mut *queue),
+            Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+        };
+        for (id, reply) in replies {
+            let Some(view) = self.web_views.get(&id) else {
+                continue;
+            };
+            match ipc::reply_script(&reply) {
+                Ok(script) => {
+                    if let Err(error) = view.handle.evaluate_script(&script) {
+                        tracing::warn!(%error, view = %id, "failed to deliver IPC reply to region WebView");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, view = %id, "failed to encode IPC reply for region WebView");
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn ensure_gtk_view_host(&mut self, window: &Window) -> Result<()> {
+        if self.web_view_host.is_some() {
+            return Ok(());
+        }
+        use gtk::prelude::*;
+        use tao::platform::unix::WindowExtUnix;
+
+        let vbox = window
+            .default_vbox()
+            .context("Tao window did not expose a GTK container")?;
+        let fixed = gtk::Fixed::new();
+        vbox.pack_start(&fixed, true, true, 0);
+        fixed.show_all();
+        self.web_view_host = Some(fixed);
+        Ok(())
+    }
+
+    /// Moves focus into a WebView under the pointer, or back to the parent
+    /// window when the click lands on native UI content.
+    fn focus_web_view_at_pointer(&mut self) {
+        let (x, y) = self.translator.cursor_position();
+        let hit = native_webview::web_view_at(&self.last_web_views, x, y).map(str::to_string);
+        match hit {
+            Some(id) => {
+                for (view_id, view) in &self.web_views {
+                    if view_id != &id {
+                        let _ = view.handle.focus_parent();
+                    }
+                }
+                if let Some(view) = self.web_views.get(&id) {
+                    if let Err(error) = view.handle.focus() {
+                        tracing::debug!(%error, view = %id, "could not focus region WebView");
+                    }
+                }
+                self.focused_web_view = Some(id);
+            }
+            None => {
+                if self.focused_web_view.take().is_some() || !self.web_views.is_empty() {
+                    for view in self.web_views.values() {
+                        let _ = view.handle.focus_parent();
+                    }
+                }
+            }
+        }
     }
 
     fn uses_gpu(&self) -> bool {
@@ -1074,6 +1468,11 @@ impl NativeUiWindow {
             WindowEvent::Focused(focused) => {
                 self.window_focused = *focused;
                 self.a11y.set_window_focused(*focused);
+                if !*focused {
+                    // Keyboard events leave the window while the page owns
+                    // focus; start the next activation on native UI content.
+                    self.focused_web_view = None;
+                }
                 return false;
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -1083,6 +1482,9 @@ impl NativeUiWindow {
                 });
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                if matches!(state, ElementState::Pressed) {
+                    self.focus_web_view_at_pointer();
+                }
                 return self.dispatch_input(NativeInput::MouseInput {
                     state: if matches!(state, ElementState::Pressed) {
                         InputState::Pressed
@@ -1104,13 +1506,25 @@ impl NativeUiWindow {
                 return self.dispatch_input(NativeInput::Wheel { delta_x, delta_y });
             }
             WindowEvent::ReceivedImeText(text) => {
-                // An input method's committed text. Preedit is not drawn: the
-                // text field shows only committed text for now.
-                return self.dispatch_input(NativeInput::Text(text.clone()));
+                if self.focused_web_view.is_some() {
+                    return false;
+                }
+                // Tao exposes committed IME text but not the platform preedit
+                // stream. Use the composition commit path so it replaces the
+                // current selection exactly like a composed result.
+                return self.ui.input(UiEvent::CompositionCommit { text: text.clone() }).is_ok();
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                if self.focused_web_view.is_some() {
+                    return false;
+                }
                 let mut dispatched = false;
-                let key = map_tao_key(&event.logical_key, self.modifiers.shift_key());
+                let key = map_tao_key(
+                    &event.logical_key,
+                    self.modifiers.shift_key(),
+                    self.modifiers.control_key() || self.modifiers.super_key(),
+                    self.modifiers.alt_key(),
+                );
                 if let Some(key) = key {
                     dispatched |= self.dispatch_input(NativeInput::Key { key });
                 }
@@ -1206,13 +1620,20 @@ impl WindowManager {
             .map(|state| state.fullscreen)
             .unwrap_or(config.fullscreen);
         let transparent = config.transparent;
+        // AccessKit's macOS and Windows adapters must be installed before the
+        // native view is visible or focused for the first time.
+        let defer_native_a11y_visibility =
+            cfg!(all(
+                feature = "a11y",
+                any(target_os = "macos", target_os = "windows")
+            )) && matches!(&content, Some(WindowContent::NativeUi(_)));
 
         let mut builder = WindowBuilder::new()
             .with_title(&config.title)
             .with_inner_size(LogicalSize::new(width, height))
             .with_decorations(config.decorations)
             .with_resizable(config.resizable)
-            .with_visible(config.visible)
+            .with_visible(config.visible && !defer_native_a11y_visibility)
             .with_transparent(config.transparent)
             .with_always_on_top(config.always_on_top);
 
@@ -1334,11 +1755,16 @@ impl WindowManager {
                         &config.title,
                         a11y_send,
                         Some(Arc::clone(&window)),
+                        self.ipc_router.clone(),
                     )
                     .context("failed to initialize native UI window")?,
                 );
             }
             None => {}
+        }
+
+        if defer_native_a11y_visibility && config.visible {
+            window.set_visible(true);
         }
 
         #[cfg(target_os = "linux")]
@@ -1418,6 +1844,36 @@ impl WindowManager {
         windows
     }
 
+    fn next_animation_wake(&self) -> Option<Instant> {
+        self.windows
+            .values()
+            .filter(|window| window.window.is_visible())
+            .filter_map(|window| {
+                window
+                    .native_ui
+                    .as_ref()
+                    .and_then(|native| native.next_animation_frame)
+            })
+            .min()
+    }
+
+    fn request_due_animation_frames(&mut self, now: Instant) {
+        for window in self.windows.values() {
+            if !window.window.is_visible() {
+                continue;
+            }
+            let due = window
+                .native_ui
+                .as_ref()
+                .and_then(|native| native.next_animation_frame)
+                .map(|deadline| deadline <= now)
+                .unwrap_or(false);
+            if due {
+                window.window.request_redraw();
+            }
+        }
+    }
+
     fn close(&mut self, id: WindowId) -> bool {
         let Some(window) = self.windows.remove(&id) else {
             return false;
@@ -1478,17 +1934,21 @@ impl WindowManager {
             // The GPU presenter already presented this frame.
             Ok(())
         } else {
-            native
+            let present_start = Instant::now();
+            let result = native
                 .cpu_frame
                 .as_ref()
                 .ok_or_else(|| anyhow!("native UI produced no CPU frame"))
-                .and_then(|frame| present_cpu_frame(&window.window, frame))
+                .and_then(|frame| present_cpu_frame(&window.window, frame));
+            native.last_frame_stats.record_present(present_start.elapsed());
+            result
         };
         if let Err(error) = &present_result {
             native.last_error = Some(error.to_string());
         }
         render_result.map_err(anyhow::Error::msg)?;
         present_result?;
+        native.frame_stats_filter.emit(native.last_frame_stats);
         // Put the input method's candidate window under the caret. Linux is
         // a no-op in tao; macOS and Windows move it there.
         if let Some(field) = native.text_input {
@@ -1497,7 +1957,7 @@ impl WindowManager {
                 field.cursor_y as f64,
             ));
         }
-        if native.last_input_consumed || native.needs_animation_frame {
+        if native.last_input_consumed {
             window.window.request_redraw();
         }
         Ok(())
@@ -1653,6 +2113,17 @@ fn scaled_display(display: &DisplayList, scale_factor: f32) -> DisplayList {
     DisplayList::from_commands(commands)
 }
 
+/// Converts device-pixel bounds to wry's DPI-aware `Rect`.
+///
+/// wry reads physical values without scaling on Windows, and converts them
+/// back to logical units on macOS/Linux where the platform expects them.
+fn native_view_rect(bounds: PhysicalRect) -> wry::Rect {
+    wry::Rect {
+        position: wry::dpi::PhysicalPosition::new(bounds.x, bounds.y).into(),
+        size: wry::dpi::PhysicalSize::new(bounds.width.max(1), bounds.height.max(1)).into(),
+    }
+}
+
 fn present_cpu_frame(window: &Window, frame: &CpuFrame) -> Result<()> {
     let width =
         NonZeroU32::new(frame.width).ok_or_else(|| anyhow!("native UI frame has zero width"))?;
@@ -1747,7 +2218,27 @@ fn pointer_button(button: MouseButton) -> PointerButton {
     }
 }
 
-fn map_tao_key(key: &TaoKey<'_>, shift: bool) -> Option<Key> {
+fn map_tao_key(
+    key: &TaoKey<'_>,
+    shift: bool,
+    command: bool,
+    alt: bool,
+) -> Option<Key> {
+    if command {
+        return match key {
+            TaoKey::Character(text) if text.eq_ignore_ascii_case("a") => {
+                Some(Key::SelectAll)
+            }
+            TaoKey::Character(text) if text.eq_ignore_ascii_case("c") => Some(Key::Copy),
+            TaoKey::Character(text) if text.eq_ignore_ascii_case("x") => Some(Key::Cut),
+            TaoKey::Character(text) if text.eq_ignore_ascii_case("v") => Some(Key::Paste),
+            TaoKey::Character(text) if text.eq_ignore_ascii_case("z") && shift => {
+                Some(Key::Redo)
+            }
+            TaoKey::Character(text) if text.eq_ignore_ascii_case("z") => Some(Key::Undo),
+            _ => None,
+        };
+    }
     match key {
         TaoKey::Tab if shift => Some(Key::ShiftTab),
         TaoKey::Tab => Some(Key::Tab),
@@ -1755,10 +2246,24 @@ fn map_tao_key(key: &TaoKey<'_>, shift: bool) -> Option<Key> {
         TaoKey::Space => Some(Key::Space),
         TaoKey::Backspace => Some(Key::Backspace),
         TaoKey::Delete => Some(Key::Delete),
+        TaoKey::ArrowLeft if alt && shift => Some(Key::ShiftWordLeft),
+        TaoKey::ArrowLeft if alt => Some(Key::WordLeft),
+        TaoKey::ArrowLeft if shift => Some(Key::ShiftArrowLeft),
         TaoKey::ArrowLeft => Some(Key::ArrowLeft),
+        TaoKey::ArrowRight if alt && shift => Some(Key::ShiftWordRight),
+        TaoKey::ArrowRight if alt => Some(Key::WordRight),
+        TaoKey::ArrowRight if shift => Some(Key::ShiftArrowRight),
         TaoKey::ArrowRight => Some(Key::ArrowRight),
+        TaoKey::ArrowUp if shift => Some(Key::ShiftArrowUp),
+        TaoKey::ArrowUp => Some(Key::ArrowUp),
+        TaoKey::ArrowDown if shift => Some(Key::ShiftArrowDown),
+        TaoKey::ArrowDown => Some(Key::ArrowDown),
+        TaoKey::Home if shift => Some(Key::ShiftHome),
         TaoKey::Home => Some(Key::Home),
+        TaoKey::End if shift => Some(Key::ShiftEnd),
         TaoKey::End => Some(Key::End),
+        TaoKey::PageUp => Some(Key::PageUp),
+        TaoKey::PageDown => Some(Key::PageDown),
         _ => None,
     }
 }
@@ -1773,8 +2278,28 @@ fn key_accepts_text(key: Key) -> bool {
             | Key::Delete
             | Key::ArrowLeft
             | Key::ArrowRight
+            | Key::ArrowUp
+            | Key::ArrowDown
             | Key::Home
             | Key::End
+            | Key::PageUp
+            | Key::PageDown
+            | Key::ShiftArrowLeft
+            | Key::ShiftArrowRight
+            | Key::ShiftArrowUp
+            | Key::ShiftArrowDown
+            | Key::ShiftHome
+            | Key::ShiftEnd
+            | Key::WordLeft
+            | Key::WordRight
+            | Key::ShiftWordLeft
+            | Key::ShiftWordRight
+            | Key::SelectAll
+            | Key::Copy
+            | Key::Cut
+            | Key::Paste
+            | Key::Undo
+            | Key::Redo
     )
 }
 
@@ -2031,6 +2556,7 @@ mod tests {
             "test",
             Arc::new(|_| {}),
             None,
+            Arc::new(IpcRouter::new()),
         )
         .unwrap();
         assert_eq!(window.renderer.backend(), RendererBackend::Software);
@@ -2051,6 +2577,7 @@ mod tests {
             "test",
             Arc::new(|_| {}),
             None,
+            Arc::new(IpcRouter::new()),
         )
         .unwrap();
         // Constructing the window renders its first frame.
@@ -2071,7 +2598,16 @@ mod tests {
     #[test]
     fn native_ui_auto_falls_back_without_gpu_feature() {
         let ui = test_native_ui().with_renderer_kind(crate::ui::RendererKind::Auto);
-        let window = NativeUiWindow::new(ui, RenderSize::new(100, 80), 1.0, "test", Arc::new(|_| {}), None).unwrap();
+        let window = NativeUiWindow::new(
+            ui,
+            RenderSize::new(100, 80),
+            1.0,
+            "test",
+            Arc::new(|_| {}),
+            None,
+            Arc::new(IpcRouter::new()),
+        )
+        .unwrap();
         assert_eq!(window.renderer.backend(), RendererBackend::Software);
     }
 
@@ -2079,7 +2615,16 @@ mod tests {
     #[test]
     fn explicit_wgpu_request_falls_back_and_reports_the_error() {
         let ui = test_native_ui().with_renderer_kind(crate::ui::RendererKind::Wgpu);
-        let window = NativeUiWindow::new(ui, RenderSize::new(100, 80), 1.0, "test", Arc::new(|_| {}), None).unwrap();
+        let window = NativeUiWindow::new(
+            ui,
+            RenderSize::new(100, 80),
+            1.0,
+            "test",
+            Arc::new(|_| {}),
+            None,
+            Arc::new(IpcRouter::new()),
+        )
+        .unwrap();
         assert_eq!(window.renderer.backend(), RendererBackend::Software);
         assert!(window
             .effective_error()
@@ -2089,14 +2634,34 @@ mod tests {
 
     #[test]
     fn tao_named_keys_map_to_navigation_keys() {
-        assert_eq!(map_tao_key(&TaoKey::Tab, false), Some(Key::Tab));
-        assert_eq!(map_tao_key(&TaoKey::Tab, true), Some(Key::ShiftTab));
-        assert_eq!(map_tao_key(&TaoKey::Enter, false), Some(Key::Enter));
         assert_eq!(
-            map_tao_key(&TaoKey::ArrowRight, false),
+            map_tao_key(&TaoKey::Tab, false, false, false),
+            Some(Key::Tab)
+        );
+        assert_eq!(
+            map_tao_key(&TaoKey::Tab, true, false, false),
+            Some(Key::ShiftTab)
+        );
+        assert_eq!(
+            map_tao_key(&TaoKey::Enter, false, false, false),
+            Some(Key::Enter)
+        );
+        assert_eq!(
+            map_tao_key(&TaoKey::ArrowRight, false, false, false),
             Some(Key::ArrowRight)
         );
-        assert_eq!(map_tao_key(&TaoKey::Character("x"), false), None);
+        assert_eq!(
+            map_tao_key(&TaoKey::Character("x"), false, false, false),
+            None
+        );
+        assert_eq!(
+            map_tao_key(&TaoKey::Character("c"), false, true, false),
+            Some(Key::Copy)
+        );
+        assert_eq!(
+            map_tao_key(&TaoKey::Character("z"), true, true, false),
+            Some(Key::Redo)
+        );
         assert!(key_accepts_text(Key::Space));
         assert!(!key_accepts_text(Key::Enter));
     }

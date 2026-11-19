@@ -39,4 +39,4 @@ The hit region uses the transform recorded for `Context::transform`; raw `Transf
 
 The CPU presenter applies translation/scale/rotation to geometry, text and SVG paths. It supports rectangular scissors and rejects unsupported commands rather than emulating GPU effects.
 
-The optional wgpu backend consumes the same thin renderer interface for supported geometry; no transform-specific GPU feature or shader is public. Images remain unsupported by the CPU presenter.
+The optional wgpu backend consumes the same thin renderer interface for supported geometry; no transform-specific GPU feature or shader is public. Images use the same affine transform and scissor state on CPU and GPU.

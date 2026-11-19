@@ -4,7 +4,11 @@
 //! typed IPC, and a small set of cross-platform desktop APIs.
 
 #![deny(missing_docs)]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
+#![cfg_attr(
+    not(any(target_os = "macos", target_os = "windows")),
+    forbid(unsafe_code)
+)]
 
 /// Application lifecycle and native window management.
 pub mod a11y;
@@ -30,28 +34,35 @@ pub use app::{
     WindowInfo,
 };
 pub use desktop::{
-    Activation, CustomProtocol, DownloadEvent, DownloadHandler, DownloadPolicy,
-    DownloadPolicyHandler, ProtocolHandler, ProtocolResponse, SingleInstance,
+    system_theme, Activation, AppearancePreferences, CustomProtocol, DownloadEvent,
+    DownloadHandler, DownloadPolicy, DownloadPolicyHandler, ProtocolHandler, ProtocolResponse,
+    SingleInstance,
 };
 pub use release::{
-    HttpUpdateSource, LocalUpdateSource, PackageConfig, PackageOutput, Packager, SignatureVerifier,
-    SigningConfig, SigningPlatform, UnimplementedSignatureVerifier, UpdateInfo, UpdateSource,
-    Updater,
+    DeltaPatch, DeltaUpdateInfo, DeltaUpdateManifest, Ed25519SignatureVerifier, HttpUpdateSource,
+    LocalUpdateSource, PackageConfig, PackageOptions, PackageOutput, PackageTarget, Packager,
+    SignatureVerifier, SigningConfig, SigningPlatform, UnimplementedSignatureVerifier, UpdateInfo,
+    UpdateSource, Updater,
 };
 pub use ui::{
-    button, checkbox, column, container, create_renderer, default_font, layout_text,
+    button, checkbox, column, container, create_renderer, default_font, default_font_stack,
+    install_default_font_stack, layout_text, layout_text_shaped, layout_text_with_stack,
     resolve_button_regions, row, scroll_view, slider, spacer, text, text_field, AccessNode,
     AlignItems, Animation, ApproximateMeasurer, ButtonState, CheckboxState, Color, ColorParseError,
     ColumnBuilder, CommandCounts, ContainerBuilder, Context, CpuFrame, CpuRasterizer, DisplayList,
-    DrawCommand, Easing, Edges, FlexBuilder, FlexDirection, FontFace, FontRegistry, FontSizes,
-    GlyphBitmap, GradientStop, Icon, ImageHandle, InputState, InputTranslator, InteractiveRegion,
+    DrawCommand, Easing, Edges, FlexBuilder, FlexDirection, FontFace, FontRegistry, FontStack,
+    FontSizes, GlyphBitmap, GradientStop, Icon, ImageData, ImageDataError, ImageFit, ImageHandle,
+    ImagePixels, ImageSourceRect, ImageState, ImageStyle, InputState, InputTranslator,
+    InteractiveRegion, LayoutLine, LayoutRun,
     JustifyContent, Key, LayoutEngine, LayoutResult, LayoutScope, NativeInput, NativeUi,
     NativeUiError, Node, Point, PointerButton, Position, Radius, RasterError, RealFontMeasurer,
     Rect as UiRect, RenderError, RenderSize, RenderStats, Renderer, RendererBackend, RendererKind,
     Role, RowBuilder, ScrollState, Size, SliderState, SoftwareRenderer, Spacing, Style, SvgPath,
-    TextAlignment, TextBuilder, TextFieldState, TextLine, TextMeasurer, TextMetrics, Theme,
-    Transform, UiAction, UiEvent, UiEventRouter, ViewFrame,
+    TextAlignment, TextBuilder, TextFieldState, TextLayout, TextLine, TextMeasurer, TextMetrics,
+    Theme, Transform, UiAction, UiEvent, UiEventRouter, ViewFrame,
 };
+#[cfg(feature = "image-decode")]
+pub use ui::{decode_image, ImageDecodeError};
 #[cfg(feature = "gpu")]
 pub use ui::{GpuInfo, WgpuRenderer};
 pub use webview::{

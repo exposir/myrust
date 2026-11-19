@@ -54,9 +54,13 @@ Held keys, key combinations and modifier chords cannot be observed through the c
 
 ## Input methods
 
-`UiEvent::TextInput { text }` inserts a completed string into a focused text field. There is no preedit, composition range, candidate window or IME commit/cancel event.
+`UiEvent::TextInput { text }` inserts a completed string into a focused text field. `CompositionStart`, `CompositionUpdate`, `CompositionCommit` and `CompositionCancel` carry preedit text and a cluster-aligned caret; the runtime draws the preedit and commits or cancels it without changing the host input event model.
 
-Text fields support cursor movement and selection, but IME composition is explicitly out of scope; a host IME can only deliver committed text. Bidi input and complex-script shaping are not implemented.
+Text fields support cursor movement, mouse selection, clipboard and undo. The native `tao` layer still exposes committed IME text only, so Linux uses `CompositionCommit`; the wasm hidden textarea supplies start, update and end events. Bidi resolution and complex-script shaping are provided by the shared text layout.
+
+Native IME preedit is a known platform limitation, not a pending feature: tao 0.37's Linux path uses `IMContextSimple` and emits only committed text; macOS marked text is not exported as a preedit event; Windows exposes no preedit event. A host may drive `UiEvent::CompositionStart/Update/Commit/Cancel` itself. Real native preedit requires a tao patch or a different event loop.
+
+The browser copy/cut/paste path calls `navigator.clipboard` asynchronously, then forwards the result through the synchronous wasm clipboard provider. Clipboard denial leaves the previous in-memory text available and never surfaces an unhandled promise rejection.
 
 ## Dropped files
 
@@ -80,7 +84,7 @@ The native window translator maps only a subset: Tab, Enter, Space, Backspace, D
 
 There is no raw scancode, physical key, modifier bitmask or text-with-modifiers model. Character keys are delivered as text after the platform layout; named navigation keys use the limited `Key` enum.
 
-Function keys, keypad distinctions, dead keys and composition data are not represented. A custom host can construct `UiEvent` values directly, but the built-in native adapter does not expose the full keyboard.
+Function keys, keypad distinctions and dead keys are not represented. A custom host can construct `UiEvent` values directly; the built-in native adapter exposes committed IME text but not the platform preedit stream.
 
 ## Input inside a region
 
@@ -93,4 +97,4 @@ Ordinary scissor clips do not change hit regions, and arbitrary `ScissorPush` co
 - Layout for flow and clipping.
 - Text for text measurement and inline limits.
 - Styling and themes for focus rings and colors.
-- Accessibility for the emitted nodes; no platform AT bridge is connected.
+- Accessibility for the emitted nodes is connected through AccessKit on Linux, macOS and Windows.

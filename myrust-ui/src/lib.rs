@@ -49,6 +49,8 @@ pub mod diff;
 pub mod direction;
 /// In-window drag and drop.
 pub mod drag;
+/// Repeatable native UI stress fixtures.
+pub mod fixtures;
 /// In-place editable label.
 pub mod editable_text;
 /// Platform-neutral native UI input events and routing.
@@ -57,12 +59,14 @@ pub mod event;
 pub mod find_bar;
 /// Batch 2a anchored surfaces: menus, tooltips, and popovers.
 pub mod floating;
-/// System TTF loading, glyph rasterization, and real-font measurement.
+/// Font loading, OpenType shaping, fallback stacks and glyph rasterization.
 pub mod font;
 /// Form field layout and accessible label grouping.
 pub mod form;
 /// Scrollable fixed-size grid view.
 pub mod grid_view;
+/// Locale matching, CLDR formatting, and message catalogs.
+pub mod i18n;
 /// Built-in SVG path icons.
 pub mod icon;
 /// RGBA image drawing contract.
@@ -81,6 +85,8 @@ pub mod list;
 pub mod markdown;
 /// Three-tone quantity meter.
 pub mod meter;
+/// Deterministic springs, keyframes, timelines and frame scheduling.
+pub mod motion;
 /// Control-id state migration helper.
 pub mod migration;
 /// Event-driven native window content runtime.
@@ -113,13 +119,17 @@ pub mod segmented;
 pub mod sidebar;
 /// Two-panel split view with a draggable divider.
 pub mod split;
+/// Host-driven video frame playback.
+pub mod video;
 /// Integer stepper.
 pub mod stepper;
 /// SVG path subset parser.
 pub mod svg;
 /// Data table with sortable headers and row selection.
 pub mod table;
-/// Deterministic approximate text measurement and wrapping.
+/// Windowless view driver, element lookup, input helpers and assertions.
+pub mod tester;
+/// Shared shaped/bidi/wrapped text layout and legacy deterministic measurement.
 pub mod text;
 /// Text-input state/geometry primitives.
 pub mod text_input;
@@ -127,6 +137,9 @@ pub mod text_input;
 pub mod theme;
 /// Monotonic clock used by frame timing.
 pub mod time;
+/// Deterministic PNG golden-frame comparison.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod golden;
 /// HH:MM time input.
 pub mod time_input;
 /// Non-modal, stacking toast notifications.
@@ -141,6 +154,8 @@ pub mod toolbar;
 pub mod transitions;
 /// Expandable tree and outline rows.
 pub mod tree;
+/// System WebView regions embedded in the native UI layout.
+pub mod web_view;
 /// Immediate-mode widget builder re-exports.
 pub mod widgets;
 
@@ -196,21 +211,35 @@ pub use drag::{
 };
 pub use editable_text::{editable_text, EditableTextResponse, EditableTextState};
 pub use event::{
-    resolve_button_regions, InputState, InputTranslator, InteractiveRegion, Key, NativeInput,
-    PointerButton, UiAction, UiEvent, UiEventRouter,
+    composition_from_phase, resolve_button_regions, InputState, InputTranslator, InteractiveRegion,
+    Key, NativeInput, PointerButton, UiAction, UiEvent, UiEventRouter,
 };
 pub use find_bar::{count_matches, find_bar, FindBarState};
+pub use fixtures::{
+    large_markdown_fixture, million_row_fixture, thousand_label_fixture, MILLION_ROWS,
+};
 pub use floating::{
     context_menu, menu_button, menu_icon_button, popover, tooltip, tooltip_for, tooltip_with_delay,
     ContextMenuResponse, ContextMenuState, MenuButtonState, MenuState, TooltipState, TOOLTIP_DELAY,
 };
 pub use font::{
-    default_font, install_default_font, FontFace, FontRegistry, GlyphBitmap, RealFontMeasurer,
+    default_font, default_font_stack, install_default_font, install_default_font_stack, FontFace,
+    FontRegistry, FontStack, GlyphBitmap, RealFontMeasurer, ShapedGlyph,
 };
 pub use form::{form_field, form_group, form_row, FormFieldState};
 pub use grid_view::{grid_view, GridViewResponse, GridViewState};
+pub use i18n::{
+    pseudo_localize, resolve_locale, resolve_system_locales, system_locales, I18n, I18nError,
+    LanguageChange, LocaleId, LocaleResolution, MessageArguments, MessageCatalog, MessageValue,
+    Translation, DEFAULT_LOCALE,
+};
 pub use icon::{icon, Icon, IconState};
-pub use image::{image, image_styled, ImageData, ImageState};
+pub use image::{
+    image, image_handle, image_styled, image_styled_handle, ImageData, ImageDataError, ImageHandle,
+    ImagePixels, ImageState,
+};
+#[cfg(feature = "image-decode")]
+pub use image::{decode_image, ImageDecodeError};
 pub use inspector::{
     inspect_display, inspect_frame, inspector, InspectorItem, InspectorResponse, InspectorTree,
     PaintSummary,
@@ -227,6 +256,10 @@ pub use markdown::{
     MarkdownResponse,
 };
 pub use meter::{meter, meter_levels, MeterState, MeterTone};
+pub use motion::{
+    AnimationDriver, FrameDemand, FrameScheduler, Keyframe, Keyframes, Repeat, Spring, Timeline,
+    TimelineFrame, Tween, TweenValue, DEFAULT_FRAME_INTERVAL,
+};
 pub use migration::migrate_value;
 pub use native::{NativeUi, NativeUiError, ViewFrame};
 pub use numeric::{
@@ -235,11 +268,14 @@ pub use numeric::{
 };
 pub use overlay::{overlay, popup, OverlayResponse, OverlayState};
 pub use paint::{
-    Color, ColorParseError, DisplayList, DrawCommand, GradientStop, ImageHandle, Radius, Rect,
+    Color, ColorParseError, DisplayList, DrawCommand, GradientStop, ImageSourceRect, Radius, Rect,
     SvgPath, TextAlignment, Transform,
 };
-pub use performance::{frame_stats_panel, FrameStats, FrameStatsResponse};
-pub use present::{CpuFrame, CpuRasterizer, RasterError, TextRenderCommand};
+pub use performance::{frame_stats_panel, FrameStats, FrameStatsFilter, FrameStatsResponse};
+pub use present::{
+    glyph_cache_stats, set_glyph_cache_enabled, CpuFrame, CpuRasterizer, GlyphCacheStats,
+    RasterError, TextRenderCommand,
+};
 pub use range_slider::{range_slider, RangeKnob, RangeSliderResponse, RangeSliderState};
 pub use rating::{rating, RatingState};
 pub use render::{
@@ -264,9 +300,22 @@ pub use svg::{parse_svg_path, SvgContour, SvgOutline};
 pub use table::{
     table, SortDirection, TableColumn, TableResponse, TableRow, TableSort, TableState,
 };
-pub use text::{host_text_ascent, host_text_descent, host_text_width, host_text_width_family, host_text_width_styled, host_text_width_weighted, host_text_x_height, layout_text, ApproximateMeasurer, TextLine, TextMeasurer, TextMetrics};
-pub use text_input::TextInputState;
+pub use tester::{TestElement, Tester, TesterError};
+pub use text::{
+    host_text_ascent, host_text_descent, host_text_width, host_text_width_family,
+    host_text_width_styled, host_text_width_weighted, host_text_x_height, layout_text,
+    layout_text_shaped, layout_text_with_stack, text_layout_cache_stats, ApproximateMeasurer,
+    LayoutLine, LayoutRun, TextLayout, TextLayoutCacheStats, TextLine, TextMeasurer, TextMetrics,
+};
+pub use text_input::{ClipboardProvider, CompositionState, MemoryClipboard, TextInputState};
 pub use theme::{FontSizes, Spacing, Theme};
+pub use video::{video, VideoFrame, VideoPlayer, VideoState, VideoStyle};
+#[cfg(not(target_arch = "wasm32"))]
+pub use golden::{
+    capture_cpu, GoldenDiff, GoldenError, GoldenHarness, GoldenImage, GoldenTolerance,
+};
+#[cfg(all(not(target_arch = "wasm32"), feature = "gpu"))]
+pub use golden::capture_gpu;
 pub use time_input::{time_input, TimeInputState};
 pub use toast::{
     toasts, Toast, ToastDismissal, ToastEvent, ToastQueue, ToastResponse, TOAST_DURATION,
@@ -274,5 +323,14 @@ pub use toast::{
 pub use toggle::{toggle, ToggleGroup, ToggleState};
 pub use token_field::{token_field, TokenFieldState};
 pub use toolbar::{overflow_split, toolbar, ToolbarItem, ToolbarResponse, ToolbarState};
-pub use transitions::{instant_state, transition, TransitionFrame, TransitionState};
+pub use transitions::{
+    color_transition, instant_state, opacity_transition, position_transition, scalar_transition,
+    size_transition, transition, value_transition, ColorTransition, OpacityTransition,
+    PositionTransition, ScalarTransition, SizeTransition, TransitionFrame, TransitionState,
+    TransitionValue, TransitionValueFrame, ValueTransition,
+};
 pub use tree::{outline, tree, TreeNode, TreeResponse, TreeState};
+pub use web_view::{
+    WebViewBuilder, WebViewNavigationPolicy, WebViewOptions, WebViewPermissionPolicy,
+    WebViewRegion, WebViewSource,
+};

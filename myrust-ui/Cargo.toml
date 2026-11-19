@@ -9,17 +9,30 @@ description = "Platform-neutral immediate-mode UI for myrust"
 [features]
 default = []
 gpu = ["dep:wgpu", "dep:tokio"]
+image-decode = ["dep:image"]
 
 [dependencies]
 ab_glyph.workspace = true
 anyhow.workspace = true
 font8x8.workspace = true
+flate2.workspace = true
+icu_datetime.workspace = true
+icu_decimal.workspace = true
+icu_locale.workspace = true
+icu_plurals.workspace = true
+rustybuzz.workspace = true
+image = { workspace = true, optional = true }
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, optional = true }
+unicode-bidi.workspace = true
+unicode-linebreak.workspace = true
+unicode-segmentation.workspace = true
 wgpu = { workspace = true, optional = true }
+writeable.workspace = true
 serde_json.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 dark-light.workspace = true
+sys-locale.workspace = true

@@ -29,21 +29,32 @@ license = "MIT"
 
 [workspace.dependencies]
 ab_glyph = "0.2.32"
+accesskit_macos = "0.27.2"
+accesskit_windows = "0.35.2"
 anyhow = "1"
 arboard = { version = "3.7.0", features = ["wayland-data-control"] }
 auto-launch = "0.6.0"
 axum = "0.8.9"
+base64 = "0.22.1"
 dark-light = "3.0.0"
 dirs = "7.0.0"
 flate2 = "1.1.11"
 font8x8 = "0.3.1"
 global-hotkey = "0.9.0"
 gtk = "0.18.2"
+icu_datetime = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
+icu_decimal = { version = "2.4.0", default-features = false, features = ["alloc", "compiled_data", "ryu"] }
+icu_locale = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
+icu_plurals = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
 muda = "0.21.2"
 notify = "8.2.0"
 notify-rust = "4.19.0"
+objc2-app-kit = "0.2.2"
 reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rfd = "0.18.0"
+ring = "0.17.14"
+rustybuzz = "0.20.1"
 rust-embed = "8.13.0"
 semver = "1.0.28"
 sha2 = "0.11.1"
@@ -63,6 +74,11 @@ tower-http = { version = "0.6.11", features = ["fs", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tray-icon = "0.26.1"
+unicode-bidi = "0.3.18"
+unicode-linebreak = "0.1.5"
+unicode-segmentation = "1.13.3"
 wry = "0.57.1"
 wgpu = "30.0.1"
+windows = "0.62.0"
+writeable = { version = "0.6.4", features = ["alloc"] }
 zip = { version = "2.4.2", default-features = false, features = ["deflate"] }

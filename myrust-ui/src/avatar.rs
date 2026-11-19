@@ -147,11 +147,18 @@ mod tests {
         let frame = context.produce().unwrap();
         assert!(state.has_image);
         assert!(state.drawn);
-        assert!(frame
-            .display
-            .commands
-            .iter()
-            .any(|command| matches!(command, DrawCommand::Rect { color, .. } if *color == crate::paint::Color::rgb(255, 0, 0))));
+        assert!(frame.display.commands.iter().any(|command| {
+            matches!(
+                command,
+                DrawCommand::Image {
+                    width: 40.0,
+                    height: 40.0,
+                    radius,
+                    source,
+                    ..
+                } if *radius == crate::paint::Radius::all(20.0) && source.is_resolved()
+            )
+        }));
         assert!(frame.access_nodes.iter().any(|node| {
             node.role == Role::Label
                 && node.label == "Photo"

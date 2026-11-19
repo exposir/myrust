@@ -22,7 +22,7 @@ if button(c, "Save").clicked {
 
 ## Accessibility
 
-按钮发出 `Role::Button`，label 为可见文本，无 `value`，带当前 `focused` 布尔。不发出 disabled 或 shortcut；没有平台 AT 桥消费。
+按钮发出 `Role::Button`，label 为可见文本，无 `value`，带当前 `focused` 布尔。不发出 disabled 或 shortcut。平台 AccessKit 桥会在 Linux、macOS、Windows 发布该节点。
 
 ## Click actions
 

@@ -42,7 +42,8 @@ pub use power::{LoginItem, NowPlaying, NowPlayingEvent, NowPlayingMetadata, Powe
 pub use protocol::{CustomProtocol, ProtocolHandler, ProtocolResponse};
 pub use shortcut::{GlobalShortcutManager, ShortcutEvent};
 pub use system::{
-    system_proxy, AppLocale, AppearancePreferences, LocaleFormatter, ProxyConfig, SystemLocale,
+    system_proxy, system_theme, AppLocale, AppearancePreferences, LocaleFormatter, ProxyConfig,
+    SystemLocale,
 };
 pub use tray::{
     SystemTray, SystemTrayConfig, TrayEvent, TrayIconData, TrayMenuItem, TrayMouseButton,

@@ -8,6 +8,8 @@ UI crate 的布局、控件与 `DisplayList` 可编译到 wasm。文档宿主提
 
 这证明 immediate-mode UI core 可经自定义宿主在浏览器运行；不提供 MyRust 窗口、router/native app 生命周期、WebView IPC、文件系统、菜单/tray、无障碍桥或 OS 集成。
 
+wasm 宿主通过 hidden textarea 提供 IME composition；native 窗口没有：tao 0.37 在 Linux、macOS、Windows 都不提供 preedit 流。可移植的宿主边界仍是 `UiEvent::CompositionStart/Update/Commit`。
+
 ## What does not
 
 没有 `myrust-core` 内置的浏览器 renderer、canvas 集成、浏览器 event loop、JS interop 包或 WebAssembly app target；文档 demo 页自己的 WebGL 2 presenter 不属于 `myrust-core`。可选 wgpu backend 没有接到浏览器 surface。

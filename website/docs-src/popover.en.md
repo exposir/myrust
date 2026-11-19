@@ -18,4 +18,4 @@ The anchor must be a previous/current `Rect`; popover width follows the anchor a
 
 The popover surface emits `Role::Popup` with the overlay id; child controls/text keep their nodes. There is no Popover/Dialog role, expanded state, anchor relationship or AT bridge.
 
-Focus moves into the popup layer on open and is restored on close; no platform accessibility bridge consumes it.
+Focus moves into the popup layer on open and is restored on close. The popup node is published through the platform AccessKit bridge, but overlay stacking is not represented as a native child window.

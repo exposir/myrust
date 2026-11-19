@@ -1,4 +1,4 @@
-MyRust emits `AccessNode` metadata every frame. It is a flat vector of `role`, `label`, `value`, `disabled`, `focused`, `key` and `bounds`. On Linux the desktop runtime publishes it to AT-SPI through AccessKit (`myrust-core`'s `a11y` feature, on by default): screen readers see the nodes as children of one window node, and widgets that carry a key accept `Focus` and `Click` actions. macOS and Windows have no bridge yet.
+MyRust emits `AccessNode` metadata every frame. It is a flat vector of `role`, `label`, `value`, `disabled`, `focused`, `key` and `bounds`. When `myrust-core`'s `a11y` feature is enabled (the default), the desktop runtime publishes it through AccessKit: AT-SPI on Linux, NSAccessibility on macOS and UI Automation on Windows. Screen readers see the nodes as children of one titled window node, and widgets that carry a key accept `Focus` and `Click` actions.
 
 ```rust
 let frame = ui.render(Size::new(640.0, 360.0))?;
@@ -12,6 +12,8 @@ for node in &frame.access_nodes {
 Standard controls set `label` from the visible text or a fixed English string. `text` uses its content as the label; buttons use their text; `text_field` uses `"text field"`; `checkbox` uses `"checkbox"`; groups use `"column"`, `"row"`, `"container"` or `"grid"`.
 
 There is no public authoring API for an accessible name, label association, description or name-from-author. Custom drawing cannot add or change an `AccessNode` without crate changes.
+
+The `myrust-ui::i18n` catalog can supply translated visible labels for `text` and buttons, but it does not translate framework-owned role labels automatically. Changing `I18n` also does not rewrite existing `AccessNode` values by itself; the view must rebuild with the translated strings.
 
 ## Roles
 
@@ -43,7 +45,7 @@ No shortcut metadata, access key or accelerator is emitted. Buttons and fields r
 
 ## Formats of text
 
-All accessible text is a plain `String`. There is no markup, language tag, pronunciation, selection range or rich-text attribute in `AccessNode`.
+All accessible text is a plain `String`. Shaping, bidi reordering and visual wrapping affect glyph placement only; the accessible value remains the original logical string. There is no markup, BCP 47 language tag, pronunciation, selection range or rich-text attribute in `AccessNode`, so a catalog changes the words read by assistive technology but not the language it is told they are in.
 
 ## Lists and tables
 
@@ -83,8 +85,10 @@ No live region, alert, status or announcement API exists. Toasts and dialogs hav
 
 No landmark roles, live-region flags, atomic/relevant properties, error announcements or accessibility rules are implemented. `AccessNode` is a per-frame flat list, not a semantic tree with relationships.
 
-## The Linux bridge
+## The platform bridges
 
-The bridge maps every role except the generic `column`/`row`/`grid` groups, which are skipped to keep the tree readable. It sends the tree whole each frame; AccessKit diffs it and raises platform events. Focus actions move keyboard focus to the widget key, and click actions press and release at the node's centre. Ids follow the frame's node order, so a widget that keeps its position keeps its id.
+All three platforms build the same AccessKit tree. The root is a `Window` node labelled with the native window title; child roles, labels, values, disabled state, bounds and focused node come from the frame's `AccessNode` list. Generic `column`/`row`/`grid` groups are skipped to keep the tree readable. The tree is sent whole each frame; AccessKit diffs it and raises platform events. Focus actions move keyboard focus to the widget key, and click actions press and release at the node's centre. Ids follow the frame's node order, so a widget that keeps its position keeps its id.
 
-There are no selection ranges, live-region events, position-in-set, description or expanded-state mappings yet. macOS would need an NSAccessibility adapter and Windows a UIA one; both are unimplemented.
+Linux uses AccessKit's AT-SPI adapter. macOS installs a subclassing adapter on the window's `NSView`; Windows installs one on the `HWND`. Both are attached before the window first becomes visible or focused. Linux and macOS forward the runtime's window-focus event to the adapter; the Windows subclass observes `WM_SETFOCUS`/`WM_KILLFOCUS` itself. Actions return to the window thread as the same `AccessRequest` used on Linux.
+
+There are no selection ranges, live-region events, position-in-set, description or expanded-state mappings yet. With `a11y` disabled, or on another target, the bridge is a no-op and the semantic nodes remain available only to tests and tools.

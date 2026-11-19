@@ -31,9 +31,9 @@ No path clipping exists. `ScissorPush { rect }` clips to an axis-aligned rectang
 
 ## Parts of bitmaps
 
-`image(c, id, data)` accepts caller-owned RGBA8 `ImageData` through a `ImageState` handle. It can draw a whole image; there is no source rectangle, atlas/atlas index, nine-slice or lazy provider.
+`image(c, id, data)` accepts caller-owned RGBA8 `ImageData` and emits one shared `DrawCommand::Image`. The command carries a normalized `ImageSourceRect`, Fit placement, corner radius and grayscale; `ImageState.width`/`height` describe the box. The CPU and optional GPU presenters both sample the decoded pixels, so no per-output-pixel rectangle stream is generated.
 
-The CPU presenter currently counts `DrawCommand::Image` as unsupported because the display list carries only a source handle; native UI needs a caller/platform image bridge. The optional GPU renderer does not add image decoding.
+There is no atlas index, nine-slice or lazy provider API. With the optional `image-decode` feature, PNG/JPEG/WebP bytes can be decoded into shared `ImagePixels`; otherwise callers decode them.
 
 ## Canvases
 
@@ -49,12 +49,14 @@ Pointer hit testing inverse-transforms the pointer for recorded `Context::transf
 
 ## Shaping text
 
-Text is measured and rasterized without shaping, kerning, ligatures, bidi reordering or font fallback. `FontRegistry` loads one TTF/OpenType face; `CpuRasterizer::rasterize_with_font` can receive it. Missing glyphs are counted.
+Text is shaped with OpenType kerning and ligatures, reordered by the Unicode bidi algorithm, wrapped by UAX #14 and mapped through an ordered sans/mono/fallback font stack. The resulting `TextLayout` drives CPU rasterization, the GPU glyph atlas and damage bounds. `FontRegistry` still loads individual TTF/OpenType faces and `CpuRasterizer::rasterize_with_font` remains available for explicit-face tests; missing glyphs are counted.
 
-A text command carries one font size/weight; no rich shaping run, OpenType features, variable-font axis or per-glyph positioning is exposed.
+A text command still carries one font size/weight; callers cannot choose per-run OpenType features, variable-font axes or named families.
 
 ## Animation
 
-`Animation` and `Easing` drive caller-owned scalar values through `Context::animate` / `animate_with`. The frame clock (`Context::frame_time`) supplies timing; `needs_animation_frame` asks the host for another frame. `spinner` and `transition` are built on this path.
+`Animation` and `Easing` drive caller-owned scalar values through `Context::animate` / `animate_with`. The frame clock (`Context::frame_time`) supplies timing; `FrameScheduler` turns active animation deadlines into `next_wake`, and `needs_animation_frame` still reports whether work remains. `spinner` and `transition` are built on this path.
 
-There are no keyframes, spring physics, timelines, declarative transitions or animation events. Reduce-motion (`MYRUST_REDUCE_MOTION`) jumps animations to their target; no OS motion preference callback exists.
+`Spring`, `Keyframes` and `Timeline` add deterministic physics, multi-stop and multi-track motion; each is stepped with an explicit `dt`, so drawing code should sample it and rebuild the same display list as before. `ColorTransition`, `OpacityTransition`, `SizeTransition` and `PositionTransition` extend transitions beyond bounds. Reduce-motion (`MYRUST_REDUCE_MOTION`) jumps built-in animations to their target; no OS motion preference callback exists.
+
+See [Motion](motion) for `Context::animate_spring`, spring stiffness/damping, timeline stepping and how active motion feeds `next_animation_frame()`.

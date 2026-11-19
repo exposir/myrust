@@ -7,9 +7,10 @@ pub mod signing;
 /// Application update checks, downloads, swaps, and rollback.
 pub mod updater;
 
-pub use packager::{PackageConfig, PackageOutput, Packager};
+pub use packager::{PackageConfig, PackageOptions, PackageOutput, PackageTarget, Packager};
 pub use signing::{SigningConfig, SigningPlatform};
 pub use updater::{
-    HttpUpdateSource, LocalUpdateSource, SignatureVerifier, UnimplementedSignatureVerifier,
-    UpdateInfo, UpdateSource, Updater,
+    DeltaPatch, DeltaUpdateInfo, DeltaUpdateManifest, Ed25519SignatureVerifier, HttpUpdateSource,
+    LocalUpdateSource, SignatureVerifier, UnimplementedSignatureVerifier, UpdateInfo, UpdateSource,
+    Updater,
 };

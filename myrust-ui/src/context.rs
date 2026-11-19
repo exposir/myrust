@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 
 use super::time::{Duration, Instant};
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::access::{AccessNode, Role};
 use super::accordion::{AccordionResponse, AccordionSection, AccordionState};
@@ -49,11 +50,11 @@ use super::find_bar::FindBarState;
 use super::floating::{
     ContextMenuResponse, ContextMenuState, MenuButtonState, MenuState, TooltipState,
 };
-use super::font::{default_font, FontFace};
+use super::font::default_font;
 use super::form::FormFieldState;
 use super::grid_view::{GridViewResponse, GridViewState};
 use super::icon::{Icon, IconState};
-use super::image::{ImageData, ImageState};
+use super::image::{ImageData, ImageHandle, ImageState};
 use super::inspector::{InspectorItem, InspectorResponse, InspectorTree};
 use super::languages::{format_date, DateStyle, Locale};
 use super::layout::{
@@ -67,13 +68,15 @@ use super::markdown::{
     TableAlign,
 };
 use super::meter::{MeterState, MeterTone};
+use super::motion::{FrameScheduler, Spring};
 use super::numeric::{
     filter_numeric_text, parse_decimal_units, DecimalInputOptions, DecimalInputState,
     NumberInputOptions, NumberInputState,
 };
 use super::overlay::{OverlayResponse, OverlayState};
 use super::paint::{
-    Color, DisplayList, DrawCommand, GradientStop, Radius, Rect, TextAlignment, Transform,
+    Color, DisplayList, DrawCommand, GradientStop, ImageSourceRect, Radius, Rect, TextAlignment,
+    Transform,
 };
 use super::performance::{FrameStats, FrameStatsResponse};
 use super::range_slider::{RangeKnob, RangeSliderResponse, RangeSliderState};
@@ -91,10 +94,11 @@ use super::stepper::StepperState;
 use super::table::{SortDirection, TableColumn, TableResponse, TableRow, TableSort, TableState};
 use super::text::{
     host_text_ascent, host_text_descent, host_text_width, host_text_width_family,
-    host_text_width_weighted, host_text_x_height, layout_text, ApproximateMeasurer, TextMeasurer,
-    TextMetrics,
+    host_text_width_weighted, host_text_x_height, ApproximateMeasurer,
 };
-use super::text_input::TextInputState;
+#[cfg(not(target_arch = "wasm32"))]
+use super::text::layout_text_shaped;
+use super::text_input::{ClipboardProvider, CompositionState, MemoryClipboard, TextInputState};
 use super::theme::Theme;
 use super::time_input::{filter_time_text, format_time, parse_time, TimeInputState};
 use super::toast::{ToastDismissal, ToastEvent, ToastQueue, ToastResponse};
@@ -102,6 +106,9 @@ use super::toggle::{ToggleGroup, ToggleState};
 use super::token_field::TokenFieldState;
 use super::toolbar::{overflow_split, ToolbarItem, ToolbarResponse, ToolbarState};
 use super::tree::{TreeNode, TreeResponse, TreeState};
+use super::web_view::{
+    intersect, physical_rect, WebViewBuilder, WebViewOptions, WebViewRegion,
+};
 
 /// Logical clipping and scroll scope currently active in a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -119,20 +126,225 @@ pub struct LayoutScope {
 struct InputFrame {
     pointer: Option<Point>,
     pointer_down: bool,
+    pressed: Option<Point>,
     released: Option<Point>,
     secondary_pressed: Option<Point>,
     wheel: (f32, f32),
     text: String,
     keys: Vec<Key>,
+    compositions: Vec<CompositionInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CompositionInput {
+    Start { text: String, cursor: Option<usize> },
+    Update { text: String, cursor: Option<usize> },
+    Commit { text: String },
+    Cancel,
+}
+
+#[derive(Debug, Clone)]
+struct TextEditSnapshot {
+    text: String,
+    cursor: usize,
+    anchor: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextEditGroup {
+    Typing,
+    Other,
+}
+
+#[derive(Debug, Clone)]
+struct TextEditRuntime {
+    text: String,
+    cursor: usize,
+    anchor: Option<usize>,
+    cursor_x: f32,
+    cursor_y: f32,
+    scroll_x: f32,
+    scroll_y: f32,
+    dragging: bool,
+    last_click_at: Option<Instant>,
+    undo: Vec<TextEditSnapshot>,
+    redo: Vec<TextEditSnapshot>,
+    last_group: Option<TextEditGroup>,
+    last_group_at: Option<Instant>,
+    composition: Option<CompositionState>,
+}
+
+impl Default for TextEditRuntime {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            cursor: 0,
+            anchor: None,
+            cursor_x: 0.0,
+            cursor_y: 0.0,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            dragging: false,
+            last_click_at: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            last_group: None,
+            last_group_at: None,
+            composition: None,
+        }
+    }
+}
+
+impl TextEditRuntime {
+    fn selection(&self) -> Option<(usize, usize)> {
+        self.anchor
+            .filter(|anchor| *anchor != self.cursor)
+            .map(|anchor| (anchor.min(self.cursor), anchor.max(self.cursor)))
+    }
+
+    fn snapshot(&self) -> TextEditSnapshot {
+        TextEditSnapshot {
+            text: self.text.clone(),
+            cursor: self.cursor,
+            anchor: self.anchor,
+        }
+    }
+
+    fn reset_after_external_change(&mut self, value: &str, now: Instant) {
+        if self.text != value {
+            self.text.clear();
+            self.text.push_str(value);
+            self.undo.clear();
+            self.redo.clear();
+            self.last_group = None;
+            self.last_group_at = None;
+            self.cursor = self.cursor.min(value.len());
+            while self.cursor > 0 && !value.is_char_boundary(self.cursor) {
+                self.cursor -= 1;
+            }
+            if let Some(anchor) = self.anchor.as_mut() {
+                *anchor = (*anchor).min(value.len());
+                while *anchor > 0 && !value.is_char_boundary(*anchor) {
+                    *anchor -= 1;
+                }
+            }
+        }
+        let _ = now;
+    }
+
+    fn remember(&mut self, value: &str, group: TextEditGroup, now: Instant) {
+        if self.text != value {
+            self.text.clear();
+            self.text.push_str(value);
+        }
+        let coalesce = group == TextEditGroup::Typing
+            && self.last_group == Some(TextEditGroup::Typing)
+            && self
+                .last_group_at
+                .is_some_and(|last| now.saturating_duration_since(last) < Duration::from_millis(750));
+        if !coalesce {
+            self.undo.push(TextEditSnapshot {
+                text: value.to_string(),
+                cursor: self.cursor,
+                anchor: self.anchor,
+            });
+            if self.undo.len() > 128 {
+                self.undo.remove(0);
+            }
+        }
+        self.redo.clear();
+        self.last_group = Some(group);
+        self.last_group_at = Some(now);
+    }
+
+    fn undo(&mut self, value: &mut String) -> bool {
+        let Some(snapshot) = self.undo.pop() else {
+            return false;
+        };
+        self.redo.push(self.snapshot());
+        self.apply_snapshot(snapshot, value);
+        self.last_group = None;
+        true
+    }
+
+    fn redo(&mut self, value: &mut String) -> bool {
+        let Some(snapshot) = self.redo.pop() else {
+            return false;
+        };
+        self.undo.push(self.snapshot());
+        self.apply_snapshot(snapshot, value);
+        self.last_group = None;
+        true
+    }
+
+    fn apply_snapshot(&mut self, snapshot: TextEditSnapshot, value: &mut String) {
+        self.text.clone_from(&snapshot.text);
+        *value = snapshot.text;
+        self.cursor = snapshot.cursor.min(value.len());
+        self.anchor = snapshot.anchor.map(|anchor| anchor.min(value.len()));
+    }
+
+    fn replace_selection(
+        &mut self,
+        value: &mut String,
+        replacement: &str,
+        group: TextEditGroup,
+        now: Instant,
+    ) -> bool {
+        self.remember(value, group, now);
+        let (start, end) = self.selection().unwrap_or((self.cursor, self.cursor));
+        value.replace_range(start..end.min(value.len()), replacement);
+        self.cursor = start + replacement.len();
+        self.anchor = None;
+        self.text.clone_from(value);
+        true
+    }
+
+    fn backspace(&mut self, value: &mut String, now: Instant) -> bool {
+        if self.selection().is_some() {
+            return self.replace_selection(value, "", TextEditGroup::Other, now);
+        }
+        let Some(previous) = previous_char_boundary(value, self.cursor) else {
+            return false;
+        };
+        self.remember(value, TextEditGroup::Other, now);
+        value.replace_range(previous..self.cursor, "");
+        self.cursor = previous;
+        self.anchor = None;
+        self.text.clone_from(value);
+        true
+    }
+
+    fn delete(&mut self, value: &mut String, now: Instant) -> bool {
+        if self.selection().is_some() {
+            return self.replace_selection(value, "", TextEditGroup::Other, now);
+        }
+        let Some(next) = next_char_boundary(value, self.cursor) else {
+            return false;
+        };
+        self.remember(value, TextEditGroup::Other, now);
+        value.replace_range(self.cursor..next, "");
+        self.anchor = None;
+        self.text.clone_from(value);
+        true
+    }
+
+    fn move_to(&mut self, value: &str, offset: usize, extend: bool) {
+        self.last_group = None;
+        if extend && self.anchor.is_none() {
+            self.anchor = Some(self.cursor);
+        } else if !extend {
+            self.anchor = None;
+        }
+        self.cursor = offset.min(value.len());
+        while self.cursor > 0 && !value.is_char_boundary(self.cursor) {
+            self.cursor -= 1;
+        }
+    }
 }
 
 enum WidgetState {
-    TextField {
-        cursor: usize,
-        anchor: Option<usize>,
-        cursor_x: f32,
-        cursor_y: f32,
-    },
+    TextField(TextEditRuntime),
     Checkbox,
     Slider {
         dragging: bool,
@@ -167,6 +379,7 @@ struct AnimatedValue {
     current: f32,
     target: f32,
     started_at: Instant,
+    ends_at: Instant,
     active: bool,
     last_seen_frame: u64,
 }
@@ -193,6 +406,13 @@ struct OverlayRuntime {
     restore_focus: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct SpringValue {
+    spring: Spring,
+    last_time: Instant,
+    last_seen_frame: u64,
+}
+
 /// Per-frame immediate-mode context.
 pub struct Context {
     available_size: Size,
@@ -204,6 +424,7 @@ pub struct Context {
     explicit_id: Option<String>,
     scope: LayoutScope,
     pending_interactions: Vec<(u64, String)>,
+    pending_web_views: Vec<PendingWebView>,
     previous_regions: HashMap<String, InteractiveRegion>,
     current_regions: HashMap<String, InteractiveRegion>,
     focused_id: Option<String>,
@@ -214,13 +435,16 @@ pub struct Context {
     pending_focusables: Vec<(u64, String, u32)>,
     current_focus_key: Option<String>,
     widget_states: HashMap<String, WidgetState>,
+    clipboard: Box<dyn ClipboardProvider>,
     theme: Theme,
     animations: HashMap<String, AnimatedValue>,
+    springs: HashMap<String, SpringValue>,
     frame_time: Instant,
     clock_offset: Duration,
     frame_time_override: Option<Instant>,
     frame_serial: u64,
     reduce_motion: bool,
+    frame_build_time: Duration,
     pending_access_nodes: Vec<PendingAccessNode>,
     current_layer: u32,
     current_transform: Transform,
@@ -234,6 +458,7 @@ pub struct Context {
     overlay_runtimes: HashMap<String, OverlayRuntime>,
     pending_focus_layer: Option<u32>,
     requested_animation: bool,
+    frame_scheduler: FrameScheduler,
     last_frame_stats: FrameStats,
     direction: Direction,
     embedded_overlay: bool,
@@ -259,6 +484,7 @@ impl Context {
             explicit_id: None,
             scope: LayoutScope::default(),
             pending_interactions: Vec::new(),
+            pending_web_views: Vec::new(),
             previous_regions: HashMap::new(),
             current_regions: HashMap::new(),
             focused_id: None,
@@ -267,13 +493,16 @@ impl Context {
             pending_focusables: Vec::new(),
             current_focus_key: None,
             widget_states: HashMap::new(),
+            clipboard: Box::new(MemoryClipboard::new()),
             theme: Theme::dark(),
             animations: HashMap::new(),
+            springs: HashMap::new(),
             frame_time: Instant::now(),
             clock_offset: Duration::ZERO,
             frame_time_override: None,
             frame_serial: 0,
             reduce_motion: detect_reduce_motion(),
+            frame_build_time: Duration::ZERO,
             pending_access_nodes: Vec::new(),
             current_layer: 0,
             current_transform: Transform::identity(),
@@ -287,6 +516,7 @@ impl Context {
             overlay_runtimes: HashMap::new(),
             pending_focus_layer: None,
             requested_animation: false,
+            frame_scheduler: FrameScheduler::default(),
             last_frame_stats: FrameStats::default(),
             direction: Direction::Ltr,
             embedded_overlay: false,
@@ -520,10 +750,60 @@ impl Context {
     /// Requests one more frame even without a pending animation.
     ///
     /// Spinners, indeterminate progress, and other frame-clock-driven widgets
-    /// use this while they are visible. The flag is per frame and is reported
+    /// use this while they are visible. The request is throttled to the
+    /// scheduler's frame cadence, so a continuously animating view does not
+    /// busy-loop the host event loop. The flag is per frame and is reported
     /// through [`super::native::ViewFrame::needs_animation_frame`].
     pub fn request_animation_frame(&mut self) {
+        let now = self.frame_time;
         self.requested_animation = true;
+        self.frame_scheduler.request_frame(now);
+    }
+
+    /// Requests another frame as soon as the host can produce one.
+    pub fn request_animation_frame_now(&mut self) {
+        let now = self.frame_time;
+        self.requested_animation = true;
+        self.frame_scheduler.request_frame_now(now);
+    }
+
+    /// Requests another frame no earlier than `deadline`.
+    pub fn request_animation_frame_at(&mut self, deadline: Instant) {
+        self.requested_animation = true;
+        self.frame_scheduler.request_at(deadline);
+    }
+
+    /// Requests another frame after `delay` from the current frame time.
+    pub fn request_animation_frame_after(&mut self, delay: Duration) {
+        let now = self.frame_time;
+        self.requested_animation = true;
+        self.frame_scheduler.request_after(now, delay);
+    }
+
+    /// Earliest instant at which this context needs another frame.
+    ///
+    /// Returns `None` when no animation or explicit frame request is pending.
+    /// Hosts can pass the result to `ControlFlow::WaitUntil`.
+    pub fn next_animation_frame(&self) -> Option<Instant> {
+        let active_animation = self.animations.values().any(|animation| {
+            animation.active && animation.last_seen_frame == self.frame_serial
+        });
+        let active_spring = self.springs.values().any(|spring| {
+            spring.spring.is_active() && spring.last_seen_frame == self.frame_serial
+        });
+        if !self.requested_animation && !active_animation && !active_spring {
+            return None;
+        }
+        let mut wake = self.frame_scheduler.next_wake(self.frame_time);
+        for animation in self.animations.values() {
+            if animation.active && animation.last_seen_frame == self.frame_serial {
+                wake = Some(match wake {
+                    Some(current) => current.min(animation.ends_at),
+                    None => animation.ends_at,
+                });
+            }
+        }
+        wake
     }
 
     /// Returns whether reduced motion is requested.
@@ -559,6 +839,7 @@ impl Context {
                     current: target,
                     target,
                     started_at: self.frame_time,
+                    ends_at: self.frame_time,
                     active: false,
                     last_seen_frame: self.frame_serial,
                 });
@@ -578,32 +859,110 @@ impl Context {
                     current: target,
                     target,
                     started_at: now,
+                    ends_at: now,
                     active: false,
                     last_seen_frame: self.frame_serial,
                 },
             );
             return target;
         }
-        let state = self.animations.get_mut(id).expect("animation exists");
-        state.last_seen_frame = self.frame_serial;
-        if (state.target - target).abs() > f32::EPSILON {
-            state.from = state.current;
-            state.target = target;
-            state.started_at = now;
-            state.active = true;
-        }
-        if state.active {
-            let elapsed = now.duration_since(state.started_at).as_secs_f32();
-            let duration = animation.duration.as_secs_f32().max(f32::EPSILON);
-            let fraction = (elapsed / duration).clamp(0.0, 1.0);
-            let eased = animation.value(fraction);
-            state.current = state.from + (state.target - state.from) * eased;
-            if fraction >= 1.0 {
-                state.current = state.target;
-                state.active = false;
+        let (current, deadline) = {
+            let state = self.animations.get_mut(id).expect("animation exists");
+            state.last_seen_frame = self.frame_serial;
+            if (state.target - target).abs() > f32::EPSILON {
+                state.from = state.current;
+                state.target = target;
+                state.started_at = now;
+                state.active = true;
             }
+            if state.active {
+                state.ends_at = state
+                    .started_at
+                    .checked_add(animation.duration)
+                    .unwrap_or(now);
+                let elapsed = now.duration_since(state.started_at).as_secs_f32();
+                let duration = animation.duration.as_secs_f32().max(f32::EPSILON);
+                let fraction = (elapsed / duration).clamp(0.0, 1.0);
+                let eased = animation.value(fraction);
+                state.current = state.from + (state.target - state.from) * eased;
+                if fraction >= 1.0 {
+                    state.current = state.target;
+                    state.active = false;
+                }
+            }
+            (
+                state.current,
+                if state.active {
+                    Some(state.ends_at)
+                } else {
+                    None
+                },
+            )
+        };
+        if let Some(deadline) = deadline {
+            self.frame_scheduler.request_frame(now);
+            self.frame_scheduler.request_at(deadline);
         }
-        state.current
+        current
+    }
+
+    /// Advances a named scalar with the default damped spring.
+    ///
+    /// Timing comes from [`Self::frame_time`]; no private timer is created.
+    /// Reduced motion jumps directly to the target and clears activity.
+    pub fn animate_spring(&mut self, id: &str, target: f32) -> f32 {
+        self.animate_spring_with(id, target, Spring::default())
+    }
+
+    /// Advances a named scalar with explicit spring parameters.
+    ///
+    /// The first call for an id establishes its resting position and target,
+    /// matching [`Self::animate`]'s first-frame return value. Later target
+    /// changes preserve velocity through [`Spring::set_target`]. A converged
+    /// spring stops requesting frames.
+    pub fn animate_spring_with(&mut self, id: &str, target: f32, mut spring: Spring) -> f32 {
+        let target = if target.is_finite() { target } else { 0.0 };
+        let now = self.frame_time;
+        if self.reduce_motion {
+            spring = Spring::at(target, target);
+            self.springs.insert(
+                id.to_string(),
+                SpringValue {
+                    spring,
+                    last_time: now,
+                    last_seen_frame: self.frame_serial,
+                },
+            );
+            return target;
+        }
+        let Some(state) = self.springs.get_mut(id) else {
+            let resting = spring.with_target(target).with_position(target);
+            self.springs.insert(
+                id.to_string(),
+                SpringValue {
+                    spring: resting,
+                    last_time: now,
+                    last_seen_frame: self.frame_serial,
+                },
+            );
+            return target;
+        };
+        state.spring.stiffness = spring.stiffness;
+        state.spring.damping = spring.damping;
+        state.spring.set_target(target);
+        let dt = now.duration_since(state.last_time);
+        state.last_time = now;
+        state.last_seen_frame = self.frame_serial;
+        let current = state.spring.step(dt);
+        let active = state.spring.is_active();
+        if !active {
+            state.spring = Spring::at(target, target);
+        }
+        if active {
+            self.frame_scheduler.request_frame(now);
+            self.requested_animation = true;
+        }
+        current
     }
 
     /// Registers accessibility metadata for the most recently constructed node.
@@ -1179,18 +1538,13 @@ impl Context {
 
     /// Creates a single-line text field.
     ///
-    /// Supports character input, Backspace, Delete, Home/End, and left/right
-    /// cursor movement. Selection, clipboard, undo, IME composition, and dead
-    /// keys are not implemented.
+    /// Supports cluster-aware caret movement, mouse selection, cut/copy/paste,
+    /// undo/redo, word/line navigation and horizontal scrolling. IME preedit
+    /// composition and dead keys are not implemented yet.
     /// Returns the cursor, selection, and geometry of a text field.
     pub fn text_input_state(&self, id: &str) -> Option<TextInputState> {
-        let (cursor, anchor, cursor_x, cursor_y) = match self.widget_states.get(id) {
-            Some(WidgetState::TextField {
-                cursor,
-                anchor,
-                cursor_x,
-                cursor_y,
-            }) => (*cursor, *anchor, *cursor_x, *cursor_y),
+        let runtime = match self.widget_states.get(id) {
+            Some(WidgetState::TextField(runtime)) => runtime,
             _ => return None,
         };
         let bounds = self
@@ -1198,15 +1552,13 @@ impl Context {
             .get(id)
             .or_else(|| self.previous_regions.get(id))?
             .bounds;
-        let selection = anchor
-            .filter(|anchor| *anchor != cursor)
-            .map(|anchor| (anchor.min(cursor), anchor.max(cursor)));
+        let selection = runtime.selection();
         Some(TextInputState {
-            cursor,
+            cursor: runtime.cursor,
             selection,
             bounds,
-            cursor_x: bounds.x + cursor_x,
-            cursor_y: bounds.y + cursor_y,
+            cursor_x: bounds.x + runtime.cursor_x,
+            cursor_y: bounds.y + runtime.cursor_y,
         })
     }
 
@@ -1225,16 +1577,17 @@ impl Context {
         let state = self
             .widget_states
             .entry(id.to_string())
-            .or_insert(WidgetState::TextField {
-                cursor: end,
-                anchor: Some(start),
-                cursor_x: 0.0,
-                cursor_y: 0.0,
-            });
-        if let WidgetState::TextField { cursor, anchor, .. } = state {
-            *cursor = end;
-            *anchor = Some(start);
+            .or_insert(WidgetState::TextField(TextEditRuntime::default()));
+        if let WidgetState::TextField(runtime) = state {
+            runtime.cursor = end;
+            runtime.anchor = Some(start);
+            runtime.last_group = None;
         }
+    }
+
+    /// Installs the clipboard used by text controls.
+    pub fn set_clipboard_provider(&mut self, clipboard: impl ClipboardProvider + 'static) {
+        self.clipboard = Box::new(clipboard);
     }
 
     /// Creates a text field backed by a caller-owned string.
@@ -1354,127 +1707,128 @@ impl Context {
         }
         let focused = self.focused_id.as_deref() == Some(id);
         let mut changed = false;
-        let (mut cursor, mut anchor) = match self.widget_states.get(id) {
-            Some(WidgetState::TextField { cursor, anchor, .. }) => (*cursor, *anchor),
-            _ => (0, None),
-        };
-        cursor = cursor.min(value.len());
-        while !value.is_char_boundary(cursor) {
-            cursor -= 1;
-        }
-        if let Some(mut anchor_value) = anchor {
-            anchor_value = anchor_value.min(value.len());
-            while !value.is_char_boundary(anchor_value) {
-                anchor_value = anchor_value.saturating_sub(1);
-            }
-            anchor = Some(anchor_value);
-        }
-        let mut selection = anchor
-            .filter(|anchor| *anchor != cursor)
-            .map(|anchor| (anchor.min(cursor), anchor.max(cursor)));
+        let now = self.frame_time;
+        let mut runtime = self.take_text_runtime(id, value, now);
         if focused {
+            let text_origin_x = horizontal + inset;
+            let text_origin_y = vertical + inset;
+            if let Some(point) = self.input.pressed.and_then(|point| self.local_pointer_for(id, point))
+            {
+                let offset = self.text_offset_at(
+                    value,
+                    point.x - text_origin_x + runtime.scroll_x,
+                    point.y - text_origin_y + runtime.scroll_y,
+                    font_size,
+                    false,
+                    false,
+                    measured,
+                    None,
+                );
+                let double_click = runtime.last_click_at.is_some_and(|last| {
+                    now.saturating_duration_since(last) < Duration::from_millis(350)
+                });
+                if double_click {
+                    if let Some((start, end)) = word_range_at(value, offset) {
+                        runtime.anchor = Some(start);
+                        runtime.cursor = end;
+                    } else {
+                        runtime.move_to(value, offset, false);
+                    }
+                    runtime.last_click_at = None;
+                } else {
+                    runtime.move_to(value, offset, false);
+                    runtime.last_click_at = Some(now);
+                }
+                runtime.dragging = true;
+            } else if self.input.pointer_down && runtime.dragging {
+                if let Some(point) = self.local_pointer_in_previous(id) {
+                    let offset = self.text_offset_at(
+                        value,
+                        point.x - text_origin_x + runtime.scroll_x,
+                        point.y - text_origin_y + runtime.scroll_y,
+                        font_size,
+                        false,
+                        false,
+                        measured,
+                        None,
+                    );
+                    runtime.move_to(value, offset, true);
+                }
+            } else if self.input.released.is_some() {
+                runtime.dragging = false;
+            }
+            for composition in self.input.compositions.clone() {
+                changed |= self.apply_composition(&mut runtime, value, composition, now);
+            }
             let text = self.input.text.clone();
             if !text.is_empty() {
-                if let Some((start, end)) = selection {
-                    value.replace_range(start..end, &text);
-                    cursor = start + text.len();
-                } else {
-                    value.insert_str(cursor, &text);
-                    cursor += text.len();
-                }
-                anchor = None;
-                selection = None;
-                changed = true;
+                changed |= runtime.replace_selection(value, &text, TextEditGroup::Typing, now);
             }
             for key in self.input.keys.clone() {
-                match key {
-                    Key::Backspace => {
-                        if let Some((start, end)) = selection {
-                            value.replace_range(start..end, "");
-                            cursor = start;
-                            changed = true;
-                        } else if let Some(previous) = previous_char_boundary(value, cursor) {
-                            value.replace_range(previous..cursor, "");
-                            cursor = previous;
-                            changed = true;
-                        }
-                        anchor = None;
-                        selection = None;
-                    }
-                    Key::Delete => {
-                        if let Some((start, end)) = selection {
-                            value.replace_range(start..end, "");
-                            cursor = start;
-                            changed = true;
-                        } else if let Some(next) = next_char_boundary(value, cursor) {
-                            value.replace_range(cursor..next, "");
-                            changed = true;
-                        }
-                        anchor = None;
-                        selection = None;
-                    }
-                    Key::ArrowLeft => {
-                        if let Some(previous) = previous_char_boundary(value, cursor) {
-                            cursor = previous;
-                        }
-                        anchor = None;
-                        selection = None;
-                    }
-                    Key::ArrowRight => {
-                        if let Some(next) = next_char_boundary(value, cursor) {
-                            cursor = next;
-                        }
-                        anchor = None;
-                        selection = None;
-                    }
-                    Key::Home => {
-                        cursor = 0;
-                        anchor = None;
-                        selection = None;
-                    }
-                    Key::End => {
-                        cursor = value.len();
-                        anchor = None;
-                        selection = None;
-                    }
-                    _ => {}
-                }
+                changed |= self.apply_text_key(
+                    &mut runtime,
+                    value,
+                    key,
+                    true,
+                    1,
+                    now,
+                    font_size,
+                    false,
+                    None,
+                );
             }
         }
         if let Some(filter) = filter {
             let filtered = filter(value.as_str());
             if filtered != *value {
                 *value = filtered;
-                cursor = value.len();
-                anchor = None;
+                runtime.cursor = value.len();
+                runtime.anchor = None;
                 changed = true;
             }
-            cursor = cursor.min(value.len());
-            while !value.is_char_boundary(cursor) {
-                cursor -= 1;
+            runtime.cursor = runtime.cursor.min(value.len());
+            while runtime.cursor > 0 && !value.is_char_boundary(runtime.cursor) {
+                runtime.cursor -= 1;
             }
         }
-        let display: String = if mask {
-            value.chars().map(|_| '•').collect()
+        runtime.text.clone_from(value);
+        let text_width = (width - horizontal * 2.0 - inset * 2.0).max(1.0);
+        let selection = runtime.selection();
+        let composition = runtime.composition.clone();
+        let (composed, composed_cursor, preedit_range) = if let Some(composition) = &composition {
+            let (start, end) = selection.unwrap_or((runtime.cursor, runtime.cursor));
+            let mut composed = String::with_capacity(value.len() + composition.text.len());
+            composed.push_str(&value[..start]);
+            composed.push_str(&composition.text);
+            composed.push_str(&value[end..]);
+            (
+                composed,
+                start + composition.cursor,
+                Some((start, start + composition.text.len())),
+            )
         } else {
-            value.clone()
+            (value.clone(), runtime.cursor, None)
+        };
+        let display: String = if mask {
+            composed.chars().map(|_| '•').collect()
+        } else {
+            composed.clone()
         };
         let display_cursor_prefix: String = if mask {
-            value[..cursor].chars().map(|_| '•').collect()
+            composed[..composed_cursor].chars().map(|_| '•').collect()
         } else {
-            value[..cursor].to_string()
+            composed[..composed_cursor].to_string()
         };
-        let cursor_x = horizontal + inset + measure_text_width(&display_cursor_prefix, font_size);
-        let cursor_y = vertical + inset;
-        self.widget_states.insert(
-            id.to_string(),
-            WidgetState::TextField {
-                cursor,
-                anchor,
-                cursor_x,
-                cursor_y,
-            },
-        );
+        let caret_content_x =
+            measure_text_width_styled(&display_cursor_prefix, font_size, false);
+        if caret_content_x < runtime.scroll_x {
+            runtime.scroll_x = caret_content_x;
+        } else if caret_content_x > runtime.scroll_x + text_width {
+            runtime.scroll_x = caret_content_x - text_width;
+        }
+        runtime.cursor_x = horizontal + inset + caret_content_x - runtime.scroll_x;
+        runtime.cursor_y = vertical + inset;
+        self.store_text_runtime(id, runtime.clone());
         // The box is the layout's own: the border takes layout space, so
         // the face must fill the node rather than the padding alone.
         let height = measured + vertical * 2.0 + if bare { 0.0 } else { 2.0 };
@@ -1512,7 +1866,7 @@ impl Context {
                 },
             ]
         };
-        if focused {
+        if focused && composition.is_none() {
             if let Some((start, end)) = selection {
                 let selection_prefix: String = if mask {
                     value[..start].chars().map(|_| '•').collect()
@@ -1524,8 +1878,11 @@ impl Context {
                 } else {
                     value[start..end].to_string()
                 };
-                let selection_x = horizontal + measure_text_width(&selection_prefix, font_size);
-                let selection_width = measure_text_width(&selection_text, font_size);
+                let selection_x = horizontal + inset
+                    + measure_text_width_styled(&selection_prefix, font_size, false)
+                    - runtime.scroll_x;
+                let selection_width =
+                    measure_text_width_styled(&selection_text, font_size, false);
                 commands.push(DrawCommand::Rect {
                     x: selection_x,
                     y: vertical - 1.0,
@@ -1533,6 +1890,45 @@ impl Context {
                     height: measured_text_height(font_size) + 2.0,
                     // MyGo's Selection: the accent at a quarter alpha.
                     color: Color::rgba(theme.accent.r, theme.accent.g, theme.accent.b, 64),
+                });
+            }
+        }
+        if focused {
+            if let Some((start, _end)) = preedit_range {
+                let prefix = if mask {
+                    value[..start].chars().map(|_| '•').collect::<String>()
+                } else {
+                    value[..start].to_string()
+                };
+                let text = if mask {
+                    composition
+                        .as_ref()
+                        .map(|composition| composition.text.chars().map(|_| '•').collect())
+                        .unwrap_or_default()
+                } else {
+                    composition
+                        .as_ref()
+                        .map(|composition| composition.text.clone())
+                        .unwrap_or_default()
+                };
+                let x = horizontal + inset
+                    + measure_text_width_styled(&prefix, font_size, false)
+                    - runtime.scroll_x;
+                let width = measure_text_width_styled(&text, font_size, false).max(1.0);
+                commands.push(DrawCommand::Rect {
+                    x,
+                    y: vertical - 1.0,
+                    width,
+                    height: measured_text_height(font_size) + 2.0,
+                    color: Color::rgba(theme.accent.r, theme.accent.g, theme.accent.b, 64),
+                });
+                commands.push(DrawCommand::Line {
+                    x1: x,
+                    y1: vertical + measured_text_height(font_size),
+                    x2: x + width,
+                    y2: vertical + measured_text_height(font_size),
+                    width: 1.0,
+                    color: theme.accent,
                 });
             }
         }
@@ -1550,7 +1946,7 @@ impl Context {
             (display.clone(), theme.foreground)
         };
         commands.push(DrawCommand::Text {
-            x: horizontal + inset,
+            x: horizontal + inset - runtime.scroll_x,
             y: vertical + inset,
             text: shown,
             font_size,
@@ -1559,18 +1955,17 @@ impl Context {
             mono: false,
             family: None,
             color: shown_color,
-            max_width: Some((width - horizontal * 2.0).max(1.0)),
+            max_width: Some(text_width),
             alignment: TextAlignment::Start,
         });
         if self.shows_focus_ring(focused) && !bare {
             commands.extend(focus_ring(0.0, 0.0, width, height, border));
         }
         if focused {
-            let cursor_x = horizontal + inset + measure_text_width(&display_cursor_prefix, font_size);
             commands.push(DrawCommand::Line {
-                x1: cursor_x,
+                x1: runtime.cursor_x,
                 y1: vertical + inset,
-                x2: cursor_x,
+                x2: runtime.cursor_x,
                 y2: height - vertical - inset,
                 width: 1.0,
                 color: theme.accent,
@@ -1595,7 +1990,7 @@ impl Context {
         }
         TextFieldState {
             changed,
-            cursor,
+            cursor: runtime.cursor,
             focused,
             hovered,
         }
@@ -1710,147 +2105,120 @@ impl Context {
         }
         let focused = self.focused_id.as_deref() == Some(id);
         let mut changed = false;
-        let (mut cursor, mut anchor) = match self.widget_states.get(id) {
-            Some(WidgetState::TextField { cursor, anchor, .. }) => (*cursor, *anchor),
-            _ => (0, None),
-        };
-        cursor = cursor.min(value.len());
-        while !value.is_char_boundary(cursor) {
-            cursor -= 1;
-        }
-        if let Some(mut anchor_value) = anchor {
-            anchor_value = anchor_value.min(value.len());
-            while !value.is_char_boundary(anchor_value) {
-                anchor_value = anchor_value.saturating_sub(1);
-            }
-            anchor = Some(anchor_value);
-        }
-        let mut selection = anchor
-            .filter(|anchor| *anchor != cursor)
-            .map(|anchor| (anchor.min(cursor), anchor.max(cursor)));
+        let now = self.frame_time;
+        let mut runtime = self.take_text_runtime(id, value, now);
+        let text_width = (width - horizontal * 2.0 - 2.0).max(1.0);
         if focused {
+            let text_origin_x = horizontal + 1.0;
+            let text_origin_y = vertical + 1.0;
+            if let Some(point) = self.input.pressed.and_then(|point| self.local_pointer_for(id, point))
+            {
+                let offset = self.text_offset_at(
+                    value,
+                    point.x - text_origin_x + runtime.scroll_x,
+                    point.y - text_origin_y + runtime.scroll_y,
+                    font_size,
+                    mono,
+                    true,
+                    line_height,
+                    Some(text_width),
+                );
+                let double_click = runtime.last_click_at.is_some_and(|last| {
+                    now.saturating_duration_since(last) < Duration::from_millis(350)
+                });
+                if double_click {
+                    if let Some((start, end)) = word_range_at(value, offset) {
+                        runtime.anchor = Some(start);
+                        runtime.cursor = end;
+                    } else {
+                        runtime.move_to(value, offset, false);
+                    }
+                    runtime.last_click_at = None;
+                } else {
+                    runtime.move_to(value, offset, false);
+                    runtime.last_click_at = Some(now);
+                }
+                runtime.dragging = true;
+            } else if self.input.pointer_down && runtime.dragging {
+                if let Some(point) = self.local_pointer_in_previous(id) {
+                    let offset = self.text_offset_at(
+                        value,
+                        point.x - text_origin_x + runtime.scroll_x,
+                        point.y - text_origin_y + runtime.scroll_y,
+                        font_size,
+                        mono,
+                        true,
+                        line_height,
+                        Some(text_width),
+                    );
+                    runtime.move_to(value, offset, true);
+                }
+            } else if self.input.released.is_some() {
+                runtime.dragging = false;
+            }
+            for composition in self.input.compositions.clone() {
+                changed |= self.apply_composition(&mut runtime, value, composition, now);
+            }
             let text = self.input.text.clone();
             if !text.is_empty() {
-                if let Some((start, end)) = selection {
-                    value.replace_range(start..end, &text);
-                    cursor = start + text.len();
-                } else {
-                    value.insert_str(cursor, &text);
-                    cursor += text.len();
-                }
-                anchor = None;
-                selection = None;
-                changed = true;
+                changed |= runtime.replace_selection(value, &text, TextEditGroup::Typing, now);
             }
             for key in self.input.keys.clone() {
-                match key {
-                    Key::Enter => {
-                        if let Some((start, end)) = selection {
-                            value.replace_range(start..end, "\n");
-                            cursor = start + 1;
-                        } else {
-                            value.insert(cursor, '\n');
-                            cursor += 1;
-                        }
-                        anchor = None;
-                        selection = None;
-                        changed = true;
-                    }
-                    Key::Backspace => {
-                        if let Some((start, end)) = selection {
-                            value.replace_range(start..end, "");
-                            cursor = start;
-                            changed = true;
-                        } else if let Some(previous) = previous_char_boundary(value, cursor) {
-                            value.replace_range(previous..cursor, "");
-                            cursor = previous;
-                            changed = true;
-                        }
-                        anchor = None;
-                        selection = None;
-                    }
-                    Key::Delete => {
-                        if let Some((start, end)) = selection {
-                            value.replace_range(start..end, "");
-                            cursor = start;
-                            changed = true;
-                        } else if let Some(next) = next_char_boundary(value, cursor) {
-                            value.replace_range(cursor..next, "");
-                            changed = true;
-                        }
-                        anchor = None;
-                        selection = None;
-                    }
-                    Key::ArrowLeft => {
-                        if let Some(previous) = previous_char_boundary(value, cursor) {
-                            cursor = previous;
-                        }
-                        anchor = None;
-                        selection = None;
-                    }
-                    Key::ArrowRight => {
-                        if let Some(next) = next_char_boundary(value, cursor) {
-                            cursor = next;
-                        }
-                        anchor = None;
-                        selection = None;
-                    }
-                    Key::ArrowUp | Key::ArrowDown => {
-                        let spans = line_spans(value);
-                        let current = line_index(&spans, cursor);
-                        let (start, _end) = spans[current];
-                        let column = value[start..cursor].chars().count();
-                        let target = if matches!(key, Key::ArrowUp) {
-                            current.checked_sub(1)
-                        } else if current + 1 < spans.len() {
-                            Some(current + 1)
-                        } else {
-                            None
-                        };
-                        if let Some(target) = target {
-                            let (target_start, target_end) = spans[target];
-                            cursor = byte_at_column(value, target_start, target_end, column);
-                        }
-                        anchor = None;
-                        selection = None;
-                    }
-                    Key::Home => {
-                        let spans = line_spans(value);
-                        cursor = spans[line_index(&spans, cursor)].0;
-                        anchor = None;
-                        selection = None;
-                    }
-                    Key::End => {
-                        let spans = line_spans(value);
-                        cursor = spans[line_index(&spans, cursor)].1;
-                        anchor = None;
-                        selection = None;
-                    }
-                    _ => {}
+                if key == Key::Enter {
+                    changed |=
+                        runtime.replace_selection(value, "\n", TextEditGroup::Other, now);
+                } else {
+                    changed |= self.apply_text_key(
+                        &mut runtime,
+                        value,
+                        key,
+                        false,
+                        visible,
+                        now,
+                        font_size,
+                        mono,
+                        Some(text_width),
+                    );
                 }
             }
         }
-        let spans = line_spans(value);
-        let current_line = line_index(&spans, cursor);
+        let selection = runtime.selection();
+        let composition = runtime.composition.clone();
+        let (render_value, render_cursor, preedit_range) = if let Some(composition) = &composition {
+            let (start, end) = selection.unwrap_or((runtime.cursor, runtime.cursor));
+            let mut composed = String::with_capacity(value.len() + composition.text.len());
+            composed.push_str(&value[..start]);
+            composed.push_str(&composition.text);
+            composed.push_str(&value[end..]);
+            (
+                composed,
+                start + composition.cursor,
+                Some((start, start + composition.text.len())),
+            )
+        } else {
+            (value.clone(), runtime.cursor, None)
+        };
+        let spans = visual_line_spans(&render_value, font_size, mono, Some(text_width));
+        let current_line = line_index(&spans, render_cursor);
         let start_line = if spans.len() > visible {
             (current_line + 1).saturating_sub(visible)
         } else {
             0
         };
-        let (line_start, _) = spans[current_line];
-        let cursor_x = horizontal + 1.0
-            + host_text_width_weighted(&value[line_start..cursor], font_size, false, mono, 400)
-                .unwrap_or_else(|| measure_text_width(&value[line_start..cursor], font_size));
-        let cursor_y = vertical + 1.0 + (current_line - start_line) as f32 * line_height;
-        self.widget_states.insert(
-            id.to_string(),
-            WidgetState::TextField {
-                cursor,
-                anchor,
-                cursor_x,
-                cursor_y,
-            },
-        );
+        let (line_start, line_end) = spans[current_line];
+        let caret_content_x =
+            self.text_caret_x(&render_value, render_cursor, font_size, mono, line_start, line_end);
+        if caret_content_x < runtime.scroll_x {
+            runtime.scroll_x = caret_content_x;
+        } else if caret_content_x > runtime.scroll_x + text_width {
+            runtime.scroll_x = caret_content_x - text_width;
+        }
+        runtime.cursor_x = horizontal + 1.0 + caret_content_x - runtime.scroll_x;
+        runtime.cursor_y =
+            vertical + 1.0 + (current_line - start_line) as f32 * line_height;
+        runtime.scroll_y = (current_line - start_line) as f32 * line_height;
+        runtime.text.clone_from(value);
+        self.store_text_runtime(id, runtime.clone());
         let border = if focused {
             theme.accent
         } else if hovered {
@@ -1876,7 +2244,7 @@ impl Context {
                 color: theme.surface,
             },
         ];
-        if value.is_empty() {
+        if render_value.is_empty() {
             if let Some(placeholder) = placeholder {
                 if !placeholder.is_empty() {
                     // MyGo's border takes layout space, so the text starts
@@ -1898,31 +2266,142 @@ impl Context {
             }
         }
         let line_count = spans.len();
-        for line in start_line..line_count.min(start_line + visible) {
-            let (start, end) = spans[line];
+        if focused && composition.is_none() {
+            if let Some((selection_start, selection_end)) = selection {
+                for (line, &(start, end)) in spans
+                    .iter()
+                    .enumerate()
+                    .take(line_count.min(start_line + visible))
+                    .skip(start_line)
+                {
+                    let visible_start = selection_start.max(start).min(end);
+                    let visible_end = selection_end.max(start).min(end);
+                    if visible_start < visible_end {
+                        let x1 = horizontal
+                            + 1.0
+                            + self.text_caret_x(
+                                &render_value,
+                                visible_start,
+                                font_size,
+                                mono,
+                                start,
+                                end,
+                            )
+                            - runtime.scroll_x;
+                        let x2 = horizontal
+                            + 1.0
+                            + self.text_caret_x(
+                                &render_value,
+                                visible_end,
+                                font_size,
+                                mono,
+                                start,
+                                end,
+                            )
+                            - runtime.scroll_x;
+                        commands.push(DrawCommand::Rect {
+                            x: x1.min(x2),
+                            y: vertical + 1.0 + (line - start_line) as f32 * line_height,
+                            width: (x1 - x2).abs().max(1.0),
+                            height: line_height,
+                            color: Color::rgba(
+                                theme.accent.r,
+                                theme.accent.g,
+                                theme.accent.b,
+                                64,
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        for (line, &(start, end)) in spans
+            .iter()
+            .enumerate()
+            .take(line_count.min(start_line + visible))
+            .skip(start_line)
+        {
             commands.push(DrawCommand::Text {
-                x: horizontal + 1.0,
+                x: horizontal + 1.0 - runtime.scroll_x,
                 y: vertical + 1.0 + (line - start_line) as f32 * line_height,
-                text: value[start..end].to_string(),
+                text: render_value[start..end].to_string(),
                 font_size,
                 weight: 400,
                 italic: false,
                 mono,
                 family: None,
                 color: theme.foreground,
-                max_width: Some((width - horizontal * 2.0).max(1.0)),
+                max_width: Some(text_width),
                 alignment: TextAlignment::Start,
             });
+        }
+        if focused {
+            if let Some((preedit_start, preedit_end)) = preedit_range {
+                for (line, &(start, end)) in spans
+                    .iter()
+                    .enumerate()
+                    .take(line_count.min(start_line + visible))
+                    .skip(start_line)
+                {
+                    let visible_start = preedit_start.max(start).min(end);
+                    let visible_end = preedit_end.max(start).min(end);
+                    if visible_start < visible_end {
+                        let x1 = horizontal
+                            + 1.0
+                            + self.text_caret_x(
+                                &render_value,
+                                visible_start,
+                                font_size,
+                                mono,
+                                start,
+                                end,
+                            )
+                            - runtime.scroll_x;
+                        let x2 = horizontal
+                            + 1.0
+                            + self.text_caret_x(
+                                &render_value,
+                                visible_end,
+                                font_size,
+                                mono,
+                                start,
+                                end,
+                            )
+                            - runtime.scroll_x;
+                        let y = vertical + 1.0 + (line - start_line) as f32 * line_height;
+                        commands.push(DrawCommand::Rect {
+                            x: x1.min(x2),
+                            y,
+                            width: (x1 - x2).abs().max(1.0),
+                            height: line_height,
+                            color: Color::rgba(
+                                theme.accent.r,
+                                theme.accent.g,
+                                theme.accent.b,
+                                64,
+                            ),
+                        });
+                        commands.push(DrawCommand::Line {
+                            x1: x1.min(x2),
+                            y1: y + line_height - 1.0,
+                            x2: x1.max(x2),
+                            y2: y + line_height - 1.0,
+                            width: 1.0,
+                            color: theme.accent,
+                        });
+                    }
+                }
+            }
         }
         if self.shows_focus_ring(focused) {
             commands.extend(focus_ring(0.0, 0.0, width, height, border));
         }
         if focused {
             commands.push(DrawCommand::Line {
-                x1: cursor_x,
-                y1: cursor_y,
-                x2: cursor_x,
-                y2: cursor_y + line_height,
+                x1: runtime.cursor_x,
+                y1: runtime.cursor_y,
+                x2: runtime.cursor_x,
+                y2: runtime.cursor_y + line_height,
                 width: 1.0,
                 color: theme.accent,
             });
@@ -1948,7 +2427,7 @@ impl Context {
         }
         TextFieldState {
             changed,
-            cursor,
+            cursor: runtime.cursor,
             focused,
             hovered,
         }
@@ -1976,12 +2455,11 @@ impl Context {
                 self.focused_id = Some(input_id.clone());
                 self.widget_states.insert(
                     input_id.clone(),
-                    WidgetState::TextField {
+                    WidgetState::TextField(TextEditRuntime {
                         cursor: state.buffer.len(),
                         anchor: None,
-                        cursor_x: 0.0,
-                        cursor_y: 0.0,
-                    },
+                        ..TextEditRuntime::default()
+                    }),
                 );
             }
         }
@@ -2591,6 +3069,31 @@ impl Context {
         target_height: f32,
         style: ImageStyle,
     ) -> ImageState {
+        let source_width = data.width;
+        let source_height = data.height;
+        let source = ImageHandle::from_data(id, data).ok();
+        let source = source.unwrap_or_else(|| ImageHandle::new(id));
+        let mut state = self.image_handle(
+            id,
+            source,
+            target_width,
+            target_height,
+            style,
+        );
+        state.source_width = source_width;
+        state.source_height = source_height;
+        state
+    }
+
+    /// Draws an already-shared source without copying its decoded pixels.
+    pub fn image_handle(
+        &mut self,
+        id: &str,
+        source: ImageHandle,
+        target_width: f32,
+        target_height: f32,
+        style: ImageStyle,
+    ) -> ImageState {
         let width = if target_width.is_finite() && target_width > 0.0 {
             target_width.round() as u32
         } else {
@@ -2609,97 +3112,16 @@ impl Context {
                 ..Style::default()
             },
         );
-        let mut commands = Vec::new();
-        let (columns, rows) = if data.is_valid() && width > 0 && height > 0 {
-            // MyGo's fitIn (`ui/paint.go`): the picture is scaled into the
-            // box as Fit says, and only the part that falls inside it shows.
-            let box_width = width as f32;
-            let box_height = height as f32;
-            let source_width = data.width as f32;
-            let source_height = data.height as f32;
-            // MyGo's Fit fills the box whatever the picture's shape
-            // (`ui/paint.go` fitIn's `case FillBox: return dst, src`), and
-            // scales the rest about the box's middle.
-            let scale = match style.fit {
-                ImageFit::Fill => 1.0,
-                ImageFit::Contain => (box_width / source_width).min(box_height / source_height),
-                ImageFit::Cover => (box_width / source_width).max(box_height / source_height),
-                ImageFit::ScaleDown => (box_width / source_width)
-                    .min(box_height / source_height)
-                    .min(1.0),
-                ImageFit::NaturalSize => 1.0,
-            };
-            let (placed_width, placed_height) = if style.fit == ImageFit::Fill {
-                (box_width, box_height)
-            } else {
-                (source_width * scale, source_height * scale)
-            };
-            let placed_x = (box_width - placed_width) / 2.0;
-            let placed_y = (box_height - placed_height) / 2.0;
-            // MyGo's fitIn takes the source fractions from the unrounded
-            // shown rect and only then snaps that rect to device pixels
-            // (`ui/paint.go`): the sampler still walks the whole fraction
-            // across the snapped box. Rounding the rect before taking the
-            // fractions would shift every sample by the rounding error.
-            let shown_left = placed_x.max(0.0);
-            let shown_top = placed_y.max(0.0);
-            let shown_right = (placed_x + placed_width).min(box_width);
-            let shown_bottom = (placed_y + placed_height).min(box_height);
-            let source_x = (shown_left - placed_x) / placed_width.max(1.0);
-            let source_y = (shown_top - placed_y) / placed_height.max(1.0);
-            let source_fraction_width = (shown_right - shown_left) / placed_width.max(1.0);
-            let source_fraction_height = (shown_bottom - shown_top) / placed_height.max(1.0);
-            let pixel_scale = self.pixel_scale;
-            let snap = |value: f32| (value * pixel_scale).round() / pixel_scale;
-            let shown_x = snap(shown_left);
-            let shown_y = snap(shown_top);
-            let shown_width = snap(shown_right) - shown_x;
-            let shown_height = snap(shown_bottom) - shown_y;
-            if shown_width > 0.0 && shown_height > 0.0 {
-                let mut placed = Vec::new();
-                scaled_rgba_commands_with(
-                    data,
-                    &mut placed,
-                    shown_width,
-                    shown_height,
-                    ImageMask {
-                        radius: Radius::all(style.radius),
-                        origin_x: shown_x - placed_x,
-                        origin_y: shown_y - placed_y,
-                        width: placed_width,
-                        height: placed_height,
-                    },
-                    ImageRegion {
-                        x: source_x,
-                        y: source_y,
-                        width: source_fraction_width,
-                        height: source_fraction_height,
-                    },
-                    style.grayscale,
-                    self.pixel_scale,
-                );
-                for command in placed {
-                    match command {
-                        DrawCommand::Rect {
-                            x,
-                            y,
-                            width: cell_width,
-                            height: cell_height,
-                            color,
-                        } => commands.push(DrawCommand::Rect {
-                            x: x + shown_x,
-                            y: y + shown_y,
-                            width: cell_width,
-                            height: cell_height,
-                            color,
-                        }),
-                        other => commands.push(other),
-                    }
-                }
-            }
-            (shown_width.round() as usize, shown_height.round() as usize)
+        let (commands, columns, rows) = if width > 0 && height > 0 && source.is_resolved() {
+            image_commands(
+                source.clone(),
+                width as f32,
+                height as f32,
+                style,
+                self.pixel_scale,
+            )
         } else {
-            (0, 0)
+            (Vec::new(), 0, 0)
         };
         self.nodes
             .get_mut(&node)
@@ -2712,8 +3134,8 @@ impl Context {
             height,
             columns,
             rows,
-            source_width: data.width,
-            source_height: data.height,
+            source_width: source.data().map_or(0, |data| data.width()),
+            source_height: source.data().map_or(0, |data| data.height()),
         }
     }
 
@@ -8028,15 +8450,25 @@ impl Context {
                 });
             }
             if let Some(data) = data {
-                let (columns, rows) = scaled_rgba_commands(
-                    data,
-                    &mut commands,
-                    size,
-                    size,
-                    shape == AvatarShape::Circle,
-                    self.pixel_scale,
-                );
-                drawn = columns > 0 && rows > 0;
+                if let Ok(source) = ImageHandle::from_data(id, data) {
+                    let (image_commands, columns, rows) = image_commands(
+                        source,
+                        size,
+                        size,
+                        ImageStyle {
+                            fit: ImageFit::Fill,
+                            radius: if shape == AvatarShape::Circle {
+                                size / 2.0
+                            } else {
+                                0.0
+                            },
+                            grayscale: false,
+                        },
+                        self.pixel_scale,
+                    );
+                    commands.extend(image_commands);
+                    drawn = columns > 0 && rows > 0;
+                }
             }
             // MyGo returns an image avatar as soon as it builds the image
             // (`ui/indicators.go` coreAvatar), so initials show only over
@@ -9428,6 +9860,73 @@ impl Context {
         });
     }
 
+    /// Reserves layout space that the host may cover with a system WebView.
+    ///
+    /// The region participates in flex layout like any other node but emits
+    /// no drawing command. [`NativeUi::render`](crate::NativeUi::render)
+    /// records its resolved rectangle, clip and stacking order in
+    /// [`ViewFrame::web_views`](crate::ViewFrame::web_views). The id must be
+    /// stable across frames so the host can keep one native view per region.
+    pub fn web_view(
+        &mut self,
+        id: impl Into<String>,
+        width: f32,
+        height: f32,
+    ) -> WebViewBuilder<'_> {
+        let id = id.into();
+        let node_id = self.new_named_node(
+            &id,
+            Style {
+                width: Some(width.max(0.0)),
+                height: Some(height.max(0.0)),
+                ..Style::default()
+            },
+        );
+        self.pending_web_views.push(PendingWebView {
+            node_id,
+            id,
+            options: WebViewOptions::default(),
+            visible: true,
+        });
+        let index = self.pending_web_views.len() - 1;
+        WebViewBuilder::new(self, node_id, index)
+    }
+
+    pub(crate) fn web_view_options_mut(&mut self, index: usize) -> &mut WebViewOptions {
+        self.pending_web_views
+            .get_mut(index)
+            .map(|pending| &mut pending.options)
+            .expect("WebView builder outlived its registration")
+    }
+
+    pub(crate) fn set_web_view_size(
+        &mut self,
+        node_id: u64,
+        width: Option<f32>,
+        height: Option<f32>,
+    ) {
+        if let Some(node) = self.nodes.get_mut(&node_id) {
+            if let Some(width) = width {
+                node.style.width = Some(width);
+            }
+            if let Some(height) = height {
+                node.style.height = Some(height);
+            }
+        }
+    }
+
+    pub(crate) fn set_web_view_flex_grow(&mut self, node_id: u64, grow: f32) {
+        if let Some(node) = self.nodes.get_mut(&node_id) {
+            node.style.flex_grow = grow;
+        }
+    }
+
+    pub(crate) fn set_web_view_visible(&mut self, index: usize, visible: bool) {
+        if let Some(pending) = self.pending_web_views.get_mut(index) {
+            pending.visible = visible;
+        }
+    }
+
     /// Returns the current layout scope.
     pub fn current_scope(&self) -> &LayoutScope {
         &self.scope
@@ -9435,6 +9934,7 @@ impl Context {
 
     pub(crate) fn begin_frame(&mut self, size: Size) {
         self.available_size = normalize_size(size);
+        self.frame_build_time = Duration::ZERO;
         let now = self.frame_time_override.unwrap_or_else(Instant::now);
         self.frame_time = now.checked_add(self.clock_offset).unwrap_or(now);
         self.frame_serial = self.frame_serial.saturating_add(1);
@@ -9453,6 +9953,7 @@ impl Context {
         self.parent_stack.clear();
         self.explicit_id = None;
         self.pending_interactions.clear();
+        self.pending_web_views.clear();
         self.pending_focusables.clear();
         self.current_focus_key = None;
         self.pending_access_nodes.clear();
@@ -9462,6 +9963,11 @@ impl Context {
         self.frame_overlays.clear();
         self.pending_focus_layer = None;
         self.requested_animation = false;
+        self.frame_scheduler.reset();
+    }
+
+    pub(crate) fn set_frame_build_time(&mut self, elapsed: Duration) {
+        self.frame_build_time = elapsed;
     }
 
     pub(crate) fn set_input(&mut self, event: UiEvent) {
@@ -9476,6 +9982,7 @@ impl Context {
                 self.focus_visible = false;
                 if button == crate::event::PointerButton::Left {
                     self.input.pointer_down = true;
+                    self.input.pressed = Some(Point::new(x, y));
                     self.input.released = None;
                 } else {
                     self.input.secondary_pressed = Some(Point::new(x, y));
@@ -9494,6 +10001,22 @@ impl Context {
             }
             UiEvent::TextInput { text } => {
                 self.input.text.push_str(&text);
+            }
+            UiEvent::CompositionStart { text, cursor } => {
+                self.input
+                    .compositions
+                    .push(CompositionInput::Start { text, cursor });
+            }
+            UiEvent::CompositionUpdate { text, cursor } => {
+                self.input
+                    .compositions
+                    .push(CompositionInput::Update { text, cursor });
+            }
+            UiEvent::CompositionCommit { text } => {
+                self.input.compositions.push(CompositionInput::Commit { text });
+            }
+            UiEvent::CompositionCancel => {
+                self.input.compositions.push(CompositionInput::Cancel);
             }
             UiEvent::Focus { id } => {
                 self.focused_id = Some(id);
@@ -9514,10 +10037,12 @@ impl Context {
 
     pub(crate) fn end_frame(&mut self) {
         self.input.released = None;
+        self.input.pressed = None;
         self.input.secondary_pressed = None;
         self.input.wheel = (0.0, 0.0);
         self.input.text.clear();
         self.input.keys.clear();
+        self.input.compositions.clear();
     }
 
     #[cfg(test)]
@@ -9617,10 +10142,20 @@ impl Context {
         for command in &display.commands {
             counts.record(command);
         }
+        let unsupported_commands = display
+            .commands
+            .iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    DrawCommand::Image { source, .. } if !source.is_resolved()
+                )
+            })
+            .count();
         let stats = RenderStats {
             total_commands: display.len(),
             command_counts: counts,
-            unsupported_commands: counts.unsupported(),
+            unsupported_commands,
             effective_bounds: display.bounds(),
             ..RenderStats::default()
         };
@@ -9643,20 +10178,28 @@ impl Context {
                 })
             })
             .collect::<Vec<_>>();
+        let web_views = self.resolve_web_views(&layout);
         let paint_elapsed = paint_start.elapsed();
         let total_elapsed = total_start.elapsed();
-        self.last_frame_stats =
-            FrameStats::from_durations(layout_elapsed, paint_elapsed, total_elapsed);
+        self.last_frame_stats = FrameStats::from_breakdown(
+            self.frame_build_time,
+            layout_elapsed,
+            paint_elapsed,
+            Duration::ZERO,
+            self.frame_build_time + total_elapsed,
+        );
         Ok(super::native::ViewFrame {
             layout,
             display,
             interactions,
             stats,
             access_nodes,
+            web_views,
             // Filled by the runtime once the frame is produced.
             text_input: None,
             needs_animation_frame: self.needs_animation_frame(),
             input_consumed: false,
+            frame_stats: self.last_frame_stats,
         })
     }
 
@@ -9688,6 +10231,104 @@ impl Context {
             root
         };
         LayoutEngine::compute(&root, self.available_size)
+    }
+
+    /// Resolves WebView regions against the computed layout, including
+    /// ancestor scroll offsets and clip rectangles.
+    fn resolve_web_views(&self, layout: &[LayoutResult]) -> Vec<WebViewRegion> {
+        let window_clip = Rect::new(
+            0.0,
+            0.0,
+            self.available_size.width.max(0.0),
+            self.available_size.height.max(0.0),
+        );
+        let mut resolved = Vec::new();
+        for (order, pending) in self.pending_web_views.iter().enumerate() {
+            let Some(node) = self.nodes.get(&pending.node_id) else {
+                continue;
+            };
+            let Some(result) = layout.iter().find(|result| result.id == pending.node_id) else {
+                continue;
+            };
+            let x = result.x;
+            let mut scroll_offset = 0.0;
+            let mut clip = window_clip;
+            let mut ancestors = Vec::new();
+            let mut ancestor = node.parent;
+            while let Some(parent_id) = ancestor {
+                let Some(parent) = self.nodes.get(&parent_id) else {
+                    break;
+                };
+                ancestors.push((parent_id, parent));
+                ancestor = parent.parent;
+            }
+            // Walk root to leaf so each viewport is shifted by the scroll
+            // offsets of its own ancestors.
+            for (parent_id, parent) in ancestors.into_iter().rev() {
+                if let Some(parent_result) = layout.iter().find(|result| result.id == parent_id) {
+                    if let Some(scroll) = &parent.scroll {
+                        clip = intersect(
+                            clip,
+                            Rect::new(
+                                parent_result.x,
+                                parent_result.y - scroll_offset,
+                                parent_result.width,
+                                scroll.viewport_height.min(parent_result.height),
+                            ),
+                        );
+                        scroll_offset += scroll.offset;
+                    } else if parent.clip {
+                        clip = intersect(
+                            clip,
+                            Rect::new(
+                                parent_result.x,
+                                parent_result.y - scroll_offset,
+                                parent_result.width,
+                                parent_result.height,
+                            ),
+                        );
+                    }
+                }
+            }
+            let bounds = Rect::new(
+                x,
+                result.y - scroll_offset,
+                result.width,
+                result.height,
+            );
+            let visible_area = intersect(bounds, clip);
+            let visible = pending.visible
+                && bounds.width > 0.0
+                && bounds.height > 0.0
+                && visible_area.width > 0.0
+                && visible_area.height > 0.0;
+            resolved.push((
+                node.layer,
+                order,
+                WebViewRegion {
+                    id: pending.id.clone(),
+                    bounds,
+                    clip,
+                    physical_bounds: physical_rect(bounds, self.pixel_scale),
+                    physical_clip: physical_rect(clip, self.pixel_scale),
+                    visible,
+                    z_order: 0,
+                    options: pending.options.clone(),
+                },
+            ));
+        }
+        resolved.sort_by_key(|(layer, order, _)| (*layer, *order));
+        let mut unique = Vec::with_capacity(resolved.len());
+        for (_, _, region) in resolved.into_iter().rev() {
+            if !unique.iter().any(|existing: &WebViewRegion| existing.id == region.id) {
+                unique.push(region);
+            }
+        }
+        unique.reverse();
+        for (index, region) in unique.iter_mut().enumerate() {
+            region.z_order = index as u32;
+        }
+        unique
     }
 
     fn build_node(&self, id: u64) -> Option<Node> {
@@ -9897,16 +10538,11 @@ impl Context {
     fn widget_state_text_field(&mut self, id: &str) {
         if !matches!(
             self.widget_states.get(id),
-            Some(WidgetState::TextField { .. })
+            Some(WidgetState::TextField(_))
         ) {
             self.widget_states.insert(
                 id.to_string(),
-                WidgetState::TextField {
-                    cursor: 0,
-                    anchor: None,
-                    cursor_x: 0.0,
-                    cursor_y: 0.0,
-                },
+                WidgetState::TextField(TextEditRuntime::default()),
             );
         }
     }
@@ -9926,6 +10562,7 @@ impl Context {
             layer: self.current_layer,
             transform: self.current_transform,
             rtl: self.direction.is_rtl(),
+            parent: self.parent_stack.last().copied(),
             fill: None,
             stroke: None,
             clip: false,
@@ -9968,7 +10605,7 @@ impl Context {
         let text = if single_line {
             match max_width {
                 Some(width) if width > 0.0 => {
-                    let cut = truncate_with_ellipsis(text, font_size, width);
+                    let cut = truncate_with_ellipsis(text, font_size, width, mono);
                     truncated = cut != text;
                     cut
                 }
@@ -10278,6 +10915,254 @@ impl Context {
     fn local_pointer_in_previous(&self, id: &str) -> Option<Point> {
         let point = self.input.pointer?;
         self.local_pointer_for(id, point)
+    }
+
+    fn take_text_runtime(&mut self, id: &str, value: &str, now: Instant) -> TextEditRuntime {
+        let mut runtime = match self.widget_states.remove(id) {
+            Some(WidgetState::TextField(runtime)) => runtime,
+            Some(other) => {
+                self.widget_states.insert(id.to_string(), other);
+                TextEditRuntime::default()
+            }
+            None => TextEditRuntime::default(),
+        };
+        runtime.reset_after_external_change(value, now);
+        runtime
+    }
+
+    fn store_text_runtime(&mut self, id: &str, runtime: TextEditRuntime) {
+        self.widget_states
+            .insert(id.to_string(), WidgetState::TextField(runtime));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+    fn text_offset_at(
+        &self,
+        value: &str,
+        x: f32,
+        y: f32,
+        font_size: f32,
+        mono: bool,
+        multiline: bool,
+        line_height: f32,
+        wrap_width: Option<f32>,
+    ) -> usize {
+        #[cfg(not(target_arch = "wasm32"))]
+        if multiline {
+            let spans = visual_line_spans(value, font_size, mono, wrap_width);
+            let line = ((y / line_height.max(f32::EPSILON)).floor() as usize)
+                .min(spans.len().saturating_sub(1));
+            let (start, end) = spans[line];
+            if let Some(layout) = layout_text_shaped(
+                &value[start..end],
+                font_size,
+                None,
+                TextAlignment::Start,
+                mono,
+            ) {
+                return start + layout.source_offset(x, 0.0);
+            }
+            return byte_at_column(value, start, end, (x / font_size.max(1.0)).round() as usize);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(layout) =
+            layout_text_shaped(value, font_size, None, TextAlignment::Start, mono)
+        {
+            return layout.source_offset(x, 0.0);
+        }
+        let mut width = 0.0;
+        for (offset, grapheme) in value.grapheme_indices(true) {
+            let advance = measure_text_width_styled(grapheme, font_size, mono);
+            if x < width + advance / 2.0 {
+                return offset;
+            }
+            width += advance;
+        }
+        value.len()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn text_caret_x(
+        &self,
+        value: &str,
+        offset: usize,
+        font_size: f32,
+        mono: bool,
+        line_start: usize,
+        line_end: usize,
+    ) -> f32 {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(layout) = layout_text_shaped(
+            &value[line_start..line_end],
+            font_size,
+            None,
+            TextAlignment::Start,
+            mono,
+        ) {
+            return layout.caret_x(offset.min(line_end) - line_start);
+        }
+        measure_text_width_styled(&value[line_start..offset.min(line_end)], font_size, mono)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_text_key(
+        &mut self,
+        runtime: &mut TextEditRuntime,
+        value: &mut String,
+        key: Key,
+        single_line: bool,
+        visible_lines: usize,
+        now: Instant,
+        font_size: f32,
+        mono: bool,
+        wrap_width: Option<f32>,
+    ) -> bool {
+        let spans = visual_line_spans(value, font_size, mono, wrap_width);
+        let current_line = line_index(&spans, runtime.cursor);
+        let (line_start, line_end) = spans[current_line];
+        let column = value[line_start..runtime.cursor].chars().count();
+        match key {
+            Key::Backspace => runtime.backspace(value, now),
+            Key::Delete => runtime.delete(value, now),
+            Key::Copy => {
+                if let Some((start, end)) = runtime.selection() {
+                    if let Some(text) = value.get(start..end) {
+                        self.clipboard.write_text(text);
+                    }
+                }
+                false
+            }
+            Key::Cut => {
+                if let Some((start, end)) = runtime.selection() {
+                    let text = value[start..end].to_string();
+                    self.clipboard.write_text(&text);
+                    runtime.replace_selection(value, "", TextEditGroup::Other, now)
+                } else {
+                    false
+                }
+            }
+            Key::Paste => {
+                if let Some(text) = self.clipboard.read_text() {
+                    runtime.replace_selection(value, &text, TextEditGroup::Other, now)
+                } else {
+                    false
+                }
+            }
+            Key::Undo => runtime.undo(value),
+            Key::Redo => runtime.redo(value),
+            Key::SelectAll => {
+                runtime.anchor = Some(0);
+                runtime.cursor = value.len();
+                false
+            }
+            Key::ArrowLeft => {
+                let next = previous_char_boundary(value, runtime.cursor).unwrap_or(0);
+                runtime.move_to(value, next, false);
+                false
+            }
+            Key::ArrowRight => {
+                let next = next_char_boundary(value, runtime.cursor).unwrap_or(value.len());
+                runtime.move_to(value, next, false);
+                false
+            }
+            Key::ShiftArrowLeft => {
+                let next = previous_char_boundary(value, runtime.cursor).unwrap_or(0);
+                runtime.move_to(value, next, true);
+                false
+            }
+            Key::ShiftArrowRight => {
+                let next = next_char_boundary(value, runtime.cursor).unwrap_or(value.len());
+                runtime.move_to(value, next, true);
+                false
+            }
+            Key::WordLeft | Key::ShiftWordLeft => {
+                let next = previous_word_boundary(value, runtime.cursor);
+                runtime.move_to(value, next, matches!(key, Key::ShiftWordLeft));
+                false
+            }
+            Key::WordRight | Key::ShiftWordRight => {
+                let next = next_word_boundary(value, runtime.cursor);
+                runtime.move_to(value, next, matches!(key, Key::ShiftWordRight));
+                false
+            }
+            Key::Home | Key::ShiftHome => {
+                let next = if single_line { 0 } else { line_start };
+                runtime.move_to(value, next, matches!(key, Key::ShiftHome));
+                false
+            }
+            Key::End | Key::ShiftEnd => {
+                let next = if single_line { value.len() } else { line_end };
+                runtime.move_to(value, next, matches!(key, Key::ShiftEnd));
+                false
+            }
+            Key::ArrowUp | Key::ShiftArrowUp | Key::ArrowDown | Key::ShiftArrowDown
+                if !single_line =>
+            {
+                let target = if matches!(key, Key::ArrowUp | Key::ShiftArrowUp) {
+                    current_line.checked_sub(1)
+                } else if current_line + 1 < spans.len() {
+                    Some(current_line + 1)
+                } else {
+                    None
+                };
+                if let Some(target) = target {
+                    let (start, end) = spans[target];
+                    let next = byte_at_column(value, start, end, column);
+                    runtime.move_to(
+                        value,
+                        next,
+                        matches!(key, Key::ShiftArrowUp | Key::ShiftArrowDown),
+                    );
+                }
+                false
+            }
+            Key::PageUp | Key::PageDown => {
+                let rows = visible_lines.max(1);
+                let target = if matches!(key, Key::PageUp) {
+                    current_line.saturating_sub(rows)
+                } else {
+                    (current_line + rows).min(spans.len().saturating_sub(1))
+                };
+                let (start, end) = spans[target];
+                let next = byte_at_column(value, start, end, column);
+                runtime.move_to(value, next, false);
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn apply_composition(
+        &mut self,
+        runtime: &mut TextEditRuntime,
+        value: &mut String,
+        input: CompositionInput,
+        now: Instant,
+    ) -> bool {
+        match input {
+            CompositionInput::Start { text, cursor }
+            | CompositionInput::Update { text, cursor } => {
+                let mut cursor = cursor.unwrap_or(text.len()).min(text.len());
+                while cursor > 0 && !text.is_char_boundary(cursor) {
+                    cursor -= 1;
+                }
+                runtime.composition = Some(CompositionState { text, cursor });
+                false
+            }
+            CompositionInput::Commit { text } => {
+                runtime.composition = None;
+                if text.is_empty() {
+                    false
+                } else {
+                    runtime.replace_selection(value, &text, TextEditGroup::Other, now)
+                }
+            }
+            CompositionInput::Cancel => {
+                runtime.composition = None;
+                false
+            }
+        }
     }
 
     /// Builds an anchored popup above the rest of the view.
@@ -14812,6 +15697,7 @@ struct PendingNode {
     style: Style,
     content_size: Size,
     children: Vec<u64>,
+    parent: Option<u64>,
     commands: Vec<DrawCommand>,
     overlay_commands: Vec<DrawCommand>,
     scroll: Option<ScrollNode>,
@@ -14844,6 +15730,14 @@ struct PendingNode {
 struct ScrollNode {
     offset: f32,
     viewport_height: f32,
+}
+
+/// One WebView region registered during the current frame.
+struct PendingWebView {
+    node_id: u64,
+    id: String,
+    options: WebViewOptions,
+    visible: bool,
 }
 
 /// Builder for a vertical flex container.
@@ -16402,35 +17296,6 @@ fn mix_color(from: Color, to: Color, amount: f32) -> Color {
     )
 }
 
-/// Measures line widths with the host canvas when it exports
-/// `myrust_measure_text`, and with the embedded face otherwise.
-struct HostMeasurer<'a> {
-    font: &'a FontFace,
-}
-
-impl TextMeasurer for HostMeasurer<'_> {
-    fn measure(&self, text: &str, font_size: f32) -> TextMetrics {
-        let font_size = font_size.max(1.0);
-        let line_height = self.font.line_height(font_size);
-        let lines = text.split('\n').collect::<Vec<_>>();
-        let width = lines
-            .iter()
-            .map(|line| {
-                host_text_width(line, font_size).unwrap_or_else(|| {
-                    line.chars()
-                        .map(|character| self.font.glyph_advance(character, font_size))
-                        .sum()
-                })
-            })
-            .fold(0.0_f32, f32::max);
-        TextMetrics {
-            width,
-            height: lines.len().max(1) as f32 * line_height,
-            line_height,
-        }
-    }
-}
-
 fn estimated_text_size(text: &str, font_size: f32, max_width: Option<f32>) -> Size {
     estimated_text_size_styled(text, font_size, max_width, false, 400, None)
 }
@@ -16446,6 +17311,23 @@ fn estimated_text_size_styled(
     weight: u16,
     family: Option<&str>,
 ) -> Size {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(layout) = layout_text_shaped(
+        text,
+        font_size,
+        max_width,
+        TextAlignment::Start,
+        mono,
+    ) {
+        return Size::new(
+            if max_width.is_some_and(|width| width.is_finite() && width > 0.0) {
+                layout.content_width
+            } else {
+                layout.width
+            },
+            layout.height,
+        );
+    }
     // The line box is the styled face's, so a monospace run is measured
     // with the monospace face's ascent and descent, as MyGo lays it
     // (`internal/text/canvas_js.go` font).
@@ -16536,17 +17418,17 @@ fn avatar_initials(name: &str) -> String {
 
 /// Cuts `text` to what fits `max_width`, ending it with an ellipsis, as
 /// MyGo's SingleLine with its default ellipsis does.
-fn truncate_with_ellipsis(text: &str, font_size: f32, max_width: f32) -> String {
-    if measure_text_width(text, font_size) <= max_width {
+fn truncate_with_ellipsis(text: &str, font_size: f32, max_width: f32, mono: bool) -> String {
+    if measure_text_width_styled(text, font_size, mono) <= max_width {
         return text.to_string();
     }
     let ellipsis = "\u{2026}";
-    let ellipsis_width = measure_text_width(ellipsis, font_size);
+    let ellipsis_width = measure_text_width_styled(ellipsis, font_size, mono);
     let mut kept = String::new();
     for character in text.chars() {
         let mut candidate = kept.clone();
         candidate.push(character);
-        if measure_text_width(&candidate, font_size) + ellipsis_width > max_width {
+        if measure_text_width_styled(&candidate, font_size, mono) + ellipsis_width > max_width {
             break;
         }
         kept = candidate;
@@ -16578,7 +17460,18 @@ pub fn measured_text_height_styled(font_size: f32, mono: bool) -> f32 {
 }
 
 pub(crate) fn measure_text_width(text: &str, font_size: f32) -> f32 {
+    measure_text_width_styled(text, font_size, false)
+}
+
+fn measure_text_width_styled(text: &str, font_size: f32, mono: bool) -> f32 {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(layout) = layout_text_shaped(text, font_size, None, TextAlignment::Start, mono) {
+        return layout.width;
+    }
     if let Some(font) = default_font() {
+        if let Some(width) = host_text_width_weighted(text, font_size, false, mono, 400) {
+            return width;
+        }
         if let Some(width) = host_text_width(text, font_size) {
             return width;
         }
@@ -16643,6 +17536,28 @@ fn line_spans(value: &str) -> Vec<(usize, usize)> {
     spans
 }
 
+fn visual_line_spans(
+    value: &str,
+    font_size: f32,
+    mono: bool,
+    wrap_width: Option<f32>,
+) -> Vec<(usize, usize)> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(width) = wrap_width {
+        if let Some(layout) =
+            layout_text_shaped(value, font_size, Some(width), TextAlignment::Start, mono)
+        {
+            return layout
+                .lines
+                .iter()
+                .map(|line| (line.source_start, line.source_end))
+                .collect();
+        }
+    }
+    let _ = (font_size, mono, wrap_width);
+    line_spans(value)
+}
+
 fn line_index(spans: &[(usize, usize)], cursor: usize) -> usize {
     spans
         .iter()
@@ -16675,6 +17590,27 @@ fn next_char_boundary(value: &str, cursor: usize) -> Option<usize> {
         .nth(1)
         .map(|(offset, _)| cursor + offset)
         .or_else(|| (cursor < value.len()).then_some(value.len()))
+}
+
+fn previous_word_boundary(value: &str, cursor: usize) -> usize {
+    value[..cursor]
+        .unicode_word_indices()
+        .next_back()
+        .map_or(0, |(start, _)| start)
+}
+
+fn next_word_boundary(value: &str, cursor: usize) -> usize {
+    value
+        .unicode_word_indices()
+        .find(|(start, word)| *start + word.len() > cursor)
+        .map_or(value.len(), |(start, word)| start + word.len())
+}
+
+fn word_range_at(value: &str, cursor: usize) -> Option<(usize, usize)> {
+    value
+        .unicode_word_indices()
+        .find(|(start, word)| cursor >= *start && cursor <= *start + word.len())
+        .map(|(start, word)| (start, start + word.len()))
 }
 
 
@@ -16752,262 +17688,77 @@ pub struct ImageStyle {
     pub grayscale: bool,
 }
 
-/// The part of an image's source that shows, as fractions of it.
-#[derive(Debug, Clone, Copy)]
-struct ImageRegion {
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-}
-
-impl Default for ImageRegion {
-    fn default() -> Self {
-        Self {
-            x: 0.0,
-            y: 0.0,
-            width: 1.0,
-            height: 1.0,
-        }
+fn image_commands(
+    source: ImageHandle,
+    box_width: f32,
+    box_height: f32,
+    style: ImageStyle,
+    pixel_scale: f32,
+) -> (Vec<DrawCommand>, usize, usize) {
+    let Some(data) = source.data() else {
+        return (Vec::new(), 0, 0);
+    };
+    if data.width() == 0 || data.height() == 0 || box_width <= 0.0 || box_height <= 0.0 {
+        return (Vec::new(), 0, 0);
     }
-}
-
-/// The rounded box an image's cells are masked by, in the image's own
-/// coordinates: MyGo rounds the rect the picture is placed in
-/// (`ui/paint.go` drawBitmap's `p.radii(radius)` on `dst`).
-#[derive(Debug, Clone, Copy, Default)]
-struct ImageMask {
-    /// Corner radii of the placed rect.
-    radius: Radius,
-    /// Where the scaler's own origin sits inside the placed rect.
-    origin_x: f32,
-    /// Where the scaler's own origin sits inside the placed rect.
-    origin_y: f32,
-    /// Width of the placed rect.
-    width: f32,
-    /// Height of the placed rect.
-    height: f32,
-}
-
-impl ImageMask {
-    /// Returns how much of one cell falls inside the rounded rect, from 0
-    /// for none to 1 for all.
-    ///
-    /// A corner's edge is a quarter circle, so a cell that straddles it
-    /// covers a fraction no single distance tells: sampling a 4×4 grid over
-    /// the cell and counting the points inside estimates that area the way
-    /// MyGo's GPU shader antialiases the same edge.
-    fn coverage(&self, x: f32, y: f32, cell_width: f32, cell_height: f32) -> f32 {
-        if self.radius == Radius::default() || self.width <= 0.0 || self.height <= 0.0 {
-            return 1.0;
-        }
-        // The cell in the placed rect's own coordinates.
-        let left = x + self.origin_x;
-        let top = y + self.origin_y;
-        let right = left + cell_width;
-        let bottom = top + cell_height;
-        let limit = self.width.min(self.height) / 2.0;
-        let corners = [
-            (self.radius.top_left.clamp(0.0, limit), false, false),
-            (self.radius.top_right.clamp(0.0, limit), true, false),
-            (self.radius.bottom_right.clamp(0.0, limit), true, true),
-            (self.radius.bottom_left.clamp(0.0, limit), false, true),
-        ];
-        // A corner only reaches into the cell when it straddles that
-        // corner's quadrant.
-        let mut straddled: Vec<(f32, f32, f32, bool, bool)> = Vec::new();
-        for (corner_radius, right_side, bottom_side) in corners {
-            if corner_radius <= 0.0 {
-                continue;
-            }
-            let center_x = if right_side {
-                self.width - corner_radius
-            } else {
-                corner_radius
-            };
-            let center_y = if bottom_side {
-                self.height - corner_radius
-            } else {
-                corner_radius
-            };
-            let in_corner = if right_side {
-                left > center_x
-            } else {
-                right < center_x
-            } && if bottom_side {
-                top > center_y
-            } else {
-                bottom < center_y
-            };
-            if in_corner {
-                straddled.push((center_x, center_y, corner_radius, right_side, bottom_side));
-            }
-        }
-        if straddled.is_empty() {
-            return 1.0;
-        }
-        const STEPS: usize = 4;
-        let mut inside = 0;
-        for row in 0..STEPS {
-            let sample_y = top + cell_height * (row as f32 + 0.5) / STEPS as f32;
-            for column in 0..STEPS {
-                let sample_x = left + cell_width * (column as f32 + 0.5) / STEPS as f32;
-                let covered = straddled
-                    .iter()
-                    .all(|&(center_x, center_y, radius, right_side, bottom_side)| {
-                        let dx = sample_x - center_x;
-                        let dy = sample_y - center_y;
-                        // The arc only cuts the corner's own quadrant; the
-                        // rest of the rect's sides are straight and cover
-                        // the point. A circle's four centers coincide at the
-                        // middle, so the quadrant comes from the corner's
-                        // side, not from where its center falls.
-                        let towards_x = if right_side { dx > 0.0 } else { dx < 0.0 };
-                        let towards_y = if bottom_side { dy > 0.0 } else { dy < 0.0 };
-                        !(towards_x && towards_y) || dx * dx + dy * dy <= radius * radius
-                    });
-                if covered {
-                    inside += 1;
-                }
-            }
-        }
-        inside as f32 / (STEPS * STEPS) as f32
-    }
-}
-
-fn scaled_rgba_commands(
-    data: ImageData<'_>,
-    commands: &mut Vec<DrawCommand>,
-    target_width: f32,
-    target_height: f32,
-    circular_mask: bool,
-    scale: f32,
-) -> (usize, usize) {
-    // A circular mask rounds the whole box by half its width.
-    let mask = if circular_mask {
-        ImageMask {
-            radius: Radius::all(target_width.min(target_height) / 2.0),
-            origin_x: 0.0,
-            origin_y: 0.0,
-            width: target_width,
-            height: target_height,
-        }
+    let source_width = data.width() as f32;
+    let source_height = data.height() as f32;
+    // MyGo's Fit fills the box for Fill and scales the rest about its middle.
+    let scale = match style.fit {
+        ImageFit::Fill => 1.0,
+        ImageFit::Contain => (box_width / source_width).min(box_height / source_height),
+        ImageFit::Cover => (box_width / source_width).max(box_height / source_height),
+        ImageFit::ScaleDown => (box_width / source_width)
+            .min(box_height / source_height)
+            .min(1.0),
+        ImageFit::NaturalSize => 1.0,
+    };
+    let (placed_width, placed_height) = if style.fit == ImageFit::Fill {
+        (box_width, box_height)
     } else {
-        ImageMask::default()
+        (source_width * scale, source_height * scale)
     };
-    scaled_rgba_commands_with(
-        data,
-        commands,
-        target_width,
-        target_height,
-        mask,
-        ImageRegion::default(),
-        false,
-        scale,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-/// Samples an RGBA picture at a fractional position, interpolating between
-/// the four pixels around it, as a GPU texture sampler does.
-fn bilinear_sample(
-    pixels: &[u8],
-    width: usize,
-    height: usize,
-    x: f32,
-    y: f32,
-) -> (u8, u8, u8) {
-    if width == 0 || height == 0 {
-        return (0, 0, 0);
-    }
-    // Pixel centers sit at half-integers, so the sample moves back half a
-    // pixel before it is split into a cell and a weight within it.
-    let sample_x = (x - 0.5).max(0.0);
-    let sample_y = (y - 0.5).max(0.0);
-    let x0 = (sample_x.floor() as usize).min(width - 1);
-    let y0 = (sample_y.floor() as usize).min(height - 1);
-    let x1 = (x0 + 1).min(width - 1);
-    let y1 = (y0 + 1).min(height - 1);
-    let fx = sample_x - sample_x.floor();
-    let fy = sample_y - sample_y.floor();
-    let texel = |px: usize, py: usize, channel: usize| -> f32 {
-        f32::from(pixels[(py * width + px) * 4 + channel])
-    };
-    let mut out = [0_u8; 3];
-    for (channel, slot) in out.iter_mut().enumerate() {
-        let top = texel(x0, y0, channel) * (1.0 - fx) + texel(x1, y0, channel) * fx;
-        let bottom = texel(x0, y1, channel) * (1.0 - fx) + texel(x1, y1, channel) * fx;
-        *slot = (top * (1.0 - fy) + bottom * fy).round() as u8;
-    }
-    (out[0], out[1], out[2])
-}
-
-fn scaled_rgba_commands_with(
-    data: ImageData<'_>,
-    commands: &mut Vec<DrawCommand>,
-    target_width: f32,
-    target_height: f32,
-    mask: ImageMask,
-    region: ImageRegion,
-    grayscale: bool,
-    scale: f32,
-) -> (usize, usize) {
-    if !data.is_valid() {
-        return (0, 0);
-    }
-    // MyGo samples the picture once per device pixel, as its shader runs
-    // over the frame's pixels, not its DIPs.
-    let scale = scale.max(1.0);
-    let columns = ((target_width * scale).round() as usize).clamp(1, 1024);
-    let rows = ((target_height * scale).round() as usize).clamp(1, 1024);
-    let cell_width = target_width / columns as f32;
-    let cell_height = target_height / rows as f32;
-    let source_width = data.width as usize;
-    let source_height = data.height as usize;
-    for row in 0..rows {
-        for column in 0..columns {
-            let coverage = mask.coverage(
-                column as f32 * cell_width,
-                row as f32 * cell_height,
-                cell_width,
-                cell_height,
-            );
-            if coverage <= 0.0 {
-                continue;
-            }
-            let sample_x = region.x * source_width as f32
-                + (column as f32 + 0.5) / columns as f32 * region.width * source_width as f32;
-            let sample_y = region.y * source_height as f32
-                + (row as f32 + 0.5) / rows as f32 * region.height * source_height as f32;
-            // MyGo draws an image as one GPU texture, whose sampler
-            // interpolates between source pixels; sampling each cell's
-            // center bilinearly keeps a scaled picture's gradients and
-            // edges as smooth as that draw, where nearest sampling would
-            // step them.
-            let (mut red, mut green, mut blue) =
-                bilinear_sample(data.pixels, source_width, source_height, sample_x, sample_y);
-            if grayscale {
-                let luma = (0.2126 * f32::from(red) + 0.7152 * f32::from(green) + 0.0722 * f32::from(blue))
-                    .round() as u8;
-                red = luma;
-                green = luma;
-                blue = luma;
-            }
-            let nearest_x = (sample_x as usize).min(source_width - 1);
-            let nearest_y = (sample_y as usize).min(source_height - 1);
-            let alpha_offset = (nearest_y * source_width + nearest_x) * 4 + 3;
-            let alpha = (f32::from(data.pixels[alpha_offset]) * coverage).round() as u8;
-            let color = Color::rgba(red, green, blue, alpha);
-            commands.push(DrawCommand::Rect {
-                x: column as f32 * cell_width,
-                y: row as f32 * cell_height,
-                width: cell_width,
-                height: cell_height,
-                color,
-            });
+    let placed_x = (box_width - placed_width) / 2.0;
+    let placed_y = (box_height - placed_height) / 2.0;
+    let snap = |value: f32| {
+        if pixel_scale.is_finite() && pixel_scale > 0.0 {
+            (value * pixel_scale).round() / pixel_scale
+        } else {
+            value
         }
+    };
+    let left = snap(placed_x);
+    let top = snap(placed_y);
+    let right = snap(placed_x + placed_width);
+    let bottom = snap(placed_y + placed_height);
+    let image = Rect::new(left, top, right - left, bottom - top);
+    let clip = Rect::new(0.0, 0.0, box_width, box_height);
+    let Some(visible) = image.intersection(clip) else {
+        return (Vec::new(), 0, 0);
+    };
+    if image.width <= 0.0 || image.height <= 0.0 {
+        return (Vec::new(), 0, 0);
     }
-    (columns, rows)
+    let commands = vec![
+        DrawCommand::ScissorPush { rect: clip },
+        DrawCommand::Image {
+            x: image.x,
+            y: image.y,
+            width: image.width,
+            height: image.height,
+            source,
+            source_rect: ImageSourceRect::default(),
+            radius: Radius::all(style.radius.max(0.0)),
+            grayscale: style.grayscale,
+        },
+        DrawCommand::ScissorPop,
+    ];
+    let output_scale = pixel_scale.max(1.0);
+    (
+        commands,
+        ((visible.width * output_scale).round() as usize).clamp(1, 1024),
+        ((visible.height * output_scale).round() as usize).clamp(1, 1024),
+    )
 }
 
 #[cfg(test)]
@@ -17308,6 +18059,331 @@ mod tests {
             context.produce().unwrap();
             context.end_frame();
         }
+    }
+
+    #[test]
+    fn text_selection_clipboard_and_undo_redo_share_one_model() {
+        let mut context = Context::new(Size::new(320.0, 120.0));
+        let mut value = "alpha beta".to_string();
+        context.begin_frame(Size::new(320.0, 120.0));
+        context.request_focus("editor");
+        context.text_field("editor", &mut value);
+        context.produce().unwrap();
+        context.end_frame();
+
+        context.begin_frame(Size::new(320.0, 120.0));
+        context.set_text_input_selection("editor", 0, 5);
+        context.set_input(UiEvent::Key { key: Key::Copy });
+        context.text_field("editor", &mut value);
+        context.produce().unwrap();
+        context.end_frame();
+
+        context.begin_frame(Size::new(320.0, 120.0));
+        context.set_input(UiEvent::Key { key: Key::End });
+        context.text_field("editor", &mut value);
+        context.produce().unwrap();
+        context.end_frame();
+
+        context.begin_frame(Size::new(320.0, 120.0));
+        context.set_input(UiEvent::Key { key: Key::Paste });
+        let pasted = context.text_field("editor", &mut value);
+        assert_eq!(value, "alpha betaalpha");
+        assert_eq!(pasted.cursor, value.len());
+        context.produce().unwrap();
+        context.end_frame();
+
+        context.begin_frame(Size::new(320.0, 120.0));
+        context.set_input(UiEvent::Key { key: Key::Undo });
+        context.text_field("editor", &mut value);
+        assert_eq!(value, "alpha beta");
+        context.produce().unwrap();
+        context.end_frame();
+
+        context.begin_frame(Size::new(320.0, 120.0));
+        context.set_input(UiEvent::Key { key: Key::Redo });
+        context.text_field("editor", &mut value);
+        assert_eq!(value, "alpha betaalpha");
+        context.produce().unwrap();
+        context.end_frame();
+
+        context.begin_frame(Size::new(320.0, 120.0));
+        context.set_text_input_selection("editor", 6, 10);
+        context.set_input(UiEvent::Key { key: Key::Cut });
+        context.text_field("editor", &mut value);
+        assert_eq!(value, "alpha alpha");
+        context.produce().unwrap();
+        context.end_frame();
+
+        context.begin_frame(Size::new(320.0, 120.0));
+        context.set_text_input_selection("editor", 6, 6);
+        context.set_input(UiEvent::Key { key: Key::Paste });
+        context.text_field("editor", &mut value);
+        assert_eq!(value, "alpha betaalpha");
+        context.produce().unwrap();
+        context.end_frame();
+    }
+
+    #[test]
+    fn consecutive_typing_is_one_undo_transaction() {
+        let mut context = Context::new(Size::new(260.0, 120.0));
+        let mut value = String::new();
+        context.begin_frame(Size::new(260.0, 120.0));
+        context.request_focus("editor");
+        context.text_field("editor", &mut value);
+        context.produce().unwrap();
+        context.end_frame();
+
+        for character in ["a", "b", "c"] {
+            context.advance_frame_time_for_test(Duration::from_millis(100));
+            context.begin_frame(Size::new(260.0, 120.0));
+            context.set_input(UiEvent::TextInput {
+                text: character.to_string(),
+            });
+            context.text_field("editor", &mut value);
+            context.produce().unwrap();
+            context.end_frame();
+        }
+        assert_eq!(value, "abc");
+
+        context.begin_frame(Size::new(260.0, 120.0));
+        context.set_input(UiEvent::Key { key: Key::Undo });
+        context.text_field("editor", &mut value);
+        assert_eq!(value, "");
+        context.produce().unwrap();
+        context.end_frame();
+
+        context.begin_frame(Size::new(260.0, 120.0));
+        context.set_input(UiEvent::Key { key: Key::Redo });
+        context.text_field("editor", &mut value);
+        assert_eq!(value, "abc");
+    }
+
+    #[test]
+    fn composition_preedit_renders_and_commit_replaces_selection() {
+        let mut context = Context::new(Size::new(320.0, 120.0));
+        let mut value = "hello".to_string();
+        context.begin_frame(Size::new(320.0, 120.0));
+        context.request_focus("editor");
+        context.text_field("editor", &mut value);
+        context.produce().unwrap();
+        context.end_frame();
+
+        context.begin_frame(Size::new(320.0, 120.0));
+        context.set_text_input_selection("editor", 1, 4);
+        context.set_input(UiEvent::CompositionStart {
+            text: "にほ".to_string(),
+            cursor: Some("にほ".len()),
+        });
+        context.text_field("editor", &mut value);
+        assert_eq!(value, "hello");
+        let runtime = match context.widget_states.get("editor") {
+            Some(WidgetState::TextField(runtime)) => runtime,
+            _ => panic!("text runtime"),
+        };
+        assert_eq!(
+            runtime.composition.as_ref().map(|state| state.text.as_str()),
+            Some("にほ")
+        );
+        let node = context
+            .nodes
+            .values()
+            .find(|node| node.key.as_deref() == Some("editor"))
+            .expect("text node");
+        assert!(node
+            .commands
+            .iter()
+            .any(|command| matches!(command, DrawCommand::Line { .. })));
+        context.produce().unwrap();
+        context.end_frame();
+
+        context.begin_frame(Size::new(320.0, 120.0));
+        context.set_input(UiEvent::CompositionCommit {
+            text: "日本".to_string(),
+        });
+        let state = context.text_field("editor", &mut value);
+        assert_eq!(value, "h日本o");
+        assert_eq!(state.cursor, "h日本".len());
+        let runtime = match context.widget_states.get("editor") {
+            Some(WidgetState::TextField(runtime)) => runtime,
+            _ => panic!("text runtime"),
+        };
+        assert!(runtime.composition.is_none());
+        context.produce().unwrap();
+        context.end_frame();
+
+        context.begin_frame(Size::new(320.0, 120.0));
+        context.set_input(UiEvent::CompositionStart {
+            text: "かな".to_string(),
+            cursor: Some("か".len()),
+        });
+        context.text_field("editor", &mut value);
+        assert_eq!(value, "h日本o");
+        context.produce().unwrap();
+        context.end_frame();
+
+        context.begin_frame(Size::new(320.0, 120.0));
+        context.set_input(UiEvent::CompositionCancel);
+        context.text_field("editor", &mut value);
+        assert_eq!(value, "h日本o");
+        let runtime = match context.widget_states.get("editor") {
+            Some(WidgetState::TextField(runtime)) => runtime,
+            _ => panic!("text runtime"),
+        };
+        assert!(runtime.composition.is_none());
+    }
+
+    #[test]
+    fn text_area_composition_uses_the_shared_edit_model() {
+        let mut context = Context::new(Size::new(320.0, 160.0));
+        let mut value = "ab\ncd".to_string();
+        context.begin_frame(Size::new(320.0, 160.0));
+        context.request_focus("area");
+        context.text_area("area", &mut value, 3);
+        context.produce().unwrap();
+        context.end_frame();
+
+        context.begin_frame(Size::new(320.0, 160.0));
+        context.set_text_input_selection("area", 3, 4);
+        context.set_input(UiEvent::CompositionStart {
+            text: "かな".to_string(),
+            cursor: Some("か".len()),
+        });
+        context.text_area("area", &mut value, 3);
+        assert_eq!(value, "ab\ncd");
+        context.produce().unwrap();
+        context.end_frame();
+
+        context.begin_frame(Size::new(320.0, 160.0));
+        context.set_input(UiEvent::CompositionCommit {
+            text: "\u{304b}\u{306a}".to_string(),
+        });
+        let state = context.text_area("area", &mut value, 3);
+        assert_eq!(value, "ab\n\u{304b}\u{306a}d");
+        assert_eq!(state.cursor, "ab\n\u{304b}\u{306a}".len());
+    }
+
+    #[test]
+    fn text_area_editing_uses_shaped_soft_wrap_lines() {
+        let mut context = Context::new(Size::new(140.0, 180.0));
+        let mut value = "0123456789abcdefghijklmnopqrstuvwxyz".to_string();
+        context.begin_frame(Size::new(140.0, 180.0));
+        context.request_focus("area");
+        context.text_area("area", &mut value, 5);
+        context.produce().unwrap();
+        context.end_frame();
+
+        context.begin_frame(Size::new(140.0, 180.0));
+        context.set_text_input_selection("area", value.len(), value.len());
+        let end = context.text_area("area", &mut value, 5).cursor;
+        context.produce().unwrap();
+        context.end_frame();
+        assert_eq!(end, value.len());
+
+        context.begin_frame(Size::new(140.0, 180.0));
+        context.set_input(UiEvent::Key { key: Key::ArrowUp });
+        let up = context.text_area("area", &mut value, 5).cursor;
+        context.produce().unwrap();
+        context.end_frame();
+        assert!(up < end);
+
+        context.begin_frame(Size::new(140.0, 180.0));
+        context.set_input(UiEvent::Key { key: Key::Home });
+        let home = context.text_area("area", &mut value, 5).cursor;
+        assert!(home > 0);
+        assert!(home < up);
+    }
+
+    #[test]
+    fn spring_animation_uses_frame_time_and_stops_requesting_frames() {
+        let mut context = Context::new(Size::new(100.0, 100.0));
+        context.begin_frame(Size::new(100.0, 100.0));
+        let initial = context.animate_spring_with(
+            "spring",
+            1.0,
+            Spring::default().with_rest_thresholds(0.01, 0.01),
+        );
+        assert_eq!(initial, 1.0);
+        context.end_frame();
+
+        context.advance_frame_time_for_test(Duration::from_millis(16));
+        context.begin_frame(Size::new(100.0, 100.0));
+        let first = context.animate_spring_with(
+            "spring",
+            0.0,
+            Spring::default().with_rest_thresholds(0.01, 0.01),
+        );
+        assert!(first < 1.0);
+        assert!(context.next_animation_frame().is_some());
+        context.end_frame();
+
+        let mut value = first;
+        for _ in 0..240 {
+            context.advance_frame_time_for_test(Duration::from_millis(16));
+            context.begin_frame(Size::new(100.0, 100.0));
+            value = context.animate_spring_with(
+                "spring",
+                0.0,
+                Spring::default().with_rest_thresholds(0.01, 0.01),
+            );
+            context.end_frame();
+            if value.abs() < 0.001 && context.next_animation_frame().is_none() {
+                break;
+            }
+        }
+        assert!((value - 0.0).abs() < 0.01);
+        context.begin_frame(Size::new(100.0, 100.0));
+        assert_eq!(
+            context.animate_spring_with(
+                "spring",
+                0.0,
+                Spring::default().with_rest_thresholds(0.01, 0.01)
+            ),
+            0.0
+        );
+        assert!(context.next_animation_frame().is_none());
+    }
+
+    #[test]
+    fn reduced_motion_spring_jumps_to_target() {
+        let mut context = Context::new(Size::new(100.0, 100.0));
+        context.set_reduce_motion_for_test(true);
+        context.begin_frame(Size::new(100.0, 100.0));
+        assert_eq!(context.animate_spring("spring", 3.0), 3.0);
+        assert!(context.next_animation_frame().is_none());
+    }
+
+    #[test]
+    fn pointer_drag_selects_text_through_the_shaped_layout() {
+        let mut context = Context::new(Size::new(320.0, 120.0));
+        let mut value = "hello shaped world".to_string();
+        context.begin_frame(Size::new(320.0, 120.0));
+        context.text_field("editor", &mut value);
+        let frame = context.produce().unwrap();
+        context.end_frame();
+        let bounds = frame.interactions[0].bounds;
+        let y = bounds.y + bounds.height / 2.0;
+
+        context.begin_frame(Size::new(320.0, 120.0));
+        context.set_input(UiEvent::PointerPressed {
+            x: bounds.x + 18.0,
+            y,
+            button: crate::event::PointerButton::Left,
+        });
+        context.text_field("editor", &mut value);
+        context.produce().unwrap();
+        context.end_frame();
+
+        context.begin_frame(Size::new(320.0, 120.0));
+        context.set_input(UiEvent::PointerMoved {
+            x: bounds.x + 120.0,
+            y,
+        });
+        let state = context.text_field("editor", &mut value);
+        let input = context.text_input_state("editor").unwrap();
+        assert!(input.selection.is_some());
+        assert!(state.cursor > input.selection.unwrap().0);
+        context.produce().unwrap();
+        context.end_frame();
     }
 
 

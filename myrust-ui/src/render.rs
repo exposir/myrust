@@ -20,6 +20,13 @@ mod wgpu_backend;
 
 pub use damage::{diff, Damage};
 
+pub(crate) fn command_device_bounds(
+    command: &DrawCommand,
+    transform: TransformMatrix,
+) -> Option<Rect> {
+    damage::command_device_bounds(command, transform)
+}
+
 #[cfg(feature = "gpu")]
 pub use gpu_scene::GpuScene;
 
@@ -140,12 +147,13 @@ impl CommandCounts {
             + self.transform_pop
     }
 
-    /// Returns commands that this batch cannot draw yet.
+    /// Returns commands that this counter cannot classify as unsupported.
     ///
-    /// Text and SVG paths are now drawn by the CPU presenter; images remain
-    /// unsupported because the display list carries only a source handle.
+    /// Image support depends on whether the source carries decoded pixels,
+    /// which is not represented in a command count. Renderers report those
+    /// unresolved sources separately.
     pub fn unsupported(self) -> usize {
-        self.image
+        0
     }
 
     pub(crate) fn record(&mut self, command: &DrawCommand) {
@@ -176,7 +184,7 @@ pub struct RenderStats {
     pub total_commands: usize,
     /// Counts split by command kind.
     pub command_counts: CommandCounts,
-    /// Image commands that were not rendered.
+    /// Image commands whose source carried no decoded pixels.
     pub unsupported_commands: usize,
     /// GPU draw calls issued. Always zero for the software backend.
     pub draw_calls: usize,
@@ -190,6 +198,14 @@ pub struct RenderStats {
     pub effective_bounds: Option<Rect>,
     /// Scissor state used for the most recent supported geometry command.
     pub effective_scissor: Option<Rect>,
+    /// Pixels actually touched by the CPU presenter in the last pass.
+    pub rasterized_pixels: u64,
+    /// Display-list commands consumed by the CPU presenter in the last pass.
+    pub rasterized_commands: usize,
+    /// CPU glyph bitmap cache hits in the last pass.
+    pub glyph_cache_hits: u64,
+    /// CPU glyph bitmap cache misses in the last pass.
+    pub glyph_cache_misses: u64,
 }
 
 /// Renderer interface independent of any concrete graphics API.
@@ -208,11 +224,10 @@ pub trait Renderer {
 
     /// Renders one display list and returns observable statistics.
     ///
-    /// Image commands are not drawable in this batch. Text and SVG paths are
-    /// analyzed by the software renderer and drawn by the CPU presenter.
-    /// Implementations report them through [`RenderStats::unsupported_commands`]
-    /// and the corresponding [`CommandCounts`] fields instead of silently
-    /// discarding them.
+    /// Text and SVG paths are analyzed by the software renderer and drawn by
+    /// the CPU presenter. Image commands with resolved sources contribute
+    /// bounds; unresolved legacy handles are counted in
+    /// [`RenderStats::unsupported_commands`].
     fn render(&mut self, display_list: &DisplayList) -> Result<RenderStats, RenderError>;
 }
 
@@ -440,7 +455,20 @@ fn analyze_display_list(display_list: &DisplayList) -> Result<RenderStats, Rende
                     command: "ScissorPop",
                 })?;
             }
-            DrawCommand::Text { .. } | DrawCommand::SvgPath { .. } | DrawCommand::Image { .. } => {}
+            DrawCommand::Text { .. } | DrawCommand::SvgPath { .. } => {}
+            DrawCommand::Image { source, .. } => {
+                if !source.is_resolved() {
+                    stats.unsupported_commands += 1;
+                    continue;
+                }
+                if let Some(bounds) = command_bounds(command) {
+                    let transformed = transform.transform_rect(bounds);
+                    stats.effective_scissor = scissor;
+                    if let Some(clipped) = clip_bounds(transformed, scissor) {
+                        include_bounds(&mut stats.effective_bounds, clipped);
+                    }
+                }
+            }
             _ => {
                 if let Some(bounds) = command_bounds(command) {
                     let transformed = transform.transform_rect(bounds);
@@ -452,8 +480,6 @@ fn analyze_display_list(display_list: &DisplayList) -> Result<RenderStats, Rende
             }
         }
     }
-
-    stats.unsupported_commands = stats.command_counts.unsupported();
     Ok(stats)
 }
 
@@ -486,6 +512,13 @@ fn command_bounds(command: &DrawCommand) -> Option<Rect> {
             width,
             height,
             ..
+        }
+        | DrawCommand::Image {
+            x,
+            y,
+            width,
+            height,
+            ..
         } => Some(Rect::new(*x, *y, *width, *height)),
         DrawCommand::Circle { x, y, radius, .. } => Some(Rect::new(
             *x - *radius,
@@ -511,7 +544,6 @@ fn command_bounds(command: &DrawCommand) -> Option<Rect> {
         }
         DrawCommand::Text { .. }
         | DrawCommand::SvgPath { .. }
-        | DrawCommand::Image { .. }
         | DrawCommand::ScissorPush { .. }
         | DrawCommand::ScissorPop
         | DrawCommand::TransformPush { .. }
@@ -588,6 +620,26 @@ impl TransformMatrix {
             self.m11 * point.x + self.m12 * point.y + self.tx,
             self.m21 * point.x + self.m22 * point.y + self.ty,
         )
+    }
+
+    pub(crate) fn inverse(self) -> Option<Self> {
+        let determinant = self.m11 * self.m22 - self.m12 * self.m21;
+        if determinant.abs() <= f32::EPSILON {
+            return None;
+        }
+        let inverse = 1.0 / determinant;
+        let m11 = self.m22 * inverse;
+        let m12 = -self.m12 * inverse;
+        let m21 = -self.m21 * inverse;
+        let m22 = self.m11 * inverse;
+        Some(Self {
+            m11,
+            m12,
+            m21,
+            m22,
+            tx: -(m11 * self.tx + m12 * self.ty),
+            ty: -(m21 * self.tx + m22 * self.ty),
+        })
     }
 
     /// Applies only the linear part, for direction vectors.
@@ -667,7 +719,10 @@ pub(crate) fn color_to_array(color: Color) -> [f32; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paint::{Color, GradientStop, ImageHandle, Radius, SvgPath, TextAlignment};
+    use crate::image::ImageHandle;
+    use crate::paint::{
+        Color, GradientStop, ImageSourceRect, Radius, SvgPath, TextAlignment,
+    };
 
     fn test_size() -> RenderSize {
         RenderSize::new(320, 200)
@@ -757,6 +812,9 @@ mod tests {
                 width: 10.0,
                 height: 10.0,
                 source: ImageHandle::new("test-image"),
+                source_rect: ImageSourceRect::default(),
+                radius: Radius::default(),
+                grayscale: false,
             },
             DrawCommand::ScissorPush {
                 rect: Rect::new(0.0, 0.0, 50.0, 50.0),

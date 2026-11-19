@@ -34,6 +34,28 @@ function lineHeightOf(ctx) {
   return m;
 }
 
+// imageCanvasCache turns the wasm command's RGBA bytes into a canvas the
+// browser can sample. The key contains the source id and content version, so
+// a changed picture replaces the cached canvas without watching the id.
+var imageCanvasCache = new Map();
+function imageCanvasFor(id, version, width, height, pixels) {
+  var key = id + "|" + version + "|" + width + "x" + height;
+  var hit = imageCanvasCache.get(key);
+  if (hit) return hit;
+  var c = document.createElement("canvas");
+  c.width = width;
+  c.height = height;
+  var ictx = c.getContext("2d", { willReadFrequently: true });
+  var image = ictx.createImageData(width, height);
+  image.data.set(pixels);
+  ictx.putImageData(image, 0, 0);
+  imageCanvasCache.set(key, c);
+  while (imageCanvasCache.size > 64) {
+    imageCanvasCache.delete(imageCanvasCache.keys().next().value);
+  }
+  return c;
+}
+
 // wrapCanvasText breaks a run at `maxWidth` the way the engine's
 // `layout_text` does: Latin words at whitespace, an oversized word between
 // characters, and CJK one character at a time (no spaces to break at).
@@ -587,7 +609,7 @@ function cssFamilyOf(name) {
       "    float dd = dot(grad, grad);",
       "    float t = dd > 0.0 ? dot(vLocal - vGrad.xy, grad) / dd : 0.0;",
       "    color = texture(uLut, vec2(clamp(t, 0.0, 1.0), 0.5));",
-      "  } else {",
+      "  } else if (kind < 4.5) {",
       "    vec2 uv = (vDev - vGrad.xy) / vGrad.zw;",
       "    vec4 texel = texture(uTex, uv);",
       "    if (kind < 3.5) {",
@@ -595,6 +617,18 @@ function cssFamilyOf(name) {
       "    } else {",
       "      color = vec4(vColor.rgb, texel.a * vColor.a);",
       "    }",
+      "  } else {",
+      "    vec2 uv = vGrad.xy + (vLocal - vRect.xy) / vRect.zw * vGrad.zw;",
+      "    vec4 texel = texture(uTex, clamp(uv, 0.0, 1.0));",
+      "    vec3 rgb = texel.rgb;",
+      "    if (vHalf.x > 0.5) {",
+      "      rgb = vec3(dot(texel.rgb, vec3(0.2126, 0.7152, 0.0722)));",
+      "    }",
+      "    vec2 b = vRect.zw * 0.5;",
+      "    float d = sdRoundBox(vLocal - vRect.xy - b, b, vRadii);",
+      "    cover = clamp(0.5 - d * scale, 0.0, 1.0);",
+      "    color = vec4(rgb, texel.a * cover);",
+      "    cover = 1.0;",
       "  }",
       "  fragColor = vec4(color.rgb, color.a * cover);",
       "  if (fragColor.a <= 0.0) discard;",
@@ -849,6 +883,19 @@ function cssFamilyOf(name) {
         addInstance(rect, r, [1, 1, 1, 1], start.concat(end),
           deviceBox(rect[0], rect[1], rect[2], rect[3], ctm, 1.5), t, 2, t.scale,
           [0, 0, 0, 0], 0);
+        flush();
+      },
+      image: function (entry, rect, radii, source, grayscale, ctm) {
+        var t = transformOf(ctm);
+        if (!t) return;
+        flush();
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, entry.tex);
+        var limit = Math.min(rect[2], rect[3]) / 2;
+        var r = radii.map(function (value) { return Math.max(0, Math.min(value, limit)); });
+        addInstance(rect, r, [1, 1, 1, 1], source,
+          deviceBox(rect[0], rect[1], rect[2], rect[3], ctm, 1.5), t, 5, t.scale,
+          [0, 0, 0, 0], grayscale ? 1 : 0);
         flush();
       },
       mask: function (entry, tint) {
@@ -1263,6 +1310,50 @@ function cssFamilyOf(name) {
           ctx.fill();
           ctx.restore();
         }
+      } else if (tag === 12) { // Image
+        var x = view.getFloat32(state.off, true); state.off += 4;
+        var y = view.getFloat32(state.off, true); state.off += 4;
+        var rw = view.getFloat32(state.off, true); state.off += 4;
+        var rh = view.getFloat32(state.off, true); state.off += 4;
+        var rtl = view.getFloat32(state.off, true); state.off += 4;
+        var rtr = view.getFloat32(state.off, true); state.off += 4;
+        var rbr = view.getFloat32(state.off, true); state.off += 4;
+        var rbl = view.getFloat32(state.off, true); state.off += 4;
+        var sx = view.getFloat32(state.off, true); state.off += 4;
+        var sy = view.getFloat32(state.off, true); state.off += 4;
+        var sw = view.getFloat32(state.off, true); state.off += 4;
+        var sh = view.getFloat32(state.off, true); state.off += 4;
+        var grayscale = bytes[state.off++] === 1;
+        var idLen = view.getUint32(state.off, true); state.off += 4;
+        var id = new TextDecoder().decode(bytes.subarray(state.off, state.off + idLen));
+        state.off += idLen;
+        var versionLow = view.getUint32(state.off, true); state.off += 4;
+        var versionHigh = view.getUint32(state.off, true); state.off += 4;
+        var imageWidth = view.getUint32(state.off, true); state.off += 4;
+        var imageHeight = view.getUint32(state.off, true); state.off += 4;
+        var pixelLen = view.getUint32(state.off, true); state.off += 4;
+        var pixels = bytes.subarray(state.off, state.off + pixelLen);
+        state.off += pixelLen;
+        if (rw > 0 && rh > 0 && imageWidth > 0 && imageHeight > 0 &&
+            pixelLen >= imageWidth * imageHeight * 4 && sw > 0 && sh > 0) {
+          var image = imageCanvasFor(id, versionHigh + ":" + versionLow,
+            imageWidth, imageHeight, pixels);
+          if (window.__lastCommands) window.__lastCommands.push({
+            t: "Image", raw: [x, y, rw, rh], rad: [rtl, rtr, rbr, rbl],
+            source: [sx, sy, sw, sh], grayscale: grayscale, ctm: ctm.slice()
+          });
+          ctx.save();
+          if (rtl > 0 || rtr > 0 || rbr > 0 || rbl > 0) {
+            roundedPath(ctx, x, y, rw, rh, [rtl, rtr, rbr, rbl]);
+            ctx.clip();
+          }
+          ctx.filter = grayscale ? "grayscale(1)" : "none";
+          ctx.drawImage(image,
+            sx * imageWidth, sy * imageHeight, sw * imageWidth, sh * imageHeight,
+            x, y, rw, rh);
+          ctx.filter = "none";
+          ctx.restore();
+        }
       } else {
         throw new Error("unknown canvas2D command tag " + tag);
       }
@@ -1643,6 +1734,51 @@ function cssFamilyOf(name) {
             if (entry) glr.mask(entry, scol);
           }
         }
+      } else if (tag === 12) { // Image
+        var x = view.getFloat32(state.off, true); state.off += 4;
+        var y = view.getFloat32(state.off, true); state.off += 4;
+        var rw = view.getFloat32(state.off, true); state.off += 4;
+        var rh = view.getFloat32(state.off, true); state.off += 4;
+        var rtl = view.getFloat32(state.off, true); state.off += 4;
+        var rtr = view.getFloat32(state.off, true); state.off += 4;
+        var rbr = view.getFloat32(state.off, true); state.off += 4;
+        var rbl = view.getFloat32(state.off, true); state.off += 4;
+        var sx = view.getFloat32(state.off, true); state.off += 4;
+        var sy = view.getFloat32(state.off, true); state.off += 4;
+        var sw = view.getFloat32(state.off, true); state.off += 4;
+        var sh = view.getFloat32(state.off, true); state.off += 4;
+        var grayscale = bytes[state.off++] === 1;
+        var idLen = view.getUint32(state.off, true); state.off += 4;
+        var id = new TextDecoder().decode(bytes.subarray(state.off, state.off + idLen));
+        state.off += idLen;
+        var versionLow = view.getUint32(state.off, true); state.off += 4;
+        var versionHigh = view.getUint32(state.off, true); state.off += 4;
+        var imageWidth = view.getUint32(state.off, true); state.off += 4;
+        var imageHeight = view.getUint32(state.off, true); state.off += 4;
+        var pixelLen = view.getUint32(state.off, true); state.off += 4;
+        var pixels = bytes.subarray(state.off, state.off + pixelLen);
+        state.off += pixelLen;
+        if (rw > 0 && rh > 0 && imageWidth > 0 && imageHeight > 0 &&
+            pixelLen >= imageWidth * imageHeight * 4 && sw > 0 && sh > 0) {
+          var imageKey = "I|" + id + "|" + versionHigh + ":" + versionLow +
+            "|" + imageWidth + "x" + imageHeight;
+          var entry = glr.cachedTexture(imageKey, function () {
+            return {
+              canvas: imageCanvasFor(id, versionHigh + ":" + versionLow,
+                imageWidth, imageHeight, pixels),
+              x0: 0, y0: 0, w: imageWidth, h: imageHeight
+            };
+          });
+          if (entry) {
+            var ibox = snapRect(ctm, x, y, rw, rh, dpr);
+            if (window.__lastCommands) window.__lastCommands.push({
+              t: "Image", raw: [x, y, rw, rh], box: ibox, rad: [rtl, rtr, rbr, rbl],
+              source: [sx, sy, sw, sh], grayscale: grayscale, ctm: ctm.slice()
+            });
+            glr.image(entry, ibox, [rtl, rtr, rbr, rbl],
+              [sx, sy, sw, sh], grayscale, ctm);
+          }
+        }
       } else {
         throw new Error("unknown WebGL command tag " + tag);
       }
@@ -1790,6 +1926,33 @@ function cssFamilyOf(name) {
     // While an input method owns the keys, leave them to it: arrows move
     // through its candidates, not through the UI.
     if (event.isComposing || event.keyCode === 229) return;
+    if ((event.ctrlKey || event.metaKey) && textFieldFocused()) {
+      var command = event.key.toLowerCase();
+      if (command === "c" || command === "x") {
+        event.preventDefault();
+        wasm.demo_key(command === "c" ? 15 : 16);
+        writeNavigatorClipboard();
+        render();
+        return;
+      }
+      if (command === "v") {
+        event.preventDefault();
+        if (navigator.clipboard && navigator.clipboard.readText) {
+          navigator.clipboard.readText().then(function (text) {
+            setHostClipboard(text || "");
+            wasm.demo_key(17);
+            render();
+          }).catch(function () {
+            wasm.demo_key(17);
+            render();
+          });
+        } else {
+          wasm.demo_key(17);
+          render();
+        }
+        return;
+      }
+    }
     var code = keys[event.key];
     if (code !== undefined) {
       // Inside a text field a space is text; elsewhere it is the Space key,
@@ -1814,14 +1977,66 @@ function cssFamilyOf(name) {
     }
   });
 
+  input.addEventListener("paste", function (event) {
+    if (!textFieldFocused()) return;
+    event.preventDefault();
+    var text = event.clipboardData ? event.clipboardData.getData("text") : "";
+    setHostClipboard(text || "");
+    wasm.demo_key(17);
+    render();
+  });
+
+  var compositionEncoder = new TextEncoder();
+  function sendComposition(kind, value, cursorUtf16) {
+    if (!wasm || !wasm.memory) return;
+    var bytes = compositionEncoder.encode(value || "");
+    var ptr = wasm.demo_host_buffer();
+    new Uint8Array(wasm.memory.buffer, ptr, bytes.length).set(bytes);
+    var cursor = compositionEncoder.encode(
+      (value || "").slice(0, Math.max(0, cursorUtf16 || 0))
+    ).length;
+    wasm.demo_composition(kind, bytes.length, cursor);
+  }
+
+  function setHostClipboard(text) {
+    if (!wasm || !wasm.memory) return;
+    var bytes = compositionEncoder.encode(text || "");
+    var ptr = wasm.demo_host_buffer();
+    new Uint8Array(wasm.memory.buffer, ptr, bytes.length).set(bytes);
+    wasm.demo_clipboard_set(bytes.length);
+  }
+
+  function hostClipboardText() {
+    if (!wasm || !wasm.memory) return "";
+    var length = wasm.demo_clipboard_text();
+    var ptr = wasm.demo_host_buffer();
+    return compositionEncoder.decode(
+      new Uint8Array(wasm.memory.buffer, ptr, length)
+    );
+  }
+
+  function writeNavigatorClipboard() {
+    if (!navigator.clipboard || !navigator.clipboard.writeText) return;
+    navigator.clipboard.writeText(hostClipboardText()).catch(function () {});
+  }
+
   input.addEventListener("compositionstart", function () {
     composing = true;
+    sendComposition(0, input.value, input.selectionStart);
+  });
+
+  input.addEventListener("compositionupdate", function () {
+    sendComposition(1, input.value, input.selectionStart);
   });
 
   input.addEventListener("compositionend", function (event) {
     composing = false;
+    if (event.data) {
+      sendComposition(2, event.data, event.data.length);
+    } else {
+      sendComposition(3, "", 0);
+    }
     input.value = "";
-    if (event.data) sendText(event.data);
   });
 
   function resize() {

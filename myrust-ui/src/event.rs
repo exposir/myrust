@@ -64,6 +64,38 @@ pub enum Key {
     PageUp,
     /// Move to the next page or month.
     PageDown,
+    /// Extend the selection one character left.
+    ShiftArrowLeft,
+    /// Extend the selection one character right.
+    ShiftArrowRight,
+    /// Extend the selection one line up.
+    ShiftArrowUp,
+    /// Extend the selection one line down.
+    ShiftArrowDown,
+    /// Extend the selection to the beginning of the line.
+    ShiftHome,
+    /// Extend the selection to the end of the line.
+    ShiftEnd,
+    /// Move to the previous word boundary.
+    WordLeft,
+    /// Move to the next word boundary.
+    WordRight,
+    /// Extend the selection to the previous word boundary.
+    ShiftWordLeft,
+    /// Extend the selection to the next word boundary.
+    ShiftWordRight,
+    /// Select the whole field.
+    SelectAll,
+    /// Copy the selected text.
+    Copy,
+    /// Cut the selected text.
+    Cut,
+    /// Paste clipboard text.
+    Paste,
+    /// Undo the last edit group.
+    Undo,
+    /// Redo the last undone edit group.
+    Redo,
 }
 
 /// Platform-neutral input emitted by the window integration layer.
@@ -139,6 +171,27 @@ pub enum UiEvent {
         /// Text produced by the keyboard event.
         text: String,
     },
+    /// Input method started a composition.
+    CompositionStart {
+        /// Initial preedit text.
+        text: String,
+        /// Caret byte offset inside the preedit.
+        cursor: Option<usize>,
+    },
+    /// Input method updated the preedit.
+    CompositionUpdate {
+        /// Current preedit text.
+        text: String,
+        /// Caret byte offset inside the preedit.
+        cursor: Option<usize>,
+    },
+    /// Input method committed its text.
+    CompositionCommit {
+        /// Committed text.
+        text: String,
+    },
+    /// Input method cancelled without committing.
+    CompositionCancel,
     /// Named keyboard key with UI navigation semantics.
     Key {
         /// Pressed key.
@@ -150,6 +203,21 @@ pub enum UiEvent {
         /// Widget key.
         id: String,
     },
+}
+
+/// Builds a composition event from the browser demo's numeric phase protocol.
+///
+/// Phases are `0` start, `1` update, `2` commit and `3` cancel. `cursor` is a
+/// UTF-8 byte offset inside `text`.
+pub fn composition_from_phase(phase: u32, text: String, cursor: usize) -> Option<UiEvent> {
+    let cursor = Some(cursor.min(text.len()));
+    Some(match phase {
+        0 => UiEvent::CompositionStart { text, cursor },
+        1 => UiEvent::CompositionUpdate { text, cursor },
+        2 => UiEvent::CompositionCommit { text },
+        3 => UiEvent::CompositionCancel,
+        _ => return None,
+    })
 }
 
 /// Converts physical cursor events into logical UI events.
@@ -382,6 +450,10 @@ impl UiEventRouter {
                 Some(UiAction::TextInput { text: text.clone() })
             }
             UiEvent::TextInput { .. } => None,
+            UiEvent::CompositionStart { .. }
+            | UiEvent::CompositionUpdate { .. }
+            | UiEvent::CompositionCommit { .. }
+            | UiEvent::CompositionCancel => None,
             UiEvent::Key { key } => Some(UiAction::Key { key: *key }),
             // Focus applied by the runtime; the translator reports actions
             // only, and a focus move is not one.
@@ -561,5 +633,25 @@ mod tests {
                 text: "a".to_string()
             })
         );
+    }
+
+    #[test]
+    fn browser_composition_phases_map_to_ui_events() {
+        assert_eq!(
+            composition_from_phase(0, "\u{306b}".to_string(), 3),
+            Some(UiEvent::CompositionStart {
+                text: "\u{306b}".to_string(),
+                cursor: Some(3)
+            })
+        );
+        assert!(matches!(
+            composition_from_phase(2, "\u{65e5}\u{672c}".to_string(), 0),
+            Some(UiEvent::CompositionCommit { .. })
+        ));
+        assert_eq!(
+            composition_from_phase(3, String::new(), 0),
+            Some(UiEvent::CompositionCancel)
+        );
+        assert_eq!(composition_from_phase(9, "x".to_string(), 0), None);
     }
 }

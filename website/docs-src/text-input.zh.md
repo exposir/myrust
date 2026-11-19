@@ -9,13 +9,17 @@ if state.changed {
 
 ## Editing
 
-字符输入在 cursor 插入；Backspace/Delete 删除前后字符，Home/End 跳转，Left/Right 按 UTF-8 字符边界移动。可用 `Context::set_text_input_selection` 设置选区；输入会替换选区。
+字符输入在 cursor 插入；Backspace/Delete 删除前后字符，word/line 移动使用 shaped cluster 映射，支持鼠标与 Shift 选区，输入会替换选区。cut/copy/paste 使用可注入 `ClipboardProvider`；连续键入合并为一个 undo 事务，paste 与删除各自成组。多行编辑使用 `text_area`。
 
-没有 clipboard、undo/redo、IME composition、autofill、密码遮罩或多行编辑。`editable_text` 是就地标签替代。
+`UiEvent::CompositionStart/Update/Commit/Cancel` 驱动 IME preedit。preedit 以 accent 背景和下划线绘制，commit 替换当前选区，cancel 丢弃。Linux 的 tao 层只暴露已提交 IME 文本；浏览器 demo 从 hidden textarea 提供 start/update/end。autofill、dead key 与密码遮罩仍是独立问题。
+
+native preedit 无法由 tao 0.37 提供：Linux 的 `IMContextSimple` 只暴露提交文本，macOS marked text 不转发，Windows 没有 preedit 事件。应用可直接输入 composition 事件；在补丁 tao 或更换事件循环前，内置 native preedit 是已知限制。
+
+浏览器 demo 在可用时把 copy/cut/paste 映射到 `navigator.clipboard`，并把文本存入宿主注入的 `ClipboardProvider`。API 缺失、权限被拒或非安全上下文会回退到内存 provider，页面不报错。
 
 ## The caret
 
-caret 是 measured prefix 宽度处的 1px 线。`TextInputState` 暴露 `cursor`、`selection`、`bounds`、`cursor_x`、`cursor_y`；没有 blink timer 或 caret 动画。
+caret 是 shaped prefix 宽度处的 1px 线，会跟随 preedit 与水平滚动。`TextInputState` 暴露已提交文本的 `cursor`、`selection`、`bounds`、`cursor_x`、`cursor_y`；没有 blink timer 或 caret 动画。
 
 ## Beside the lines
 

@@ -16,6 +16,6 @@ anchor 必须是上一/当前 `Rect`；popover 宽度跟随 anchor，溢出时�
 
 ## Accessibility
 
-popover surface 发出 `Role::Popup`，label 为 overlay id；child 控件/文本保留自己的 node。没有 Popover/Dialog role、expanded 状态、anchor 关系或 AT 桥。
+popover surface 发出 `Role::Popup`，label 为 overlay id；child 控件/文本保留自己的 node。没有 Popover/Dialog role、expanded 状态或 anchor 关系；节点由平台 AccessKit 桥发布，但 overlay stacking 不映射成原生子窗口。
 
-打开时焦点进入 popup layer，关闭恢复；没有平台 accessibility 桥消费。
+打开时焦点进入 popup layer，关闭恢复；平台 accessibility 桥接收焦点与节点状态，但不接收 overlay stacking 语义。

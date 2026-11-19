@@ -39,4 +39,4 @@ overlay 使用自己的顶层与锚点矩形。overlay 内容内的 transform �
 
 CPU presenter 对几何、文字与 SVG path 应用 translation/scale/rotation。支持矩形 scissor，不支持的命令会拒绝，而不是模拟 GPU 效果。
 
-可选 wgpu backend 通过同一薄 renderer 接口消费受支持几何；没有公开的 transform 专用 GPU feature 或 shader。CPU presenter 仍不支持 image。
+可选 wgpu backend 通过同一薄 renderer 接口消费受支持几何；没有公开的 transform 专用 GPU feature 或 shader。图像在 CPU 与 GPU 上使用同一 affine transform 与 scissor 状态。

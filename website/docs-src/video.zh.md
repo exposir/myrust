@@ -1,23 +1,21 @@
-Video 未实现。MyRust 没有 media backend、decoder、audio output 或 video surface；NativeUi 不能播放视频文件/流。
+MyRust 提供由宿主驱动的帧播放，不解码文件、不播放音频、不管理 A/V 时钟或媒体 surface。
 
-## Players
+## Player
 
-没有 video player widget、controls、playlist、subtitle 或 fullscreen player。自定义时钟与帧交换属于应用代码。
+`VideoPlayer` 保存带时间戳的 RGBA 帧，像素复用 `ImageHandle`。宿主解码每一帧并按 pts 推入，然后用自身时钟调用 `advance(dt)`。`current_frame()` 是确定性的：选择 pts 小于等于当前位置的最后一帧。
 
-## Playing
+`play`、`pause`、`seek`、循环与结束状态都不依赖系统时钟。`set_duration` 可选；未设置时使用最后一帧的 pts。循环回绕后仍按时间戳选帧。
 
-没有 play/pause/seek/rate/volume API、buffering 状态、A/V sync 或 hardware surface。系统媒体播放不在 `myrust-ui`。
+## Widget
 
-## Decoders
+`video(context, id, &player, width, height, VideoStyle)` 参与布局，并发出已有的 `DrawCommand::Image`。Fit、圆角与灰度复用 image 管线。帧切换会改变 image 内容版本，因此 CPU/GPU damage 都会重绘视频框。
 
-未链接 H.264/HEVC/VP9/AV1/GIF decoder，也不管理 audio callback/device。调用方可外部解码并把 RGBA8 帧交给 `image`（CPU presenter 仍不渲染 Image 命令）。
+空播放器绘制一像素背景占位；缺失或畸形帧不会让 widget panic。
 
-## System video
+## 宿主职责
 
-真实播放用独立 WebView 窗口中的平台 HTML `<video>`。NativeUi 与 live WebView 不能在同一窗口合成。
+demux、解码、帧节奏、音频、字幕以及平台硬件 surface 都由宿主负责。MyRust 不链接 ffmpeg、gstreamer 或编解码器依赖。native 与 wasm 构建使用同一套原语。
 
 ## Accessibility
 
-没有 Video/Media role、playback value、caption track 或 AT 桥。使用 WebView `<video>` 时 accessibility 来自平台浏览器，不来自 `myrust-ui`。
-
-video 不注册 demo；`/docs-demo` 没有 media surface。
+没有 Video/Media role、playback value、caption track 或 AT 桥。需要平台媒体无障碍能力时，应使用 WebView 的 `<video>` surface。

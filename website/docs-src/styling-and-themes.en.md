@@ -35,4 +35,6 @@ You can build a local palette by cloning a `Theme` and using its fields in the s
 
 On native targets `Theme::system()` asks `dark-light` for light/dark preference; wasm builds always use `Theme::dark()` because they have no platform appearance probe. There is no public callback for live OS theme changes.
 
-Reduce-motion is read from `MYRUST_REDUCE_MOTION` at context creation; high-contrast, transparency and accent-color preferences are not exposed. The desktop can choose a theme at startup, but runtime preference updates require constructing a new UI.
+`myrust_core::desktop::system::AppearancePreferences::detect()` additionally reads accent color, reduced motion and high contrast on macOS and Windows, leaving each field `None` when the platform API is unavailable. Linux does not invent values. `myrust_core::system_theme()` combines light/dark and accent into a `Theme`; reduced-motion and high-contrast values remain on the preferences because `Theme` has no fields for them.
+
+`Context::reduce_motion()` still consumes `MYRUST_REDUCE_MOTION` at context creation. A native host can read `AppearancePreferences` and feed that policy into its own animation decisions; there is no live preference-change callback yet, so runtime updates require constructing a new UI.

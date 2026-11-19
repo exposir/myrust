@@ -9,13 +9,17 @@ if state.changed {
 
 ## Editing
 
-Character input inserts at the cursor; Backspace/Delete remove before/after, Home/End jump, and Left/Right move by UTF-8 char boundary. Selection can be set with `Context::set_text_input_selection`; typing replaces it.
+Character input inserts at the cursor; Backspace/Delete remove before/after, word/line navigation uses the shaped cluster map, mouse and Shift selection are supported, and typing replaces the selection. Cut/copy/paste use an injectable `ClipboardProvider`; consecutive typing is grouped into one undo transaction while paste and deletion are separate groups. Use `text_area` for multiline editing.
 
-There is no clipboard, undo/redo, IME composition, autofill, password masking or multi-line editing. `editable_text` is the in-place label alternative.
+`UiEvent::CompositionStart/Update/Commit/Cancel` drive IME preedit. The preedit is drawn with an accent background and underline, commit replaces the current selection, and cancel discards it. Linux's tao layer exposes committed IME text only; the browser demo supplies start/update/end from its hidden textarea. Autofill, dead keys and password masking remain separate concerns.
+
+Native preedit cannot be supplied by tao 0.37: Linux's `IMContextSimple` exposes commits only, macOS marked text is not forwarded, and Windows has no preedit event. Applications can feed composition events directly; built-in native preedit is a known limitation until tao is patched or the event loop is replaced.
+
+The browser demo maps copy/cut/paste to `navigator.clipboard` when it is available and stores the text in a host-injected `ClipboardProvider`. A missing API, permission denial or non-secure context falls back to the in-memory provider without raising a page error.
 
 ## The caret
 
-The caret is a 1px line at the measured prefix width. `TextInputState` exposes `cursor`, `selection`, `bounds`, `cursor_x` and `cursor_y`; no blink timer or caret animation exists.
+The caret is a 1px line at the shaped prefix width and follows preedit and horizontal scrolling. `TextInputState` exposes the committed `cursor`, `selection`, `bounds`, `cursor_x` and `cursor_y`; no blink timer or caret animation exists.
 
 ## Beside the lines
 

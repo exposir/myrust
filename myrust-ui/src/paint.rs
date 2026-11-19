@@ -5,8 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::image::ImageHandle;
 use super::layout::Point;
-use super::text::{layout_text, ApproximateMeasurer};
+use super::text::{layout_text, layout_text_shaped, ApproximateMeasurer};
 
 /// RGBA color represented by four 8-bit channels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -19,6 +20,12 @@ pub struct Color {
     pub b: u8,
     /// Alpha channel, where 0 is transparent and 255 is opaque.
     pub a: u8,
+}
+
+impl Default for Color {
+    fn default() -> Self {
+        Self::TRANSPARENT
+    }
 }
 
 impl Color {
@@ -213,20 +220,42 @@ pub enum TextAlignment {
     End,
 }
 
-/// Opaque identifier for an image supplied by a later renderer or decoder.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ImageHandle(String);
+/// Normalized source region of an image.
+///
+/// Coordinates and dimensions are fractions of the decoded source image, in
+/// the range `0.0..=1.0`. The default is the whole image.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ImageSourceRect {
+    /// Left source fraction.
+    pub x: f32,
+    /// Top source fraction.
+    pub y: f32,
+    /// Width fraction.
+    pub width: f32,
+    /// Height fraction.
+    pub height: f32,
+}
 
-impl ImageHandle {
-    /// Creates an image handle from a stable source identifier.
-    pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+impl Default for ImageSourceRect {
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        }
     }
+}
 
-    /// Returns the source identifier.
-    pub fn as_str(&self) -> &str {
-        &self.0
+impl ImageSourceRect {
+    /// Creates a normalized source region.
+    pub const fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 }
 
@@ -419,7 +448,8 @@ pub enum DrawCommand {
     },
     /// Text produced from caller-provided strings.
     ///
-    /// No shaping, kerning, or fallback-font selection occurs in this batch.
+    /// Shaping, bidi ordering, wrapping and fallback selection happen in the
+    /// shared text layout consumed by the presenters.
     Text {
         /// Local x coordinate.
         x: f32,
@@ -488,7 +518,7 @@ pub enum DrawCommand {
         /// Ordered color stops.
         stops: Vec<GradientStop>,
     },
-    /// Image drawing instruction. Image decoding and sampling are not implemented.
+    /// Decoded image drawing instruction.
     Image {
         /// Local x coordinate.
         x: f32,
@@ -498,8 +528,17 @@ pub enum DrawCommand {
         width: f32,
         /// Image height.
         height: f32,
-        /// Opaque image source handle.
+        /// Shareable decoded image source.
         source: ImageHandle,
+        /// Normalized part of the source to sample.
+        #[serde(default)]
+        source_rect: ImageSourceRect,
+        /// Corner radii of the destination rectangle.
+        #[serde(default)]
+        radius: Radius,
+        /// Whether to convert sampled pixels to luminance.
+        #[serde(default)]
+        grayscale: bool,
     },
     /// Begins clipping subsequent commands to a rectangle.
     ScissorPush {
@@ -659,27 +698,36 @@ impl DisplayList {
                     y,
                     text,
                     font_size,
+                    mono,
                     max_width,
                     alignment,
                     ..
                 } => {
-                    let lines = layout_text(text, *font_size, *max_width, &ApproximateMeasurer);
-                    let measured_width =
-                        lines.iter().map(|line| line.width).fold(0.0_f32, f32::max);
-                    let measured_height = lines.iter().map(|line| line.line_height).sum();
-                    let maximum =
-                        max_width.and_then(|value| value.is_finite().then_some(value.max(0.0)));
-                    let width = maximum
-                        .map(|value| measured_width.min(value))
-                        .unwrap_or(measured_width);
-                    let x = match (*alignment, maximum) {
-                        (TextAlignment::Center, Some(maximum)) => *x + (maximum - width) / 2.0,
-                        (TextAlignment::End, Some(maximum)) => *x + maximum - width,
-                        _ => *x,
-                    };
+                    let (width, height, x) = layout_text_shaped(
+                        text,
+                        *font_size,
+                        *max_width,
+                        *alignment,
+                        *mono,
+                    )
+                    .map(|layout| {
+                        (
+                            layout.content_width,
+                            layout.height,
+                            *x + layout.content_x,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        let lines =
+                            layout_text(text, *font_size, *max_width, &ApproximateMeasurer);
+                        let measured_width =
+                            lines.iter().map(|line| line.width).fold(0.0_f32, f32::max);
+                        let measured_height = lines.iter().map(|line| line.line_height).sum();
+                        (measured_width, measured_height, *x)
+                    });
                     include_rect(
                         &mut bounds,
-                        current.transform_rect(Rect::new(x, *y, width, measured_height)),
+                        current.transform_rect(Rect::new(x, *y, width, height)),
                     );
                 }
                 DrawCommand::ScissorPush { .. } | DrawCommand::ScissorPop => {}

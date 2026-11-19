@@ -22,7 +22,7 @@ Button fill, border, radius, text and focus ring come from the current `Theme`; 
 
 ## Accessibility
 
-The button emits `Role::Button` with its visible label, no `value`, and the current `focused` boolean. It does not emit a disabled state or shortcut; no platform AT bridge consumes it.
+The button emits `Role::Button` with its visible label, no `value`, and the current `focused` boolean. It does not emit a disabled state or shortcut. The platform AccessKit bridges publish the node on Linux, macOS and Windows.
 
 ## Click actions
 

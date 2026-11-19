@@ -1,4 +1,4 @@
-MyRust 每帧发出 `AccessNode` 元数据。它是 `role`、`label`、`value`、`disabled`、`focused`、`key`、`bounds` 的扁平 vector。Linux 上桌面运行时通过 AccessKit 把它发布到 AT-SPI（`myrust-core` 的 `a11y` feature，默认开启）：screen reader 看到的是一棵以窗口节点为根的树，带 key 的控件接受 `Focus` 与 `Click` 两种 action。macOS 与 Windows 还没有桥。
+MyRust 每帧发出 `AccessNode` 元数据。它是 `role`、`label`、`value`、`disabled`、`focused`、`key`、`bounds` 的扁平 vector。开启 `myrust-core` 的 `a11y` feature（默认开启）后，桌面运行时通过 AccessKit 发布：Linux 用 AT-SPI，macOS 用 NSAccessibility，Windows 用 UI Automation。screen reader 看到的是一棵以窗口标题命名的根节点下的树，带 key 的控件接受 `Focus` 与 `Click` 两种 action。
 
 ```rust
 let frame = ui.render(Size::new(640.0, 360.0))?;
@@ -12,6 +12,8 @@ for node in &frame.access_nodes {
 标准控件从可见文本或固定英文串设置 `label`。`text` 用内容作 label；button 用文本；`text_field` 用 `"text field"`；`checkbox` 用 `"checkbox"`；group 用 `"column"`、`"row"`、`"container"` 或 `"grid"`。
 
 没有公开的 accessible name authoring API、label 关联、description 或 name-from-author。自定义绘制不修改 crate 就无法添加/改变 `AccessNode`。
+
+`myrust-ui::i18n` catalog 可以为 `text` 和 button 提供已翻译的可见 label，但不会自动翻译框架自有的 role label。改变 `I18n` 本身也不会改写已有的 `AccessNode`；视图必须用翻译后的字符串重建。
 
 ## Roles
 
@@ -43,7 +45,7 @@ slider、scroll view、split view、tab list 都不发 orientation 字段。视�
 
 ## Formats of text
 
-所有无障碍文本是纯 `String`。`AccessNode` 没有 markup、language tag、pronunciation、selection range 或富文本属性。
+所有无障碍文本是纯 `String`。shaping、bidi 重排与视觉换行只影响 glyph 位置，无障碍 value 仍是原始逻辑字符串。`AccessNode` 没有 markup、BCP 47 language tag、pronunciation、selection range 或富文本属性，因此 catalog 会改变辅助技术读到的文字，但不会告诉它这些文字属于哪种语言。
 
 ## Lists and tables
 
@@ -83,8 +85,10 @@ slider、scroll view、split view、tab list 都不发 orientation 字段。视�
 
 没有 landmark role、live-region flag、atomic/relevant 属性、错误宣告或 accessibility rule。`AccessNode` 是逐帧扁平列表，不是带关系的语义树。
 
-## Linux 侧的桥
+## 平台桥
 
-桥会映射全部 role，但跳过通用的 `column`/`row`/`grid` 分组节点，保持树可读。每帧整棵发送，由 AccessKit 做 diff 并发出平台事件。Focus action 把键盘焦点移到控件 key，Click action 在节点中心按下并抬起。节点 id 跟随帧内顺序，位置稳定的控件 id 也就稳定。
+三个平台构建同一棵 AccessKit 树。根是 `Window` 节点，label 为原生窗口标题；子节点的 role、label、value、disabled、bounds 与 focused 节点都来自帧内的 `AccessNode` 列表。通用 `column`/`row`/`grid` 分组节点会跳过，保持树可读。每帧整棵发送，由 AccessKit 做 diff 并发出平台事件。Focus action 把键盘焦点移到控件 key，Click action 在节点中心按下并抬起。节点 id 跟随帧内顺序，位置稳定的控件 id 也就稳定。
 
-选中范围、live region 事件、position-in-set、description 和展开状态尚未映射。macOS 需要 NSAccessibility 适配器，Windows 需要 UIA 适配器，两者都未实现。
+Linux 使用 AccessKit 的 AT-SPI 适配器。macOS 在窗口 `NSView` 上安装 subclassing 适配器；Windows 在 `HWND` 上安装同样角色的适配器。两者都在窗口首次显示或获得焦点之前连接。Linux 与 macOS 把运行时的窗口 focus 事件转给适配器；Windows subclass 自己观察 `WM_SETFOCUS`/`WM_KILLFOCUS`。action 回到窗口线程时与 Linux 使用相同的 `AccessRequest`。
+
+选中范围、live region 事件、position-in-set、description 和展开状态尚未映射。关闭 `a11y` 或运行在其他目标时，桥是 no-op，语义节点仍只提供给测试与工具。

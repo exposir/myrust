@@ -8,9 +8,15 @@ description = "Desktop application framework for myrust"
 
 [features]
 default = ["a11y", "gpu"]
-a11y = ["dep:accesskit", "dep:accesskit_unix"]
+a11y = [
+    "dep:accesskit",
+    "dep:accesskit_unix",
+    "dep:accesskit_macos",
+    "dep:accesskit_windows",
+]
 gpu = ["dep:wgpu", "myrust-ui/gpu"]
 devtools = ["wry/devtools"]
+image-decode = ["myrust-ui/image-decode"]
 
 [dependencies]
 myrust-ui = { path = "../myrust-ui" }
@@ -19,6 +25,7 @@ ab_glyph.workspace = true
 anyhow.workspace = true
 arboard.workspace = true
 auto-launch.workspace = true
+base64.workspace = true
 dark-light.workspace = true
 dirs.workspace = true
 flate2.workspace = true
@@ -29,6 +36,7 @@ notify.workspace = true
 notify-rust.workspace = true
 reqwest.workspace = true
 rfd.workspace = true
+ring.workspace = true
 semver.workspace = true
 sha2.workspace = true
 serde.workspace = true
@@ -52,3 +60,21 @@ zip.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk.workspace = true
 accesskit_unix = { version = "0.24", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+accesskit_macos = { workspace = true, optional = true }
+objc2-app-kit = { workspace = true, features = [
+    "NSAccessibility",
+    "NSColor",
+    "NSColorSpace",
+    "NSWorkspace",
+] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+accesskit_windows = { workspace = true, optional = true }
+windows = { workspace = true, features = [
+    "UI_ViewManagement",
+    "Win32_Foundation",
+    "Win32_UI_Accessibility",
+    "Win32_UI_WindowsAndMessaging",
+] }

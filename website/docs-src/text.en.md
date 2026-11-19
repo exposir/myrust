@@ -1,4 +1,4 @@
-Text is measured and wrapped on the CPU without shaping, kerning or font fallback. `text(c, "...")` creates a `TextBuilder`; `max_width` turns wrapping on within that width.
+Text is laid out on the CPU with OpenType shaping, UAX #14 line breaking, Unicode bidi ordering and ordered font fallback. `text(c, "...")` creates a `TextBuilder`; `max_width` turns wrapping on within that width.
 
 ```rust
 use myrust_core::ui::text;
@@ -30,6 +30,8 @@ Markdown internal spans are laid out as adjacent text nodes. For custom inline b
 
 ## Fonts
 
-`FontRegistry::load_bytes` loads a TTF/OpenType face; `default_font` probes common system paths and the CPU presenter can be given an explicit face with `CpuRasterizer::rasterize_with_font`. The wasm demo embeds DejaVu Sans rather than reading a system path.
+`FontRegistry::load_bytes` loads a TTF/OpenType face. `default_font_stack` probes a primary sans face, a monospace face and bounded CJK/emoji/symbol fallback groups; `install_default_font_stack` supplies an explicit stack for hosts without system-font access. `default_font` still returns the primary face for metrics and compatibility. The wasm demo embeds its Geist face rather than reading a system path.
 
-The UI text API has no per-widget font-family selection, no font fallback and no shaping/kerning/bidi reordering. A face is selected at the presenter/test level, not by `TextBuilder`; a missing glyph is counted by the CPU presenter.
+`layout_text_shaped` returns one shared `TextLayout` with visual lines, bidi/font runs and positioned glyphs. CPU rasterization, the GPU glyph atlas and damage bounds consume that same layout, so kerning and fallback cannot change the painted width behind the damage tracker. Explicit `family` selection is still not implemented; the host falls back through its ordered stack, and unsupported code points are counted instead of being hidden.
+
+This batch has no vertical text, justified text, arbitrary OpenType feature controls or full fontconfig/CTFont discovery. The fallback list is fixed and platform-specific, and color-emoji bitmap fonts depend on what the selected outline face can rasterize.

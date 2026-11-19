@@ -155,9 +155,8 @@ impl WgpuRenderer {
         })
     }
 
-    /// Reads the rendered texture back as RGBA rows, for tests.
-    #[cfg(test)]
-    pub(crate) fn read_rgba(&self) -> Option<Vec<u8>> {
+    /// Reads the rendered texture back as RGBA rows.
+    pub fn read_rgba(&self) -> Option<Vec<u8>> {
         read_texture_rgba(
             &self.device,
             &self.queue,
@@ -165,10 +164,52 @@ impl WgpuRenderer {
             self.surface_size,
         )
     }
+
+    /// Renders with an explicit clear color.
+    pub fn render_with_background(
+        &mut self,
+        display_list: &DisplayList,
+        background: Color,
+    ) -> Result<RenderStats, RenderError> {
+        self.render_with_damage_and_background(display_list, &Damage::full(), background)
+    }
+
+    /// Renders into the persistent offscreen texture using explicit damage.
+    pub fn render_with_damage_and_background(
+        &mut self,
+        display_list: &DisplayList,
+        damage: &Damage,
+        background: Color,
+    ) -> Result<RenderStats, RenderError> {
+        super::validate_size(self.surface_size)?;
+        let mut encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("myrust-ui-encoder"),
+            });
+        let stats = self.scene.render(
+            &mut encoder,
+            &self.view,
+            self.surface_size,
+            display_list,
+            damage,
+            background,
+        )?;
+        let submission = self.queue.submit([encoder.finish()]);
+        self.device
+            .poll(PollType::Wait {
+                submission_index: Some(submission),
+                timeout: Some(RENDER_TIMEOUT),
+            })
+            .map_err(|error| RenderError::BackendFailure {
+                message: format!("wgpu render poll failed: {error:?}"),
+            })?;
+        self.last_stats.clone_from(&stats);
+        Ok(stats)
+    }
 }
 
 /// Copies `texture` into a mapped buffer and returns unpadded RGBA rows.
-#[cfg(test)]
 fn read_texture_rgba(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -252,31 +293,11 @@ impl Renderer for WgpuRenderer {
     }
 
     fn render(&mut self, display_list: &DisplayList) -> Result<RenderStats, RenderError> {
-        super::validate_size(self.surface_size)?;
-        let mut encoder = self
-            .device
-            .create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("myrust-ui-encoder"),
-            });
-        let stats = self.scene.render(
-            &mut encoder,
-            &self.view,
-            self.surface_size,
+        self.render_with_damage_and_background(
             display_list,
             &Damage::full(),
             Color::TRANSPARENT,
-        )?;
-        let submission = self.queue.submit([encoder.finish()]);
-        self.device
-            .poll(PollType::Wait {
-                submission_index: Some(submission),
-                timeout: Some(RENDER_TIMEOUT),
-            })
-            .map_err(|error| RenderError::BackendFailure {
-                message: format!("wgpu render poll failed: {error:?}"),
-            })?;
-        self.last_stats.clone_from(&stats);
-        Ok(stats)
+        )
     }
 }
 
@@ -315,7 +336,8 @@ fn create_color_target_with_format(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paint::DrawCommand;
+    use crate::image::{ImageData, ImageHandle};
+    use crate::paint::{DrawCommand, ImageSourceRect, Radius};
 
     fn renderer() -> Option<WgpuRenderer> {
         WgpuRenderer::new(RenderSize::new(64, 64)).ok()
@@ -341,6 +363,90 @@ mod tests {
         };
         assert_eq!(at(12, 12), [255, 0, 0, 255]);
         assert_eq!(at(48, 48), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn offscreen_renderer_samples_image_textures() {
+        let Some(mut renderer) = renderer() else {
+            return;
+        };
+        let pixels = [
+            255_u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        let source =
+            ImageHandle::from_data("gpu-image", ImageData::new(&pixels, 2, 2)).unwrap();
+        let display = DisplayList::from_commands(vec![DrawCommand::Image {
+            x: 0.0,
+            y: 0.0,
+            width: 64.0,
+            height: 64.0,
+            source,
+            source_rect: ImageSourceRect::default(),
+            radius: Radius::default(),
+            grayscale: false,
+        }]);
+        renderer.render(&display).unwrap();
+        let pixels = renderer.read_rgba().expect("image texture reads back");
+        let at = |x: u32, y: u32| {
+            let index = ((y * 64 + x) * 4) as usize;
+            [pixels[index], pixels[index + 1], pixels[index + 2], pixels[index + 3]]
+        };
+        assert_eq!(at(8, 8), [255, 0, 0, 255]);
+        assert_eq!(at(56, 8), [0, 255, 0, 255]);
+        assert_eq!(at(8, 56), [0, 0, 255, 255]);
+        assert_eq!(at(56, 56), [255, 255, 255, 255]);
+        assert_eq!(renderer.last_stats().unsupported_commands, 0);
+    }
+
+    #[test]
+    fn offscreen_renderer_uses_r8_for_opaque_grayscale_images() {
+        let Some(mut renderer) = renderer() else {
+            return;
+        };
+        let pixels = [255_u8, 0, 0, 255];
+        let source =
+            ImageHandle::from_data("gray-image", ImageData::new(&pixels, 1, 1)).unwrap();
+        let display = DisplayList::from_commands(vec![DrawCommand::Image {
+            x: 0.0,
+            y: 0.0,
+            width: 64.0,
+            height: 64.0,
+            source,
+            source_rect: ImageSourceRect::default(),
+            radius: Radius::default(),
+            grayscale: true,
+        }]);
+        renderer.render(&display).unwrap();
+        let pixels = renderer.read_rgba().expect("grayscale texture reads back");
+        let index = ((32 * 64 + 32) * 4) as usize;
+        let gray = pixels[index];
+        assert!((53..=56).contains(&gray), "red luma should be about 54, got {gray}");
+        assert_eq!(pixels[index + 3], 255);
+    }
+
+    #[test]
+    fn offscreen_renderer_preserves_image_alpha() {
+        let Some(mut renderer) = renderer() else {
+            return;
+        };
+        let pixels = [255_u8, 0, 0, 128];
+        let source =
+            ImageHandle::from_data("alpha-image", ImageData::new(&pixels, 1, 1)).unwrap();
+        let display = DisplayList::from_commands(vec![DrawCommand::Image {
+            x: 0.0,
+            y: 0.0,
+            width: 64.0,
+            height: 64.0,
+            source,
+            source_rect: ImageSourceRect::default(),
+            radius: Radius::default(),
+            grayscale: false,
+        }]);
+        renderer.render(&display).unwrap();
+        let pixels = renderer.read_rgba().expect("alpha image reads back");
+        let index = ((32 * 64 + 32) * 4) as usize;
+        assert!((125..=130).contains(&pixels[index]));
+        assert!((125..=130).contains(&pixels[index + 3]));
     }
 
     #[test]
@@ -553,6 +659,39 @@ mod tests {
             .unwrap_or(0);
         // Ten wide glyphs advance past the old approximate scissor (~91px).
         assert!(rightmost >= 100, "text ink must reach past 100px, got {rightmost}");
+    }
+
+    #[test]
+    fn fallback_glyphs_draw_through_the_shared_layout() {
+        let Some(stack) = crate::font::default_font_stack() else {
+            return;
+        };
+        if stack.face_for('\u{4f60}', false).is_none() {
+            return;
+        }
+        let size = RenderSize::new(96, 48);
+        let Some(mut renderer) = WgpuRenderer::new(size).ok() else {
+            return;
+        };
+        let display = DisplayList::from_commands(vec![DrawCommand::Text {
+            x: 4.0,
+            y: 4.0,
+            text: "\u{4f60}\u{597d}".to_string(),
+            font_size: 24.0,
+            weight: 400,
+            italic: false,
+            mono: false,
+            family: None,
+            color: Color::WHITE,
+            max_width: None,
+            alignment: crate::paint::TextAlignment::Start,
+        }]);
+        renderer.render(&display).unwrap();
+        let pixels = renderer.read_rgba().expect("the fallback text reads back");
+        assert!(
+            pixels.as_chunks::<4>().0.iter().any(|pixel| pixel[3] > 0),
+            "a glyph supplied by the fallback face must reach the atlas"
+        );
     }
 
     #[test]

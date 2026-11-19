@@ -1,4 +1,4 @@
-WebView is a separate `myrust-core` window content, not a layer inside NativeUi. `WindowContent::WebView` and `WindowContent::NativeUi` are mutually exclusive for one window.
+A WebView has two modes: a full-window `WindowContent::WebView`, or an embedded region created with `Context::web_view` inside a `WindowContent::NativeUi` window.
 
 ```rust
 use myrust_core::app::{WindowConfig, WindowContent};
@@ -16,33 +16,64 @@ let config = WindowConfig {
 
 ## Making web views
 
-Create a WebView window through `AppContext::create_window` with `WindowContent::WebView`. `PageSource::Url`/`Html`, sessions, page options, downloads, protocols and file-drop handlers live in `myrust-core::webview`.
+Create a full-window WebView through `AppContext::create_window` with `WindowContent::WebView`. `PageSource::Url`/`Html`, sessions, page options, downloads, protocols and file-drop handlers live in `myrust-core::webview`.
 
-There is no `WebView` widget in `myrust-ui`; no native UI API creates a web page surface.
+Create an embedded region through `myrust_core::ui`:
+
+```rust
+use myrust_core::ui::{NativeUi, WebViewPermissionPolicy};
+
+let view = NativeUi::new(|c| {
+    c.column().padding(16.0).children(|c| {
+        c.web_view("docs", 480.0, 320.0)
+            .url("about:blank")
+            .initialization_script("window.embedded = true;")
+            .permissions(WebViewPermissionPolicy::DenyAll);
+    });
+});
+```
+
+The region id is stable across frames. `.html(...)`, `.transparent(true)`, `.navigation(...)`, `.permissions(...)`, `.size(...)`, `.flex_grow(...)` and `.visible(false)` configure it.
 
 ## Its box
 
-A WebView fills its native window content box; it is not positioned by the flex layout of a NativeUi window. There is no mixed window with one WebView child among native controls.
+A full-window WebView fills its native window content box. An embedded region is a normal flex node: it occupies its declared or intrinsic size, follows gaps/padding, and moves with ancestor scroll views.
+
+Each frame returns the region in `ViewFrame::web_views` with logical bounds, the effective clip rectangle, physical-pixel bounds/clip, `visible` and `z_order`. The region itself emits no drawing command.
 
 ### Scaled with the native UI around it
 
-No native-UI-scaled WebView exists. Window DPI scales the WebView as platform chrome; a transform in a DisplayList cannot scale a WebView surface because they are different windows/compositors.
+A full-window WebView is scaled by window DPI as one platform view. An embedded region is positioned and sized in physical pixels from the NativeUi window's scale factor, so it follows window resize and monitor DPI changes.
+
+A DisplayList transform does not scale either surface: the WebView is a platform child view, not a texture composited by the UI renderer.
 
 ## What shows over it
 
-Native UI overlays/popovers cannot paint above the WebView's OS surface in the same window. Use a separate native/panel window for chrome above it, or keep WebView-only content.
+Native UI overlays/popovers cannot paint above a full-window WebView or an embedded region. Native child views are above the GPU/CPU picture. Use a separate native/panel window for chrome that must cover a page.
 
 ## Keys the page leaves
 
 WebView keyboard handling stays in the page/platform WebView; NativeUi key events are separate. There is no shared focus or “unhandled key bubbles to native UI” bridge.
 
+For an embedded region, a click inside it focuses the WebView and a click on native UI content returns focus to the parent window. This is host-level focus transfer, not shared key routing.
+
 ## Scrolling the native UI around it
 
-Native UI cannot scroll around a live WebView surface in the same window; native scrolling and WebView scrolling are independent. A WebView window can scroll its page; a native window can scroll native content.
+A full-window WebView fills the window; native UI cannot scroll around it.
+
+An embedded region participates in native scrolling: its logical and physical bounds include ancestor scroll offsets, and its clip is the intersection of the window and ancestor scroll/clip rectangles. wry has no per-view scissor, so partial clipping shrinks the native view instead of cropping the page; fully clipped regions are hidden.
+
+## Security
+
+Embedded regions use `WebViewNavigationPolicy::AllowAll`/`DenyAll`/`AllowHosts` and `WebViewPermissionPolicy::PlatformDefault`/`DenyAll`/`AllowAll`, applied on top of `WebViewConfig`. `AllowHosts` matches a host and its subdomains; `about:blank` is allowed. Platform backends report the initial document load through the navigation handler too, so the policy must admit the starting URL.
+
+`untrusted` remains a recorded flag only; it does not create a trusted/untrusted partition.
 
 ## Its page
 
-Page source, history, IPC, sessions and file drops are `myrust-core` WebView concerns. Read `WebViewConfig`, `PageOptions`, `Session`, `PageHandle` and `ipc` there; this page only records the composition boundary.
+Page source, history, IPC, sessions and file drops are `myrust-core` WebView concerns. Read `WebViewConfig`, `PageOptions`, `Session`, `PageHandle` and `ipc` there.
+
+Embedded regions install the same IPC bridge: page requests reach `IpcRouter` and replies resolve the promise. There is no public per-region `PageHandle`, file-drop wiring or Rust-to-JS push API in this batch. `App::emit`, `App::evaluate_script`, `App::reload` and `App::page` still target a full-window `WindowContent::WebView`.
 
 ### The typed client
 
@@ -50,8 +81,10 @@ Page source, history, IPC, sessions and file drops are `myrust-core` WebView con
 
 ## Limits
 
-No same-window native+web composition, no native overlay over WebView, no shared focus/key routing, no WebView scaling by DisplayList transform, no WASM/browser target. No demo exists in `/docs-demo`; the wasm UI demo is not a WebView.
+No WebView snapshot in a wgpu texture, no native overlay over a WebView, no shared focus/key routing, no DisplayList transform/rotation for a WebView, and no runtime restacking between existing region views. Multiple regions are created in `z_order`; the platform stack does not change when that order changes.
+
+Creation failure or an unsupported target is explicit through `App::native_ui_last_error`; the window keeps rendering native UI content instead of pretending the page exists. WASM/browser builds record region geometry but create no native view.
 
 ## Testing
 
-WebView behavior is tested in `myrust-core`/host integration, not headless NativeUi tests. Native UI rendering can be tested with `NativeUi::render`; WebView needs a platform WebView and window handle. There is no unit-level WebView surface in `myrust-ui`.
+Region layout, clipping, physical conversion and the sync plan are unit-tested without a display. Native UI rendering can be tested with `NativeUi::render`. Creating a real wry view needs a desktop display and the system WebView, so that smoke test is ignored by default and run explicitly on a real machine.

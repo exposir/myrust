@@ -30,6 +30,49 @@ impl TextInputState {
     }
 }
 
+/// Active input-method preedit text and caret.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CompositionState {
+    /// Current preedit text.
+    pub text: String,
+    /// Caret as a byte offset inside `text`.
+    pub cursor: usize,
+}
+
+/// Clipboard boundary used by text controls.
+pub trait ClipboardProvider {
+    /// Reads UTF-8 text. `None` means the clipboard is empty or unavailable.
+    fn read_text(&mut self) -> Option<String>;
+    /// Writes UTF-8 text, returning whether the platform accepted it.
+    fn write_text(&mut self, text: &str) -> bool;
+}
+
+/// Deterministic in-memory clipboard used by tests and headless hosts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemoryClipboard {
+    /// Current clipboard contents.
+    pub text: String,
+}
+
+impl MemoryClipboard {
+    /// Creates an empty clipboard.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl ClipboardProvider for MemoryClipboard {
+    fn read_text(&mut self) -> Option<String> {
+        Some(self.text.clone())
+    }
+
+    fn write_text(&mut self, text: &str) -> bool {
+        self.text.clear();
+        self.text.push_str(text);
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,5 +124,13 @@ mod tests {
         assert_eq!(after.selection, None);
         context.produce().unwrap();
         context.end_frame();
+    }
+
+    #[test]
+    fn memory_clipboard_is_a_deterministic_provider() {
+        let mut clipboard = MemoryClipboard::new();
+        assert_eq!(clipboard.read_text(), Some(String::new()));
+        assert!(clipboard.write_text("selected text"));
+        assert_eq!(clipboard.read_text().as_deref(), Some("selected text"));
     }
 }

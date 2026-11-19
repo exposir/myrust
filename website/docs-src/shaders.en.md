@@ -24,7 +24,7 @@ There are no uniforms, uniform buffers, bindings, textures or per-draw parameter
 
 ## Images
 
-`ImageData`/`image` carries decoded RGBA8 into a draw command, but the CPU presenter currently reports images unsupported; there is no image shader or sampler. GPU image sampling, texture atlases and render targets are absent.
+`ImageData`/`image` carries decoded RGBA8 into one image command. The CPU presenter samples it bilinearly; the optional GPU presenter uploads content-versioned `RGBA8` or opaque-grayscale `R8` textures and samples them through an internal image shader. That sampler is fixed and not a public custom-shader surface.
 
 ## Errors and cost
 

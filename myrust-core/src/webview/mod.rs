@@ -8,7 +8,7 @@ use std::{fmt, path::PathBuf, sync::Arc};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tao::window::Window;
-use wry::{DragDropEvent, WebViewBuilder};
+use wry::{DragDropEvent, PermissionKind, PermissionResponse, WebViewBuilder};
 
 use crate::{
     desktop::{
@@ -45,6 +45,73 @@ impl Default for PageSource {
     fn default() -> Self {
         Self::Url("about:blank".to_string())
     }
+}
+
+/// Navigation policy for a WebView.
+///
+/// The policy is enforced through wry's navigation handler. Backends report
+/// the initial document load there too, so `DenyAll` also blocks the starting
+/// URL; choose a policy that admits the page you load.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum NavigationPolicy {
+    /// Allow every navigation.
+    #[default]
+    AllowAll,
+    /// Block every subsequent navigation.
+    DenyAll,
+    /// Allow `about:blank` and these hosts and their subdomains.
+    AllowHosts(Vec<String>),
+}
+
+impl NavigationPolicy {
+    /// Returns whether a navigation target is allowed.
+    pub(crate) fn allows(&self, url: &str) -> bool {
+        match self {
+            Self::AllowAll => true,
+            Self::DenyAll => false,
+            Self::AllowHosts(hosts) => {
+                if url.eq_ignore_ascii_case("about:blank") {
+                    return true;
+                }
+                let Some(host) = host_of(url) else {
+                    return false;
+                };
+                hosts.iter().any(|allowed| {
+                    let allowed = allowed.trim().trim_end_matches('.').to_ascii_lowercase();
+                    !allowed.is_empty()
+                        && (host == allowed || host.ends_with(&format!(".{allowed}")))
+                })
+            }
+        }
+    }
+}
+
+/// Permission policy for a WebView.
+///
+/// The platform backend still decides which permission kinds it can ask
+/// about; the policy only answers requests it receives.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum PermissionPolicy {
+    /// Use the platform's prompt and persistence behavior.
+    #[default]
+    PlatformDefault,
+    /// Deny every permission request.
+    DenyAll,
+    /// Allow every permission request.
+    AllowAll,
+}
+
+/// Region-only WebView options layered over [`WebViewConfig`].
+///
+/// The public window WebView configuration stays unchanged; embedded regions
+/// add initialization scripts, transparency and the navigation/permission
+/// policies through this wrapper.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RegionPolicy {
+    pub(crate) initialization_scripts: Vec<String>,
+    pub(crate) transparent: bool,
+    pub(crate) navigation: NavigationPolicy,
+    pub(crate) permissions: PermissionPolicy,
 }
 
 /// WebView creation options.
@@ -136,6 +203,82 @@ impl WebViewHandle {
         ipc_handler: IpcMessageHandler,
         transparent: bool,
     ) -> Result<Self> {
+        Self::new_with_policy(
+            parent,
+            config,
+            RegionPolicy::default(),
+            ipc_handler,
+            transparent,
+        )
+    }
+
+    fn new_with_policy(
+        parent: &Window,
+        config: WebViewConfig,
+        policy: RegionPolicy,
+        ipc_handler: IpcMessageHandler,
+        transparent: bool,
+    ) -> Result<Self> {
+        let (builder, page_options, session) =
+            Self::prepare_builder(config, policy, ipc_handler, transparent);
+
+        #[cfg(target_os = "linux")]
+        let webview = {
+            use tao::platform::unix::WindowExtUnix;
+            use wry::WebViewBuilderExtUnix;
+
+            let vbox = parent
+                .default_vbox()
+                .context("Tao window did not expose a GTK container")?;
+            builder.build_gtk(vbox)?
+        };
+
+        #[cfg(not(target_os = "linux"))]
+        let webview = builder.build(parent)?;
+
+        Self::finish(webview, page_options, session)
+    }
+
+    /// Creates a positioned child WebView for a NativeUi region.
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn new_child(
+        parent: &Window,
+        config: WebViewConfig,
+        policy: RegionPolicy,
+        ipc_handler: IpcMessageHandler,
+        transparent: bool,
+        bounds: wry::Rect,
+    ) -> Result<Self> {
+        let (builder, page_options, session) =
+            Self::prepare_builder(config, policy, ipc_handler, transparent);
+        let webview = builder.with_bounds(bounds).build_as_child(parent)?;
+        Self::finish(webview, page_options, session)
+    }
+
+    /// Creates a positioned child WebView in a GTK fixed container.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn new_gtk_child(
+        parent: &gtk::Fixed,
+        config: WebViewConfig,
+        policy: RegionPolicy,
+        ipc_handler: IpcMessageHandler,
+        transparent: bool,
+        bounds: wry::Rect,
+    ) -> Result<Self> {
+        use wry::WebViewBuilderExtUnix;
+
+        let (builder, page_options, session) =
+            Self::prepare_builder(config, policy, ipc_handler, transparent);
+        let webview = builder.with_bounds(bounds).build_gtk(parent)?;
+        Self::finish(webview, page_options, session)
+    }
+
+    fn prepare_builder(
+        config: WebViewConfig,
+        policy: RegionPolicy,
+        ipc_handler: IpcMessageHandler,
+        transparent: bool,
+    ) -> (WebViewBuilder<'static>, PageOptions, Option<Session>) {
         let WebViewConfig {
             source,
             devtools,
@@ -162,7 +305,13 @@ impl WebViewHandle {
         })
         .with_devtools(effective_devtools)
         .with_incognito(incognito)
-        .with_transparent(transparent);
+        .with_transparent(transparent || policy.transparent)
+        .with_navigation_handler(move |url| policy.navigation.allows(&url))
+        .with_permission_handler(move |kind| permission_response(policy.permissions, kind));
+
+        for script in policy.initialization_scripts {
+            builder = builder.with_initialization_script(script);
+        }
 
         if let Some(user_agent) = &page_options.user_agent {
             builder = builder.with_user_agent(user_agent);
@@ -223,20 +372,14 @@ impl WebViewHandle {
             });
         }
 
-        #[cfg(target_os = "linux")]
-        let webview = {
-            use tao::platform::unix::WindowExtUnix;
-            use wry::WebViewBuilderExtUnix;
+        (builder, page_options, session)
+    }
 
-            let vbox = parent
-                .default_vbox()
-                .context("Tao window did not expose a GTK container")?;
-            builder.build_gtk(vbox)?
-        };
-
-        #[cfg(not(target_os = "linux"))]
-        let webview = builder.build(parent)?;
-
+    fn finish(
+        webview: wry::WebView,
+        page_options: PageOptions,
+        session: Option<Session>,
+    ) -> Result<Self> {
         if page_options.zoom != 1.0 {
             webview
                 .zoom(page_options.zoom)
@@ -267,6 +410,47 @@ impl WebViewHandle {
 
     pub(crate) fn webview_ref(&self) -> &wry::WebView {
         &self.webview
+    }
+
+    /// Positions the native view.
+    ///
+    /// `bounds` is in device pixels; wry's DPI-aware rectangle keeps physical
+    /// values unchanged on Windows and divides them back to logical units
+    /// where the platform backend expects them.
+    pub(crate) fn set_bounds(&self, bounds: wry::Rect) -> Result<()> {
+        self.webview
+            .set_bounds(bounds)
+            .context("failed to position child WebView")
+    }
+
+    /// Shows or hides the native view.
+    pub(crate) fn set_visible(&self, visible: bool) -> Result<()> {
+        self.webview
+            .set_visible(visible)
+            .context("failed to change child WebView visibility")
+    }
+
+    /// Moves keyboard focus into the native view.
+    pub(crate) fn focus(&self) -> Result<()> {
+        self.webview
+            .focus()
+            .context("failed to focus child WebView")
+    }
+
+    /// Moves keyboard focus back to the parent window.
+    pub(crate) fn focus_parent(&self) -> Result<()> {
+        self.webview
+            .focus_parent()
+            .context("failed to return focus from child WebView")
+    }
+
+    /// Returns the GTK widget backing this WebView.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn gtk_widget(&self) -> gtk::Widget {
+        use gtk::prelude::*;
+        use wry::WebViewExtUnix;
+
+        self.webview.webview().upcast()
     }
 
     /// Evaluates JavaScript in the current page.
@@ -312,6 +496,31 @@ impl WebViewHandle {
     }
 }
 
+fn permission_response(policy: PermissionPolicy, _kind: PermissionKind) -> PermissionResponse {
+    match policy {
+        PermissionPolicy::PlatformDefault => PermissionResponse::Default,
+        PermissionPolicy::DenyAll => PermissionResponse::Deny,
+        PermissionPolicy::AllowAll => PermissionResponse::Allow,
+    }
+}
+
+/// Returns the lower-case host of an absolute URL.
+fn host_of(url: &str) -> Option<String> {
+    let (_, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let authority = authority.rsplit('@').next()?;
+    if let Some(rest) = authority.strip_prefix('[') {
+        let end = rest.find(']')?;
+        return Some(rest[..end].to_ascii_lowercase());
+    }
+    let host = authority
+        .split(':')
+        .next()?
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    (!host.is_empty()).then_some(host)
+}
+
 fn convert_file_drop_event(event: DragDropEvent) -> Option<FileDropEvent> {
     match event {
         DragDropEvent::Enter { paths, position } => Some(FileDropEvent {
@@ -345,6 +554,112 @@ fn position_to_logical(position: (i32, i32)) -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wry::dpi::{PhysicalPosition, PhysicalSize};
+
+    #[test]
+    fn navigation_policy_matches_hosts_and_subdomains() {
+        let policy = NavigationPolicy::AllowHosts(vec!["example.com".to_string()]);
+
+        assert!(policy.allows("https://example.com/docs"));
+        assert!(policy.allows("https://docs.example.com/docs"));
+        assert!(policy.allows("about:blank"));
+        assert!(!policy.allows("https://evil-example.com/"));
+        assert!(!policy.allows("https://example.com.evil.test/"));
+        assert!(!policy.allows("file:///tmp/page.html"));
+    }
+
+    #[test]
+    fn navigation_policy_handles_ports_userinfo_and_ipv6() {
+        let policy = NavigationPolicy::AllowHosts(vec!["example.com".to_string()]);
+        assert!(policy.allows("https://user@example.com:8443/x"));
+
+        let ipv6 = NavigationPolicy::AllowHosts(vec!["::1".to_string()]);
+        assert!(ipv6.allows("http://[::1]:8080/"));
+    }
+
+    #[test]
+    fn deny_navigation_policy_blocks_every_target() {
+        assert!(!NavigationPolicy::DenyAll.allows("about:blank"));
+        assert!(!NavigationPolicy::DenyAll.allows("https://example.com/"));
+        assert!(NavigationPolicy::AllowAll.allows("https://example.com/"));
+    }
+
+    #[test]
+    fn permission_policy_maps_to_wry_responses() {
+        assert_eq!(
+            permission_response(PermissionPolicy::PlatformDefault, PermissionKind::Camera),
+            PermissionResponse::Default
+        );
+        assert_eq!(
+            permission_response(PermissionPolicy::DenyAll, PermissionKind::Microphone),
+            PermissionResponse::Deny
+        );
+        assert_eq!(
+            permission_response(PermissionPolicy::AllowAll, PermissionKind::Geolocation),
+            PermissionResponse::Allow
+        );
+    }
+
+    #[test]
+    #[ignore = "needs a desktop display and the platform system WebView; run explicitly"]
+    fn child_webview_accepts_bounds_and_visibility() {
+        use tao::{event_loop::EventLoop, window::WindowBuilder};
+
+        let event_loop = EventLoop::new();
+        let window = WindowBuilder::new()
+            .with_visible(false)
+            .build(&event_loop)
+            .expect("window");
+        let rect = wry::Rect {
+            position: PhysicalPosition::new(0, 0).into(),
+            size: PhysicalSize::new(120, 80).into(),
+        };
+        let config = WebViewConfig {
+            source: PageSource::Url("about:blank".to_string()),
+            ..WebViewConfig::default()
+        };
+        let handler: IpcMessageHandler = Arc::new(|_| {});
+
+        #[cfg(target_os = "linux")]
+        let handle = {
+            use gtk::prelude::*;
+            use tao::platform::unix::WindowExtUnix;
+
+            let vbox = window.default_vbox().expect("GTK container");
+            let fixed = gtk::Fixed::new();
+            vbox.pack_start(&fixed, true, true, 0);
+            fixed.show_all();
+            WebViewHandle::new_gtk_child(
+                &fixed,
+                config,
+                RegionPolicy::default(),
+                handler,
+                false,
+                rect,
+            )
+            .expect("webview")
+        };
+
+        #[cfg(not(target_os = "linux"))]
+        let handle =
+            WebViewHandle::new_child(
+                &window,
+                config,
+                RegionPolicy::default(),
+                handler,
+                false,
+                rect,
+            )
+            .expect("webview");
+
+        handle
+            .set_bounds(wry::Rect {
+                position: PhysicalPosition::new(10, 10).into(),
+                size: PhysicalSize::new(100, 60).into(),
+            })
+            .expect("bounds");
+        handle.set_visible(false).expect("hide");
+    }
 
     #[test]
     fn converts_drop_paths_and_position() {

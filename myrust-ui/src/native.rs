@@ -11,9 +11,12 @@ use super::context::Context;
 use super::event::{InteractiveRegion, UiEvent};
 use super::layout::{LayoutResult, Size};
 use super::paint::DisplayList;
+use super::performance::FrameStats;
 use super::render::{RenderStats, RendererKind};
 use super::text_input::TextInputState;
 use super::theme::Theme;
+use super::time::Instant;
+use super::web_view::WebViewRegion;
 
 /// Complete output of one immediate-mode frame.
 #[derive(Debug, Clone, Default)]
@@ -24,8 +27,15 @@ pub struct ViewFrame {
     pub display: DisplayList,
     /// Button interaction regions from this frame.
     pub interactions: Vec<InteractiveRegion>,
+    /// System WebView regions requested by this frame.
+    ///
+    /// The UI crate records geometry and configuration only; the host creates
+    /// and positions the platform views.
+    pub web_views: Vec<WebViewRegion>,
     /// CPU-side command statistics.
     pub stats: RenderStats,
+    /// Build, layout and paint timing for this frame.
+    pub frame_stats: FrameStats,
     /// Accessibility metadata for this frame.
     pub access_nodes: Vec<AccessNode>,
     /// Caret and geometry of the text field that has the focus, for a host
@@ -34,9 +44,9 @@ pub struct ViewFrame {
     pub text_input: Option<TextInputState>,
     /// Whether another frame is needed to finish an active animation.
     ///
-    /// The application requests a best-effort redraw while this is true. There
-    /// is no private timer-driven frame scheduler; on Linux this relies on the
-    /// host event loop's `request_redraw` wakeup behavior.
+    /// [`NativeUi::next_animation_frame`] carries the deadline for a host that
+    /// wants to sleep instead of polling. This flag only says that work
+    /// remains.
     pub needs_animation_frame: bool,
     /// Whether the final frame consumed pending input from the host window.
     ///
@@ -67,6 +77,8 @@ pub struct NativeUi {
     preview: bool,
     /// Device pixels the host draws per logical pixel.
     pixel_scale: std::cell::Cell<f32>,
+    /// Deadline computed by the most recent frame.
+    next_animation_frame: Rc<std::cell::Cell<Option<Instant>>>,
 }
 
 impl fmt::Debug for NativeUi {
@@ -92,6 +104,7 @@ impl NativeUi {
             theme: Theme::dark(),
             preview: false,
             pixel_scale: std::cell::Cell::new(1.0),
+            next_animation_frame: Rc::new(std::cell::Cell::new(None)),
         }
     }
 
@@ -123,6 +136,15 @@ impl NativeUi {
         self.renderer_kind
     }
 
+    /// Earliest instant at which the next frame has work to do.
+    ///
+    /// The value comes from the most recent [`Context`] frame. A host with a
+    /// timer-driven event loop can wait until this instant instead of polling
+    /// while [`ViewFrame::needs_animation_frame`] is true.
+    pub fn next_animation_frame(&self) -> Option<Instant> {
+        self.next_animation_frame.get()
+    }
+
     /// Sets the theme used by the immediate-mode context.
     pub fn with_theme(mut self, theme: Theme) -> Self {
         self.theme = theme;
@@ -132,6 +154,19 @@ impl NativeUi {
     /// Returns the theme applied to the next immediate-mode frame.
     pub fn theme(&self) -> &Theme {
         &self.theme
+    }
+
+    /// Installs the clipboard used by focused text controls.
+    pub fn set_clipboard_provider(
+        &self,
+        clipboard: impl super::text_input::ClipboardProvider + 'static,
+    ) -> Result<(), NativeUiError> {
+        let mut runtime = self
+            .runtime
+            .try_borrow_mut()
+            .map_err(|_| NativeUiError::Busy)?;
+        runtime.context.set_clipboard_provider(clipboard);
+        Ok(())
     }
 
     /// Stores one platform-neutral input event for the next frame.
@@ -190,6 +225,7 @@ impl NativeUi {
         for event in events {
             context.set_input(event);
         }
+        let build_start = Instant::now();
         if self.preview {
             context
                 .column()
@@ -201,9 +237,12 @@ impl NativeUi {
         } else {
             (render)(context);
         }
+        context.set_frame_build_time(build_start.elapsed());
+        let next_animation_frame = context.next_animation_frame();
         let mut frame = context.produce().map_err(NativeUiError::Render)?;
         frame.input_consumed = input_consumed;
         frame.text_input = context.focused_text_input();
+        self.next_animation_frame.set(next_animation_frame);
         context.end_frame();
         Ok(frame)
     }
@@ -325,6 +364,21 @@ mod tests {
             .unwrap();
         ui.render(Size::new(100.0, 100.0)).unwrap();
         assert_eq!(*observed.borrow(), (12.0, 34.0));
+    }
+
+    #[test]
+    fn next_animation_frame_is_absent_when_idle_and_present_while_animating() {
+        let idle = NativeUi::new(|_| {});
+        idle.render(Size::new(100.0, 80.0)).unwrap();
+        assert_eq!(idle.next_animation_frame(), None);
+
+        let animated = NativeUi::new(|context| {
+            context.animate("panel", 0.0);
+            context.animate("panel", 1.0);
+        });
+        let frame = animated.render(Size::new(100.0, 80.0)).unwrap();
+        assert!(frame.needs_animation_frame);
+        assert!(animated.next_animation_frame().is_some());
     }
 
     #[test]

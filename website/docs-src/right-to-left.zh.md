@@ -16,7 +16,7 @@ c.with_direction(Direction::Rtl, |c| {
 
 `Direction::Ltr` 与 `Direction::Rtl` 是公开值。`Context::direction()` 读取，`set_direction` 改变后续节点，`with_direction(direction, closure)` 限定作用域并在结束后恢复。
 
-`Direction` 不是 locale，也不是 CSS 属性。它不改变文字 shaping、段落基础方向或数字格式；只驱动布局顺序与少量呈现默认值。
+`Direction` 不是 locale，也不是 CSS 属性。它驱动布局顺序与少量呈现默认值；shaping feature 与 Unicode bidi 解析由文本和字体栈决定，不由这个布局枚举设置。它也不设置段落基础方向或数字格式。
 
 ## What mirrors
 
@@ -28,7 +28,7 @@ overlay 和普通 column 保持物理位置；只有 row 子序与已记录默�
 
 padding、margin、border 是物理边，不交换。滚动条位置、split-view 分隔条顺序、grid 列顺序、`left`/`top` 偏移与绝对定位都不翻转。
 
-任意 `SvgPath`、图片、bidi 文本 run、标点、URL 与数字不镜像/重排。混合方向文本没有 shaping/bidi 算法；除非调用方拆分，renderer 按单一从左到右字符串布局。
+任意 `SvgPath` 与图片不镜像。文本 run 由共享 Unicode bidi 布局重排；标点、URL 与数字遵循该算法，但不会被 `Direction` 单独镜像。
 
 ## Trying it
 

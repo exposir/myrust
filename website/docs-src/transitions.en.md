@@ -1,4 +1,4 @@
-A transition interpolates one `Rect` toward a target. `TransitionState` is caller-owned; the first call initializes at the target, a changed target starts a new animation from the current interpolated rectangle.
+A transition interpolates one value toward a target. `TransitionState` handles bounds; `ColorTransition`, `OpacityTransition`, `SizeTransition` and `PositionTransition` cover the other common drawing and layout values. All are caller-owned: the first call initializes at the target, a changed target starts a new animation from the current interpolated value.
 
 ```rust
 use myrust_core::ui::{transition, Rect, TransitionState};
@@ -12,9 +12,23 @@ The returned `TransitionFrame` has `bounds`, `progress`, `done` and `retargeted`
 
 ## What moves
 
-Only bounds animate. Color, opacity, corner radius, border, shadow, text contents and z-order have no transition primitive. Animate those by reading `frame.progress` and rebuilding `Color`/commands each frame.
+Bounds, color, opacity, size and position have transition primitives. Corner radius, border, shadow, text contents and z-order do not; animate those by rebuilding commands from a caller-owned value.
 
-`TransitionState.animation` sets duration/easing for future retargets. `instant_state()` creates a zero-duration linear state for callers that want no animation.
+```rust
+use myrust_core::ui::{color_transition, Animation, Color, ColorTransition};
+
+let mut fade = ColorTransition::new(Animation::default());
+let frame = color_transition(c, &mut fade, Color::rgb(34, 211, 238));
+let color = frame.value;
+```
+
+`OpacityTransition` is a scalar clamped to `0.0..=1.0` by `opacity_transition`. `SizeTransition` and `PositionTransition` interpolate `Size` and `Point`. All use the same `Animation` duration/easing and expose `progress`, `done` and `retargeted` through `TransitionValueFrame`.
+
+`TransitionState.animation` and `ValueTransition.animation` set duration/easing for future retargets. `instant_state()` creates a zero-duration linear bounds state for callers that want no animation.
+
+Transitions retarget from the current value but do not carry velocity. Use `Spring` when an interrupted motion should preserve momentum. `ValueTransition::step(dt)` advances without a clock, which keeps tests deterministic.
+
+For keyed `Context` scalars, `animate_spring` / `animate_spring_with` preserve velocity across retargets and participate in `next_animation_frame()`. Use transitions for bounds/color/size/position records and springs for momentum.
 
 ## Coming and going
 
@@ -26,11 +40,11 @@ No exit state is tracked by the UI. If removal depends on layout or scrolling, t
 
 ### One at a time
 
-There is no queue or “one transition at a time” coordinator. One `TransitionState` interpolates one rectangle; multiple elements need multiple states.
+There is no queue or “one transition at a time” coordinator. One state interpolates one value; multiple elements need multiple states.
 
 ### Timing the exit
 
-There is no exit-duration separate from the main animation, no delay, and no cancellation callback. Set `TransitionState.animation` or use `instant_state`; all timing comes from that one `Animation`.
+There is no exit-duration separate from the main animation, no delay, and no cancellation callback. Set the state's `animation` or use `instant_state`; all timing comes from that one `Animation`.
 
 ## Shared elements
 
@@ -42,7 +56,7 @@ There is no shared-element transition, keyed element matching or cross-page flyi
 
 ### Everything else
 
-Only geometry is interpolated. A caller crossing containers must draw the animated content at the interpolated rectangle itself; no source/target widget is cloned.
+Only the selected value is interpolated. A caller crossing containers must draw the animated content at the interpolated rectangle itself; no source/target widget is cloned.
 
 ### Scaled content
 
@@ -54,6 +68,6 @@ No text morphing, cross-fade or glyph interpolation exists. Text is rebuilt each
 
 ## When nothing moves
 
-`transition` initializes directly at the target on first use, so a newly created state does not animate in. A target equal to `state.to` does not restart. Reduce-motion makes caller-side animations jump only if the caller checks `Context::reduce_motion`; `transition` itself still uses its animation duration.
+`transition` and `value_transition` initialize directly at the target on first use, so a newly created state does not animate in. A target equal to the current target does not restart. Reduce-motion makes caller-side animations jump only if the caller checks `Context::reduce_motion`; transitions themselves still use their animation duration.
 
-For no motion at all, use `instant_state()` or zero-duration `Animation`; no global “disable transitions” switch exists.
+`complete()` snaps a bounds or value transition to its target and `cancel()` freezes it at the current value. For no motion at all, use `instant_state()` or zero-duration `Animation`; no global “disable transitions” switch exists.

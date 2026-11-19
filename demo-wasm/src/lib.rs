@@ -38,6 +38,7 @@ use myrust_ui::{
     RichTextSpan,
     GradientStop, Point, SegmentFace, SortDirection,
 };
+use myrust_ui::ClipboardProvider;
 
 thread_local! {
     static APP: RefCell<Option<DemoApp>> = const { RefCell::new(None) };
@@ -54,6 +55,22 @@ thread_local! {
     /// an input method shows its candidates at the caret, as MyGo's web
     /// surface does (`internal/web/surface.go` SetTextInput).
     static TEXT_INPUT: Cell<[f32; 4]> = const { Cell::new([0.0; 4]) };
+    /// Clipboard text handed across the synchronous wasm boundary. JavaScript
+    /// fills it before invoking paste and reads it after copy/cut.
+    static CLIPBOARD: RefCell<myrust_ui::MemoryClipboard> =
+        RefCell::new(myrust_ui::MemoryClipboard::new());
+}
+
+struct WasmClipboard;
+
+impl myrust_ui::ClipboardProvider for WasmClipboard {
+    fn read_text(&mut self) -> Option<String> {
+        CLIPBOARD.with(|clipboard| clipboard.borrow_mut().read_text())
+    }
+
+    fn write_text(&mut self, text: &str) -> bool {
+        CLIPBOARD.with(|clipboard| clipboard.borrow_mut().write_text(text))
+    }
 }
 
 /// Capacity of the buffer `demo_host_buffer` hands to the page.
@@ -1032,6 +1049,7 @@ impl DemoApp {
         // The game pages are applications, not demo cards: they own the
         // whole window, so the preview's padding would leave a white frame.
         .with_preview(!matches!(slug, 84..=86));
+        let _ = ui.set_clipboard_provider(WasmClipboard);
         Self {
             slug,
             ui,
@@ -1727,7 +1745,45 @@ fn serialize_commands(commands: &[DrawCommand], dpr: f32, font: Option<&FontFace
                     push_color(&mut buffer, stop.color);
                 }
             }
-            DrawCommand::Image { .. } => {}
+            DrawCommand::Image {
+                x,
+                y,
+                width,
+                height,
+                source,
+                source_rect,
+                radius,
+                grayscale,
+            } => {
+                let Some(data) = source.data() else {
+                    continue;
+                };
+                buffer.push(12);
+                for value in [*x, *y, *width, *height] {
+                    buffer.extend_from_slice(&value.to_le_bytes());
+                }
+                for value in [
+                    radius.top_left,
+                    radius.top_right,
+                    radius.bottom_right,
+                    radius.bottom_left,
+                    source_rect.x,
+                    source_rect.y,
+                    source_rect.width,
+                    source_rect.height,
+                ] {
+                    buffer.extend_from_slice(&value.to_le_bytes());
+                }
+                buffer.push(u8::from(*grayscale));
+                let id = source.as_str().as_bytes();
+                buffer.extend_from_slice(&(id.len() as u32).to_le_bytes());
+                buffer.extend_from_slice(id);
+                buffer.extend_from_slice(&source.version().to_le_bytes());
+                buffer.extend_from_slice(&data.width().to_le_bytes());
+                buffer.extend_from_slice(&data.height().to_le_bytes());
+                buffer.extend_from_slice(&(data.pixels().len() as u32).to_le_bytes());
+                buffer.extend_from_slice(data.pixels());
+            }
         }
     }
     buffer
@@ -8609,6 +8665,9 @@ pub extern "C" fn demo_key(code: u32) {
         12 => myrust_ui::Key::End,
         13 => myrust_ui::Key::PageUp,
         14 => myrust_ui::Key::PageDown,
+        15 => myrust_ui::Key::Copy,
+        16 => myrust_ui::Key::Cut,
+        17 => myrust_ui::Key::Paste,
         _ => return,
     };
     APP.with(|cell| {
@@ -8721,5 +8780,68 @@ pub extern "C" fn demo_text(codepoint: u32) {
         let _ = app.ui.input(myrust_ui::UiEvent::TextInput {
             text: character.to_string(),
         });
+    });
+}
+
+/// Stores UTF-8 clipboard text from the page for the next paste shortcut.
+#[no_mangle]
+pub extern "C" fn demo_clipboard_set(byte_len: u32) {
+    let byte_len = (byte_len as usize).min(HOST_BUFFER_BYTES);
+    let mut text = String::new();
+    HOST_BUFFER.with(|buffer| {
+        let bytes = buffer.borrow();
+        if byte_len <= bytes.capacity() {
+            // SAFETY: the page wrote `byte_len` bytes through `demo_host_buffer`.
+            let slice = unsafe { std::slice::from_raw_parts(bytes.as_ptr(), byte_len) };
+            if let Ok(value) = std::str::from_utf8(slice) {
+                text.push_str(value);
+            }
+        }
+    });
+    CLIPBOARD.with(|clipboard| {
+        clipboard.borrow_mut().write_text(&text);
+    });
+}
+
+/// Copies current clipboard text into the host buffer and returns its length.
+#[no_mangle]
+pub extern "C" fn demo_clipboard_text() -> u32 {
+    let text = CLIPBOARD.with(|clipboard| {
+        clipboard
+            .borrow_mut()
+            .read_text()
+            .unwrap_or_default()
+    });
+    HOST_BUFFER.with(|buffer| {
+        let mut bytes = buffer.borrow_mut();
+        bytes.clear();
+        bytes.extend_from_slice(text.as_bytes());
+        bytes.len().min(u32::MAX as usize) as u32
+    })
+}
+
+/// Sends one input-method composition phase. `kind` is 0 start, 1 update,
+/// 2 commit, 3 cancel; the page writes UTF-8 bytes into `demo_host_buffer`.
+#[no_mangle]
+pub extern "C" fn demo_composition(kind: u32, byte_len: u32, cursor: u32) {
+    let byte_len = (byte_len as usize).min(HOST_BUFFER_BYTES);
+    let mut text = String::new();
+    HOST_BUFFER.with(|buffer| {
+        let bytes = buffer.borrow();
+        if byte_len <= bytes.capacity() {
+            // SAFETY: the page wrote `byte_len` bytes through `demo_host_buffer`.
+            let slice = unsafe { std::slice::from_raw_parts(bytes.as_ptr(), byte_len) };
+            if let Ok(value) = std::str::from_utf8(slice) {
+                text.push_str(value);
+            }
+        }
+    });
+    let Some(event) = myrust_ui::composition_from_phase(kind, text, cursor as usize) else {
+        return;
+    };
+    APP.with(|cell| {
+        let app = cell.borrow();
+        let Some(app) = app.as_ref() else { return };
+        let _ = app.ui.input(event);
     });
 }
